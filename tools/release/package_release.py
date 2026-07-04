@@ -126,6 +126,7 @@ CONFIG_EXACT_FILES = {
 
 CONFIG_PREFIXES = {
     "portable_config/script-opts",
+    "portable_config/script_helpers",
     "portable_config/scripts",
     "portable_config/vs",
 }
@@ -837,7 +838,12 @@ def verify_extracted(paths: Paths, version: str, forbidden_texts: list[str], pac
     if "base" in verify_packages:
         required_selected.update({"mpv.exe", "portable.vs", "portable_config/mpv.conf"})
     if "config" in verify_packages:
-        required_selected.update({"portable.vs", "portable_config/mpv.conf", "portable_config/scripts/rife_runtime_menu.lua"})
+        required_selected.update({
+            "portable.vs",
+            "portable_config/mpv.conf",
+            "portable_config/script_helpers/hdr_luma_heatmap.py",
+            "portable_config/scripts/rife_runtime_menu.lua",
+        })
     if "docs" in verify_packages:
         required_selected.update({"docs"})
     required = required_full if mode == "full" else required_selected
