@@ -8,7 +8,26 @@ local function join_path(...)
 end
 
 local function windows_path(path)
-    return path:gsub("/", "\\")
+    return (path:gsub("/", "\\"))
+end
+
+local function file_exists(path)
+    local file = io.open(path, "rb")
+    if file then
+        file:close()
+        return true
+    end
+    return false
+end
+
+local function open_if_exists(path, label)
+    if file_exists(path) then
+        local target = windows_path(path)
+        utils.subprocess({ args = { "cmd.exe", "/c", "start", "", target }, detach = true })
+    else
+        mp.msg.warn(label .. " was not generated: " .. path)
+        mp.osd_message("HDR亮度热力图生成不完整：" .. label .. "缺失", 4)
+    end
 end
 
 local function normalize_dir(path)
@@ -34,14 +53,14 @@ local function cleanup_old_outputs(out_dir)
 end
 
 local function run_heatmap()
-    local helper = mp.find_config_file("scripts/hdr_luma_heatmap.py")
+    local helper = mp.find_config_file("script_helpers/hdr_luma_heatmap.py")
     if not helper then
         mp.osd_message("HDR亮度热力图脚本缺失", 4)
-        mp.msg.error("scripts/hdr_luma_heatmap.py was not found in mpv config paths")
+        mp.msg.error("script_helpers/hdr_luma_heatmap.py was not found in mpv config paths")
         return
     end
-    local scripts_dir = parent_dir(helper)
-    local config_dir = parent_dir(scripts_dir)
+    local helper_dir = parent_dir(helper)
+    local config_dir = parent_dir(helper_dir)
     local mpv_dir = parent_dir(config_dir)
     local out_dir = join_path(config_dir, "_cache")
     cleanup_old_outputs(out_dir)
@@ -109,11 +128,11 @@ local function run_heatmap()
         return
     end
 
-    mp.osd_message("已生成HDR亮度热力图和峰值区域图", 2)
+    mp.osd_message("已生成HDR亮度热力图、峰值区域图和报告", 2)
     mp.msg.info(result.stdout or "")
-    utils.subprocess({ args = { "cmd.exe", "/c", "start", "", heat }, detach = true })
-    utils.subprocess({ args = { "cmd.exe", "/c", "start", "", peak }, detach = true })
-    utils.subprocess({ args = { "cmd.exe", "/c", "start", "", report }, detach = true })
+    open_if_exists(heat, "亮度热力图")
+    open_if_exists(peak, "峰值区域图")
+    open_if_exists(report, "中文报告")
 end
 
 mp.register_script_message("hdr-luma-heatmap", run_heatmap)

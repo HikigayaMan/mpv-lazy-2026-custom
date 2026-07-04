@@ -90,6 +90,13 @@ def write_png(path: pathlib.Path, width: int, height: int, rgb: bytes) -> None:
     path.write_bytes(payload)
 
 
+def peakmask_path_for(output: pathlib.Path) -> pathlib.Path:
+    stem = output.stem
+    if stem.endswith("-heatmap"):
+        stem = stem[: -len("-heatmap")]
+    return output.with_name(stem + "-peakmask" + output.suffix)
+
+
 def pq_eotf(x: float | None) -> float | None:
     if x is None:
         return None
@@ -101,6 +108,12 @@ def pq_eotf(x: float | None) -> float | None:
     v = x ** (1.0 / m2)
     v = max(v - c1, 0.0) / (c2 - c3 * v)
     return (v ** (1.0 / m1)) * 10000.0
+
+
+def format_optional_nits(value: float | None) -> str:
+    if value is None:
+        return "不可用"
+    return f"{value:.1f} nits"
 
 
 def main() -> int:
@@ -151,7 +164,7 @@ def main() -> int:
             color = (0, 0, 0)
         j = idx * 3
         peak[j : j + 3] = bytes(color)
-    peak_path = args.output.with_name(args.output.stem + "-peakmask" + args.output.suffix)
+    peak_path = peakmask_path_for(args.output)
     write_png(peak_path, width, height, bytes(peak))
 
     top_01 = sorted_luma[int((len(sorted_luma) - 1) * 0.999)]
@@ -167,32 +180,49 @@ def main() -> int:
         p90 = sorted_luma[int((len(sorted_luma) - 1) * 0.90)]
         p99 = sorted_luma[int((len(sorted_luma) - 1) * 0.99)]
         lines = [
-            "HDR luma heatmap report",
-            f"input={args.input}",
-            f"output={args.output}",
-            f"peakmask={peak_path}",
-            f"resolution={width}x{height}",
+            "HDR 亮度热力图报告",
             "",
-            "Raw screenshot luma (8-bit relative, comparable only if the screenshot pipeline is identical):",
-            f"avg={avg_luma:.2f}",
-            f"p50={p50:.2f}",
-            f"p90={p90:.2f}",
-            f"p99={p99:.2f}",
-            f"p99.9={top_01:.2f}",
-            f"max={sorted_luma[-1]:.2f}",
+            "结论先看：",
+            "- 这份报告只分析触发热力图时的当前一帧，不代表整部视频平均亮度。",
+            "- 热力图来自 mpv 截图后的 8-bit 相对亮度，不能直接当作真实 nits。",
+            "- 峰值区域图用于找当前画面里最亮的相对区域：白色最亮，红色次之，橙色/黄色再低。",
+            "- 如果 mpv 提供 PQ(Y)，下面的 max-nits/avg-nits 才更接近 HDR 输出亮度参考。",
+            "",
+            "生成文件：",
+            f"- 原始截图 PPM：{args.input}",
+            f"- 亮度热力图 PNG：{args.output}",
+            f"- 峰值区域图 PNG：{peak_path}",
+            f"- 分辨率：{width}x{height}",
+            "",
+            "峰值区域图颜色说明：",
+            "- 白色：>= 当前帧最大相对亮度的 98%",
+            "- 红色：>= 当前帧最大相对亮度的 90%",
+            "- 橙色：>= 当前帧最大相对亮度的 75%",
+            "- 黄色：>= 当前帧最大相对亮度的 60%",
+            "- 黑色：低于 60%",
+            "",
+            "当前帧截图相对亮度（0-255，来自截图管线，只适合同一环境下互相比较）：",
+            f"- avg 平均亮度：{avg_luma:.2f}",
+            f"- p50 中位亮度：{p50:.2f}",
+            f"- p90 90% 像素低于此亮度：{p90:.2f}",
+            f"- p99 99% 像素低于此亮度：{p99:.2f}",
+            f"- p99.9 99.9% 像素低于此亮度：{top_01:.2f}",
+            f"- max 当前帧截图最高相对亮度：{sorted_luma[-1]:.2f}",
             "",
         ]
         if args.mpv_max_pq_y is not None or args.mpv_avg_pq_y is not None:
+            max_nits = pq_eotf(args.mpv_max_pq_y) if args.mpv_max_pq_y is not None else None
+            avg_nits = pq_eotf(args.mpv_avg_pq_y) if args.mpv_avg_pq_y is not None else None
             lines += [
-                "mpv video-out-params PQ(Y) (current rendered frame/status):",
-                f"max-pq-y={args.mpv_max_pq_y if args.mpv_max_pq_y is not None else 'n/a'}",
-                f"max-nits={pq_eotf(args.mpv_max_pq_y) if args.mpv_max_pq_y is not None else 'n/a'}",
-                f"avg-pq-y={args.mpv_avg_pq_y if args.mpv_avg_pq_y is not None else 'n/a'}",
-                f"avg-nits={pq_eotf(args.mpv_avg_pq_y) if args.mpv_avg_pq_y is not None else 'n/a'}",
+                "mpv 输出 PQ(Y) 参考值（当前渲染帧/状态）：",
+                f"- max-pq-y：{args.mpv_max_pq_y if args.mpv_max_pq_y is not None else '不可用'}",
+                f"- max-nits 估算峰值亮度：{format_optional_nits(max_nits)}",
+                f"- avg-pq-y：{args.mpv_avg_pq_y if args.mpv_avg_pq_y is not None else '不可用'}",
+                f"- avg-nits 估算平均亮度：{format_optional_nits(avg_nits)}",
             ]
         else:
-            lines.append("mpv video-out-params PQ(Y): unavailable in this screenshot state")
-        args.report.write_text("\n".join(str(x) for x in lines) + "\n", encoding="utf-8")
+            lines.append("mpv 输出 PQ(Y)：当前截图状态未提供，无法估算 nits。")
+        args.report.write_text("\n".join(str(x) for x in lines) + "\n", encoding="utf-8-sig")
         print(f"Wrote: {args.report}")
     return 0
 
