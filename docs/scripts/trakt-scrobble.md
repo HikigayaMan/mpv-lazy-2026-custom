@@ -47,7 +47,11 @@ min_real_play_seconds = 120
 mark_watched_on = "threshold"
 trust_legacy_history = false
 debug_match = false
+use_directory_title_match = true
+directory_min_auto_confidence = 95
+directory_min_confidence_gap = 15
 generic_title_blocklist = "current,video,web,default,play"
+directory_title_blocklist = "movie,movies,film,films,video,videos,download,downloads,anime,bangumi,series,tv,season,seasons,合集,电影,剧集,动画,动漫,下载"
 ```
 
 关键配置说明：
@@ -58,6 +62,10 @@ generic_title_blocklist = "current,video,web,default,play"
 - `min_real_play_seconds=120`：至少实际播放 120 秒才允许自动标记已看，避免短时间拖动进度条误记。
 - `trust_legacy_history=false`：旧版 `trakt_history.json` 默认不作为可信递推来源，手动确认后会写入新版可信记录。
 - `generic_title_blocklist`：泛标题拦截列表，命中后不会自动匹配，例如 `current`、`video`、`web`。
+- `use_directory_title_match=true`：文件名和可信历史都无法匹配时，才尝试用父文件夹名作为兜底搜索词。
+- `directory_min_auto_confidence=95`：目录名兜底需要更高置信度，宁愿失败也不强行同步。
+- `directory_min_confidence_gap=15`：目录名兜底要求 Trakt 第一候选明显领先第二候选；同名或近似结果过多时不自动同步。
+- `directory_title_blocklist`：目录名泛标题拦截列表，例如 `Movies`、`Season 2`、`下载`、`合集` 不会作为标题自动匹配。
 
 当前使用脚本内置 Trakt API client。一般不需要自行配置。
 
@@ -90,6 +98,9 @@ generic_title_blocklist = "current,video,web,default,play"
 - 退出播放时，如果未达到 `watched_threshold`，会调用 Trakt pause 写入继续观看；达到进度阈值且实际播放时间达到 `min_real_play_seconds`，会调用 Trakt stop 标记已看。
 - 中文剧集会尝试清洗副标题，例如 `《凡人修仙传》第181话 慕兰之战05` 会用 `凡人修仙传` 作为搜索词，并保留第 `181` 集。
 - 手动确认过的剧集目录会写入可信历史；后续同目录剧集可按当前集数自动递推，并校验 Trakt 上该集存在。
+- 如果文件名无法提供可靠标题，脚本会最后尝试使用父文件夹名兜底匹配；目录名兜底优先级低于可信历史和文件名解析，且必须高置信、非泛标题、非模糊结果才会自动同步。
+- 两级剧集目录可自动识别，例如 `剑来\第一季\01.mkv` 会解析为 `剑来 S01E01`；`第一季`、`第二季`、`第十季` 只作为季号，不会被当作电影标题搜索。
+- 中文剧名在 Trakt 有多个候选时不会自动选第一项；脚本会提示按 `Alt+d` 手动选择，确认一次后后续同目录可走可信历史递推。
 - 如果识别错误，可按 `Alt+d` 或进入 `工具 > Trakt > 搜索匹配` 手动选择正确条目。
 
 ### 菜单与快捷键

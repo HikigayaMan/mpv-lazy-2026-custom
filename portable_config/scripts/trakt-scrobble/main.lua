@@ -36,7 +36,11 @@ o = {
     mark_watched_on = "threshold",
     trust_legacy_history = false,
     debug_match = false,
+    use_directory_title_match = true,
+    directory_min_auto_confidence = 95,
+    directory_min_confidence_gap = 15,
     generic_title_blocklist = "current,video,web,default,play",
+    directory_title_blocklist = "movie,movies,film,films,video,videos,download,downloads,anime,bangumi,series,tv,season,seasons,合集,电影,剧集,动画,动漫,下载",
     -- https://trakt.tv/oauth/applications
     client_id = "MmU5ZDg5MDcyYmIxNThlZWZhZmNlNTA5ZjZiMWJmMzM3MzcwMTQwMDU4ODFlZGZiYjgzZWI3ZGRkMWMwNGY1YQ==",
     client_secret = "MDcxYTUzZTVkZDhkODA1NTM2MTU2YWNlZTJjYjU5Njc5YjUwOTAwZWU3YmZkYmVmMTZiNGZmODdkMzQ2NGFiNg==",
@@ -53,6 +57,8 @@ o.osd_font_size = tonumber(o.osd_font_size) or 32
 o.osd_margin_x = tonumber(o.osd_margin_x) or 30
 o.osd_margin_y = tonumber(o.osd_margin_y) or 120
 o.osd_border_size = tonumber(o.osd_border_size) or 2
+o.directory_min_auto_confidence = tonumber(o.directory_min_auto_confidence) or 95
+o.directory_min_confidence_gap = tonumber(o.directory_min_confidence_gap) or 15
 
 state = {}
 config = {}
@@ -245,6 +251,10 @@ local function parse_blocklist(value)
 end
 
 local generic_title_lookup = parse_blocklist(o.generic_title_blocklist)
+local directory_title_lookup = parse_blocklist(o.directory_title_blocklist)
+
+local api_ok
+local match_threshold
 
 local function normalize_match_text(str)
     str = tostring(str or ""):lower()
@@ -344,7 +354,211 @@ local function is_generic_title(title)
     return false
 end
 
-local function api_ok(res)
+local function is_generic_directory_title(title)
+    if is_generic_title(title) then return true end
+    local normalized = normalize_match_text(title)
+    local compact = normalized:gsub("%s+", "")
+    if directory_title_lookup[normalized] or directory_title_lookup[compact] then return true end
+    if compact:match("^s%d+$") or normalized:match("^season %d+$") then return true end
+    return false
+end
+
+local function get_dir_name(dir)
+    if not dir or dir == "" then return nil end
+    dir = dir:gsub("[\\/]+$", "")
+    return dir:match("([^\\/]+)$")
+end
+
+local function split_dir_segments(dir)
+    local segments = {}
+    if not dir then return segments end
+    dir = dir:gsub("[\\/]+$", "")
+    for segment in dir:gmatch("[^\\/]+") do
+        table.insert(segments, segment)
+    end
+    return segments
+end
+
+local function parse_season_dir_name(name)
+    name = clean_query_title(name or "")
+    local season = name:match("^[sS](%d+)$")
+        or name:match("^[sS]eason%s*(%d+)$")
+        or name:match("^第%s*(%d+)%s*季$")
+    return season and tonumber(season) or nil
+end
+
+local function chinese_number_to_int(text)
+    if not text or text == "" then return nil end
+    local digits = {
+        ["零"] = 0, ["〇"] = 0,
+        ["一"] = 1, ["二"] = 2, ["两"] = 2, ["三"] = 3, ["四"] = 4, ["五"] = 5,
+        ["六"] = 6, ["七"] = 7, ["八"] = 8, ["九"] = 9,
+    }
+    if digits[text] ~= nil then return digits[text] end
+    if text == "十" then return 10 end
+    local prefix, suffix = text:match("^(.-)十(.-)$")
+    if prefix ~= nil then
+        local tens = prefix == "" and 1 or digits[prefix]
+        local ones = suffix == "" and 0 or digits[suffix]
+        if tens and ones then return tens * 10 + ones end
+    end
+    return nil
+end
+
+local function parse_season_number(name)
+    local season = parse_season_dir_name(name)
+    if season then return season end
+    name = clean_query_title(name or "")
+    local chinese = name:match("^第%s*([零〇一二两三四五六七八九十]+)%s*季$")
+        or name:match("^([零〇一二两三四五六七八九十]+)%s*季$")
+    return chinese_number_to_int(chinese)
+end
+
+local function parse_directory_title(dir)
+    local name = get_dir_name(dir)
+    if not name then return nil end
+    local season = parse_season_number(name)
+    local from_season_dir = season ~= nil
+    if season then
+        local segments = split_dir_segments(dir)
+        if #segments >= 2 then
+            name = segments[#segments - 1]
+        end
+    end
+    local title = clean_query_title(format_filename(name))
+    local show, title_season = title:match("^(.-)%s+[sS](%d+)$")
+    if not show then
+        show, title_season = title:match("^(.-)%s+[sS]eason%s*(%d+)$")
+    end
+    if not show then
+        show, title_season = title:match("^(.-)%s+第%s*(%d+)%s*季$")
+    end
+    if show and clean_query_title(show) ~= "" then
+        title = clean_query_title(show)
+        season = tonumber(title_season) or season
+    end
+    if title == "" or is_generic_directory_title(title) then return nil end
+    return { title = title, season = season, raw = name, from_season_dir = from_season_dir }
+end
+
+local function parse_episode_marker(title, allow_numeric_only)
+    title = clean_query_title(title or "")
+    local chinese = parse_chinese_episode(title)
+    if chinese then
+        return { season = chinese.season, episode = chinese.episode, source = "chinese" }
+    end
+    local _, season, episode = title:match("^(.-)%s*[sS](%d+).*[eE](%d+).*")
+    if episode then
+        return { season = tonumber(season), episode = tonumber(episode), source = "season_episode" }
+    end
+    episode = title:match("[Ee][Pp]?%s*(%d+)")
+    if episode then
+        return { season = 1, episode = tonumber(episode), source = "episode" }
+    end
+    episode = title:match("第%s*(%d+)%s*[话話集]")
+    if episode then
+        return { season = 1, episode = tonumber(episode), source = "chinese_episode" }
+    end
+    episode = title:match("^%s*(%d%d?%d?)%s*$")
+    if allow_numeric_only and episode then
+        return { season = 1, episode = tonumber(episode), source = "numeric" }
+    end
+    return nil
+end
+
+local function score_search_candidate(candidate, query, year)
+    if not candidate or not candidate.title then return nil end
+    if year then
+        local candidate_year = tonumber(candidate.year)
+        local target_year = tonumber(year)
+        if not candidate_year or math.abs(candidate_year - target_year) > 1 then
+            return nil
+        end
+    end
+    local score = title_similarity(query, candidate.title)
+    if score == 0 and contains_non_ascii(query) then
+        score = tonumber(o.min_prompt_confidence) or 60
+    end
+    if year then score = math.min(score + 10, 100) end
+    return score
+end
+
+local function resolve_show_episode(slug, season, episode)
+    season = tonumber(season)
+    episode = tonumber(episode)
+    if not slug or not season or not episode then return nil end
+
+    local function episode_exists_at(target_season)
+        local ep_res = http_request("GET", string.format("https://api.trakt.tv/shows/%s/seasons/%s/episodes/%s",
+            slug, target_season, episode), {
+                ["trakt-api-key"] = base64.decode(o.client_id),
+                ["trakt-api-version"] = "2"
+        })
+        return api_ok(ep_res)
+    end
+
+    if episode_exists_at(season) then return season end
+    if season > 0 and episode_exists_at(season - 1) then return season - 1 end
+    return nil
+end
+
+local function collect_localized_show_matches(results, query, year, season, episode, opts)
+    local matches = {}
+    if not contains_non_ascii(query) then return matches end
+
+    for _, item in ipairs(results) do
+        local show = item.show
+        local score = score_search_candidate(show, query, year)
+        if score and show and show.ids and show.ids.slug then
+            local resolved_season = resolve_show_episode(show.ids.slug, season, episode)
+            if resolved_season then
+                local title_score = title_similarity(query, show.title)
+                if title_score == 0 then
+                    score = math.max(score, match_threshold(opts))
+                end
+                table.insert(matches, {
+                    show = show,
+                    score = score,
+                    season = resolved_season,
+                })
+            end
+        end
+    end
+
+    return matches
+end
+
+local function pick_best_search_result(results, class, query, year)
+    local best, best_score, second_score = nil, 0, 0
+    for _, item in ipairs(results) do
+        local candidate = item[class]
+        local score = score_search_candidate(candidate, query, year)
+        if score then
+            if score > best_score then
+                second_score = best_score
+                best = candidate
+                best_score = score
+            elseif score > second_score then
+                second_score = score
+            end
+        end
+    end
+    return best, best_score, second_score
+end
+
+match_threshold = function(opts)
+    opts = opts or {}
+    return tonumber(opts.min_confidence) or o.min_auto_confidence
+end
+
+local function match_is_ambiguous(best_score, second_score, opts)
+    opts = opts or {}
+    if not opts.require_clear_winner then return false end
+    local min_gap = tonumber(opts.min_confidence_gap) or o.directory_min_confidence_gap
+    return (best_score - (second_score or 0)) < min_gap
+end
+
+api_ok = function(res)
     return res ~= nil and res.error == nil
 end
 
@@ -372,6 +586,10 @@ local function mark_uncertain(query, confidence, reason)
     end
     if state.search_query and state.search_query ~= "" then
         message = message .. "\n搜索词：" .. state.search_query
+    end
+    if state.suppress_uncertain_message then
+        msg.warn(string.format("Trakt match uncertain: query=%s confidence=%s reason=%s", state.search_query or "", tostring(confidence or 0), reason or ""))
+        return
     end
     send_message(message, 6, "FF8800")
     msg.warn(string.format("Trakt match uncertain: query=%s confidence=%s reason=%s", state.search_query or "", tostring(confidence or 0), reason or ""))
@@ -801,14 +1019,18 @@ function stop_scrobble(config, data)
 end
 
 -- Query show
-local function query_search_show(name, season, episode)
+local function query_search_show(name, season, episode, opts)
+    opts = opts or {}
     name = clean_query_title(name)
     if name == "" or is_generic_title(name) then
         mark_uncertain(name, 0, "generic show title")
         return
     end
-    local title, year = name:match("^(.-)%s*%(?(%d%d%d%d)%)?$")
-    if year then name = title end
+    local title, year = name:match("^(.-)%s*%((%d%d%d%d)%)$")
+    if not year then
+        title, year = name:match("^(.-)%s+(%d%d%d%d)$")
+    end
+    if year then name = clean_query_title(title) end
     local url = string.format("https://api.trakt.tv/search/show?query=%s", url_encode(name))
     local res = http_request("GET", url, {
         ["trakt-api-key"] = base64.decode(o.client_id),
@@ -819,63 +1041,53 @@ local function query_search_show(name, season, episode)
         return
     end
 
-    local best, best_score = nil, 0
-    if year then
-        for _, item in ipairs(res) do
-            if item.show.year == tonumber(year) or item.show.year == tonumber(year) + 1
-            or item.show.year == tonumber(year) - 1 then
-                local score = title_similarity(name, item.show.title) + 10
-                if score > best_score then
-                    best = item.show
-                    best_score = math.min(score, 100)
-                end
-            end
-        end
-    else
-        for _, item in ipairs(res) do
-            local score = title_similarity(name, item.show.title)
-            if score > best_score then
-                best = item.show
-                best_score = score
-            end
-        end
-    end
+    local best, best_score, second_score = pick_best_search_result(res, "show", name, year)
+    local localized_matches = {}
     if not best then
-        msg.info("No matching show found")
+        localized_matches = collect_localized_show_matches(res, name, year, season, episode, opts)
+        if #localized_matches == 0 then
+            msg.info("No matching show found")
+            return
+        end
+    elseif contains_non_ascii(name) and best_score < match_threshold(opts) then
+        localized_matches = collect_localized_show_matches(res, name, year, season, episode, opts)
+    end
+
+    if #localized_matches > 0 then
+        if #localized_matches > 1 then
+            mark_uncertain(name, localized_matches[1].score, "localized show search returned multiple candidates")
+            return
+        end
+        best = localized_matches[1].show
+        best_score = localized_matches[1].score
+        second_score = 0
+        season = localized_matches[1].season
+    else
+        if best_score < match_threshold(opts) then
+            mark_uncertain(name, best_score, "show confidence below threshold")
+            return
+        end
+    end
+    if match_is_ambiguous(best_score, second_score, opts) then
+        mark_uncertain(name, best_score, "show directory match ambiguous")
         return
     end
 
-    if best_score < o.min_auto_confidence then
-        mark_uncertain(name, best_score, "show confidence below threshold")
-        return
-    end
-
-    local season_res = http_request("GET", string.format("https://api.trakt.tv/shows/%s/seasons/%s",
-    best.ids.slug, season), {
-            ["trakt-api-key"] = base64.decode(o.client_id),
-            ["trakt-api-version"] = "2"
-    })
-    if not season_res then
-        season = season - 1
-    end
-
-    local ep_res = http_request("GET", string.format("https://api.trakt.tv/shows/%s/seasons/%s/episodes/%s",
-        best.ids.slug, season, episode), {
-            ["trakt-api-key"] = base64.decode(o.client_id),
-            ["trakt-api-version"] = "2"
-    })
-    if not api_ok(ep_res) then
+    local resolved_season = resolve_show_episode(best.ids.slug, season, episode)
+    if not resolved_season then
         msg.error("Failed to fetch episode details on trakt.tv")
         return
     end
+    season = resolved_season
 
-    set_state_match("show", best.title, best.ids.trakt, best_score, "auto", false, best.ids.slug, season, episode, name)
+    set_state_match("show", best.title, best.ids.trakt, best_score, opts.source or "auto", false, best.ids.slug, season, episode, name)
     send_message("已匹配 Trakt：" .. state.title .. " S" .. state.season .. "E" .. state.episode, 3)
     msg.info("Found on trakt.tv: " .. state.title .. " S" .. state.season .. "E" .. state.episode)
 end
 
 -- Query movie
-local function query_movie(movie, year)
+local function query_movie(movie, year, opts)
+    opts = opts or {}
     movie = clean_query_title(movie)
     if movie == "" or is_generic_title(movie) then
         mark_uncertain(movie, 0, "generic movie title")
@@ -890,26 +1102,20 @@ local function query_movie(movie, year)
         msg.info("Trakt movie search returned no results")
         return
     end
-    local best, best_score = nil, 0
-    for _, item in ipairs(res) do
-        if item.movie.year == tonumber(year) or item.movie.year == tonumber(year) + 1
-            or item.movie.year == tonumber(year) - 1 then
-            local score = title_similarity(movie, item.movie.title) + 10
-            if score > best_score then
-                best = item.movie
-                best_score = math.min(score, 100)
-            end
-        end
-    end
+    local best, best_score, second_score = pick_best_search_result(res, "movie", movie, year)
     if not best then
         msg.info("No matching movie found")
         return
     end
-    if best_score < o.min_auto_confidence then
+    if best_score < match_threshold(opts) then
         mark_uncertain(movie, best_score, "movie confidence below threshold")
         return
     end
-    set_state_match("movie", best.title, best.ids.trakt, best_score, "auto", false, nil, nil, nil, movie)
+    if match_is_ambiguous(best_score, second_score, opts) then
+        mark_uncertain(movie, best_score, "movie directory match ambiguous")
+        return
+    end
+    set_state_match("movie", best.title, best.ids.trakt, best_score, opts.source or "auto", false, nil, nil, nil, movie)
     send_message("已匹配 Trakt：" .. state.title, 3)
 end
 
@@ -941,6 +1147,57 @@ local function query_media(config, media)
             mark_uncertain(media, 0, "no safe automatic parser")
         end
     end
+end
+
+local function query_media_by_directory(directory, fname, media_title)
+    if not o.use_directory_title_match then return end
+    if not directory then
+        msg.info("Trakt directory title match skipped: generic or empty directory name")
+        return
+    end
+
+    local opts = {
+        source = "directory",
+        min_confidence = o.directory_min_auto_confidence,
+        require_clear_winner = true,
+        min_confidence_gap = o.directory_min_confidence_gap,
+    }
+
+    local allow_numeric_episode = directory.from_season_dir == true
+    local file_episode = parse_episode_marker(fname, allow_numeric_episode)
+    local title_episode = parse_episode_marker(media_title, false)
+    local dir_episode = parse_episode_marker(directory.raw, false)
+    local episode = file_episode or title_episode or dir_episode
+    if episode and episode.episode then
+        local season = episode.season or directory.season or 1
+        if directory.season then season = directory.season end
+        state.search_query = directory.title
+        state.parsed_episode = { search_title = directory.title, season = season, episode = episode.episode, source = "directory" }
+        msg.info(string.format("Trakt directory candidate: show=%s S%sE%s", directory.title, tostring(season), tostring(episode.episode)))
+        query_search_show(directory.title, season, episode.episode, opts)
+        return
+    end
+
+    if directory.from_season_dir then
+        state.search_query = directory.title
+        mark_uncertain(directory.title, 0, "directory season found but episode missing")
+        return
+    end
+
+    local movie, year = directory.title:match("^(.-)%s*%((%d%d%d%d)%)$")
+    if not year then
+        movie, year = directory.title:match("^(.-)%s+(%d%d%d%d)$")
+    end
+    if year then
+        state.search_query = clean_query_title(movie)
+        msg.info(string.format("Trakt directory candidate: movie=%s year=%s", state.search_query, tostring(year)))
+        query_movie(movie, year, opts)
+        return
+    end
+
+    state.search_query = directory.title
+    msg.info("Trakt directory candidate has no episode or year, using high-confidence movie fallback: " .. directory.title)
+    query_movie(directory.title, nil, opts)
 end
 
 -- Checkin function
@@ -998,8 +1255,14 @@ local function checkin_file(path)
         msg.info("Ignoring untrusted legacy Trakt history for " .. dir)
     end
 
+    local directory_candidate = o.use_directory_title_match and parse_directory_title(dir)
     if not state.id then
+        state.suppress_uncertain_message = directory_candidate ~= nil
         query_media(config, title)
+        state.suppress_uncertain_message = false
+    end
+    if not state.id then
+        query_media_by_directory(directory_candidate, fname, title)
     end
     local data = get_data(progress)
     if data then
