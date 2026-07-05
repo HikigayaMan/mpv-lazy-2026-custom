@@ -1,11 +1,17 @@
 local msg = require "mp.msg"
 local utils = require "mp.utils"
 
+local function media_type_label(value)
+    if value == "movie" or value == "mv" then return "电影" end
+    if value == "show" then return "剧集" end
+    return value
+end
+
 local function search_episodes(slug, season, type, id, title)
-    local message = "Fetching episode information..."
+    local message = "正在获取剧集信息..."
     local menu_type = "trakt_episodes"
-    local menu_title = "Trakt Episode Menu"
-    local menu_footnote = "Use '/' to open filters"
+    local menu_title = "Trakt 剧集选择"
+    local menu_footnote = "可使用 / 过滤"
     if uosc_available then
         update_menu_uosc(menu_type, menu_title, message, menu_footnote)
     else
@@ -18,7 +24,7 @@ local function search_episodes(slug, season, type, id, title)
             ["trakt-api-version"] = "2"
     })
     if not res or #res == 0 then
-        local message = "No results found"
+        local message = "没有找到结果"
         if uosc_available then
             update_menu_uosc(menu_type, menu_title, message, menu_footnote)
         else
@@ -30,12 +36,12 @@ local function search_episodes(slug, season, type, id, title)
     local items = {}
     for _, item in ipairs(res) do
         table.insert(items, {
-            title = string.format("Episode %d: %s", item.number, clip_title(item.title) or "No title"),
+            title = string.format("第 %d 集：%s", item.number, clip_title(item.title) or "无标题"),
             value = {
                 "script-message-to",
                 mp.get_script_name(),
                 "trakt-scrobble-event",
-                season, tostring(item.number), type, id, title,
+                slug, season, tostring(item.number), type, id, title,
             },
         })
     end
@@ -52,10 +58,10 @@ local function search_episodes(slug, season, type, id, title)
 end
 
 local function search_season(slug, type, id, title)
-    local message = "Fetching season information..."
+    local message = "正在获取季信息..."
     local menu_type = "trakt_season"
-    local menu_title = "Trakt Season Menu"
-    local menu_footnote = "Use '/' to open filters"
+    local menu_title = "Trakt 季选择"
+    local menu_footnote = "可使用 / 过滤"
     if uosc_available then
         update_menu_uosc(menu_type, menu_title, message, menu_footnote)
     else
@@ -68,7 +74,7 @@ local function search_season(slug, type, id, title)
         ["trakt-api-version"] = "2"
     })
     if not res or #res == 0 then
-        local message = "No results found"
+        local message = "没有找到结果"
         if uosc_available then
             update_menu_uosc(menu_type, menu_title, message, menu_footnote)
         else
@@ -83,7 +89,7 @@ local function search_season(slug, type, id, title)
         local items = {}
         for _, item in ipairs(res) do
             table.insert(items, {
-                title = item.number == 0 and "Specials" or "Season " .. item.number,
+                title = item.number == 0 and "特别篇" or "第 " .. item.number .. " 季",
                 value = {
                     "script-message-to",
                     mp.get_script_name(),
@@ -106,10 +112,10 @@ local function search_season(slug, type, id, title)
 end
 
 local function search_trakt(name, class, page)
-    local message = "Searching..."
+    local message = "正在搜索..."
     local menu_type = "menu_trakt"
-    local menu_title = "Search Results"
-    local menu_footnote = "Use Enter or Ctrl+Enter to search"
+    local menu_title = "Trakt 搜索结果"
+    local menu_footnote = "按 Enter 或 Ctrl+Enter 搜索"
     local menu_cmd = { "script-message-to", mp.get_script_name(), "search-event", name }
     if uosc_available then
         update_menu_uosc(menu_type, menu_title, message, menu_footnote, menu_cmd, name)
@@ -125,7 +131,7 @@ local function search_trakt(name, class, page)
         ["trakt-api-version"] = "2"
     })
     if not res or #res == 0 then
-        local message = "No results found"
+        local message = "没有找到结果"
         if uosc_available then
             update_menu_uosc(menu_type, menu_title, message, menu_footnote)
         else
@@ -138,7 +144,7 @@ local function search_trakt(name, class, page)
     for _, item in ipairs(res) do
         table.insert(items, {
             title = clip_title(item[class].title),
-            hint = item[class].year and item.type .." ".. item[class].year or item.type,
+            hint = item[class].year and media_type_label(item.type) .. " " .. item[class].year or media_type_label(item.type),
             value = {
                 "script-message-to",
                 mp.get_script_name(),
@@ -150,7 +156,7 @@ local function search_trakt(name, class, page)
     if #items == limit then
         page = page + 1
         table.insert(items, {
-            title = "Load next page",
+            title = "加载下一页",
             value = {
                 "script-message-to",
                 mp.get_script_name(),
@@ -177,6 +183,10 @@ end
 local function search(name)
     local title, class = name:match("^(.-)%s*|%s*(.-)$")
     if title then name = title end
+    local chinese = parse_chinese_episode(name)
+    if chinese then
+        name = chinese.search_title
+    end
     local name = name:gsub("%(.-%)", "")
           :gsub("[sS]%d+[%.%-%s:]?[eE]%d+$", "")
           :gsub("[eE]%d+$", "")
@@ -197,7 +207,7 @@ function open_menu_select(menu_items)
     end
     mp.commandv('script-message-to', 'console', 'disable')
     input.select({
-        prompt = 'Filter:',
+        prompt = '过滤：',
         items = item_titles,
         submit = function(id)
             mp.commandv(unpack(item_values[id]))
@@ -207,9 +217,8 @@ end
 
 function open_input_menu_get(name)
     mp.commandv('script-message-to', 'console', 'disable')
-    mp.remove_key_binding("search-trakt")
     input.get({
-        prompt = 'input title:',
+        prompt = '输入片名：',
         default_text = name,
         cursor_position = name and #name + 1,
         submit = function(text)
@@ -224,13 +233,13 @@ end
 function open_input_menu_uosc(name)
     local items = {}
     items[#items + 1] = {
-        hint = "  append '|mv' to search movies",
+        hint = "  搜电影请在搜索词后追加 '|mv'",
         keep_open = true,
         selectable = false,
     }
     local menu_props = {
         type = "menu_trakt",
-        title = "Input search content",
+        title = "输入 Trakt 搜索词",
         search_style = "palette",
         search_debounce = "submit",
         search_suggestion = name,
@@ -239,7 +248,7 @@ function open_input_menu_uosc(name)
             mp.get_script_name(),
             "search-event",
         },
-        footnote = "Use Enter or Ctrl+Enter to search",
+        footnote = "按 Enter 或 Ctrl+Enter 搜索",
         items = items,
     }
     local json_props = utils.format_json(menu_props)
@@ -282,7 +291,7 @@ function open_input_menu(name)
     elseif input_available then
         open_input_menu_get(name)
     else
-        send_message("uosc or mp.input not available", 3)
+        send_message("uosc 或 mp.input 不可用", 3)
         msg.error("uosc or mp.input not available")
     end
 end
@@ -304,17 +313,16 @@ mp.register_script_message("trakt-season-event", function(class, slug, type, id,
     if uosc_available then
         mp.commandv("script-message-to", "uosc", "open-menu", "trakt_season")
     end
-    if class == "mv" then
-        state.type = type
-        state.title = title
-        state.id = id
+    if class == "movie" or class == "mv" then
+        set_state_match(type, title, id, 100, "manual", true, slug, nil, nil, state.search_query or title)
         local progress = get_progress()
         local data = get_data(progress)
         if data then
             start_scrobble(config, data)
         end
-        write_history(state.dir, state.fname)
+        write_history(state.dir, state.fname, true)
     else
+        state.pending_slug = slug
         search_season(slug, type, id, title)
     end
 end)
@@ -326,20 +334,16 @@ mp.register_script_message("trakt-episodes-event", function(slug, number, type, 
     search_episodes(slug, number, type, id, title)
 end)
 
-mp.register_script_message("trakt-scrobble-event", function(season, number, type, id, title)
+mp.register_script_message("trakt-scrobble-event", function(slug, season, number, type, id, title)
     if uosc_available then
         mp.commandv("script-message-to", "uosc", "close-menu", "trakt_episodes")
     end
-    state.type = type
-    state.title = title
-    state.id = id
-    state.season = season
-    state.episode = tonumber(number)
+    set_state_match(type, title, id, 100, "manual", true, slug or state.pending_slug, season, tonumber(number), state.search_query or title)
     local progress = get_progress()
     local data = get_data(progress)
     if data then
         enabled = true
         start_scrobble(config, data)
     end
-    write_history(state.dir, state.fname)
+    write_history(state.dir, state.fname, true)
 end)
