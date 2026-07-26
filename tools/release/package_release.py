@@ -690,8 +690,47 @@ def read_sha256_file(path: Path) -> dict[str, str]:
     return entries
 
 
+def parse_release_asset_digests(output: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.split("\t", maxsplit=1)
+        if len(parts) != 2:
+            continue
+        name, digest = parts[0].strip(), parts[1].strip()
+        if digest.lower().startswith("sha256:"):
+            digest = digest.split(":", maxsplit=1)[1]
+        if name and len(digest) == 64 and all(char in "0123456789abcdefABCDEF" for char in digest):
+            entries[name] = digest.lower()
+    return entries
+
+
+def release_asset_sha256(version: str, repo_slug: str) -> dict[str, str]:
+    completed = subprocess.run(
+        [
+            "gh",
+            "release",
+            "view",
+            version,
+            "--repo",
+            repo_slug,
+            "--json",
+            "assets",
+            "--jq",
+            ".assets[] | [.name, .digest] | @tsv",
+        ],
+        text=True,
+        capture_output=True,
+        errors="replace",
+        timeout=120,
+    )
+    if completed.returncode != 0:
+        return {}
+    return parse_release_asset_digests(completed.stdout)
+
+
 def download_release_sha256(paths: Paths, version: str, repo_slug: str) -> dict[str, str]:
     paths.work.mkdir(parents=True, exist_ok=True)
+    actual_hashes = release_asset_sha256(version, repo_slug)
     target = paths.work / f"existing-SHA256SUMS-{version}.txt"
     if target.exists():
         target.unlink()
@@ -715,12 +754,17 @@ def download_release_sha256(paths: Paths, version: str, repo_slug: str) -> dict[
     )
     downloaded = paths.work / f"SHA256SUMS-{version}.txt"
     if completed.returncode != 0 or not downloaded.exists():
-        print("Existing release SHA256SUMS not available; using local artifacts only.")
+        if actual_hashes:
+            print("Existing SHA256SUMS unavailable; using GitHub asset digests.")
+            return actual_hashes
+        print("Existing release SHA256SUMS and asset digests not available; using local artifacts only.")
         if completed.stderr:
             print(completed.stderr[-1000:], file=sys.stderr)
         return {}
     downloaded.replace(target)
-    return read_sha256_file(target)
+    existing_hashes = read_sha256_file(target)
+    existing_hashes.update(actual_hashes)
+    return existing_hashes
 
 
 def artifact_names_for_sha(paths: Paths, version: str, packages: list[str], existing: dict[str, str]) -> list[str]:
