@@ -27,6 +27,13 @@ local function get_ass_sub_path()
     return ass_sub_path
 end
 
+local function active_events()
+    if is_live_danmaku_active and is_live_danmaku_active() then
+        return get_live_danmaku_events()
+    end
+    return COMMENTS
+end
+
 local function find_sub_track_id_by_path(path)
     local tracks = mp.get_property_native("track-list") or {}
     for _, track in ipairs(tracks) do
@@ -73,25 +80,70 @@ local function has_smooth_fps_filter()
     return false
 end
 
-local function sync_smooth_fps_filter()
+local function smooth_fps_value()
+    if is_live_danmaku_active and is_live_danmaku_active() then
+        local mode = tostring(options.live_fps_mode or "auto")
+        local display_fps = mp.get_property_number("display-fps", 0) or 0
+        if mode == "display" then
+            return tostring(math.max(60, math.floor(display_fps + 0.5)))
+        end
+        if mode == "60" or mode == "80" or mode == "120" then
+            return mode
+        end
+        return tostring(math.max(60, math.min(120, math.floor(display_fps + 0.5))))
+    end
+    return tostring(options.fps)
+end
+
+local function current_smooth_fps_value()
+    local filters = mp.get_property_native("vf") or {}
+    for _, filter in ipairs(filters) do
+        if filter.label == "danmaku_smooth" then
+            local params = filter.params or {}
+            return params.fps and tostring(params.fps) or nil
+        end
+    end
+end
+
+function sync_smooth_fps_filter(skip_history_lookup)
     if syncing_smooth_fps then return end
-    local should_enable = is_ass_render_mode() and options.vf_fps and get_danmaku_visibility()
+    local live_state = LIVE_DANMAKU
+    local visible
+    if skip_history_lookup or (live_state and live_state.stopping) then
+        visible = false
+    elseif is_live_danmaku_active and is_live_danmaku_active() then
+        visible = true
+    else
+        visible = get_danmaku_visibility()
+    end
+    local should_enable = is_ass_render_mode() and options.vf_fps and visible
     if should_enable then
         local display_fps = mp.get_property_number('display-fps')
         local suspended = mp.get_property_bool(SMOOTH_FPS_SUSPEND, false)
-        should_enable = not suspended and not (display_fps and display_fps < 58) and not has_non_smooth_video_filter()
+        local live = is_live_danmaku_active and is_live_danmaku_active()
+        should_enable = not suspended and not has_non_smooth_video_filter()
+            and (live or not (display_fps and display_fps < 58))
     end
 
     if should_enable then
-        if not has_smooth_fps_filter() then
+        local target = smooth_fps_value()
+        mp.set_property_native("user-data/uosc_danmaku/live-fps-target", target)
+        local current = current_smooth_fps_value()
+        if current and current ~= target then
             syncing_smooth_fps = true
-            mp.commandv("vf", "append", string.format("@danmaku_smooth:fps=fps=%s", options.fps))
+            mp.commandv("vf", "remove", "@danmaku_smooth")
+            mp.commandv("vf", "append", string.format("@danmaku_smooth:fps=fps=%s", target))
+            syncing_smooth_fps = false
+        elseif not current then
+            syncing_smooth_fps = true
+            mp.commandv("vf", "append", string.format("@danmaku_smooth:fps=fps=%s", target))
             syncing_smooth_fps = false
         end
     elseif has_smooth_fps_filter() then
         syncing_smooth_fps = true
         mp.commandv("vf", "remove", "@danmaku_smooth")
         syncing_smooth_fps = false
+        mp.set_property_native("user-data/uosc_danmaku/live-fps-target", "")
     end
 end
 
@@ -130,10 +182,10 @@ local function ass_event_line(event)
     return string.format("Dialogue: %d,%s,%s,%s,,0,0,0,,%s", layer, ass_time(event.start_time), ass_time(event.end_time), style, text)
 end
 
-local function ass_render_signature()
-    local count = COMMENTS and #COMMENTS or 0
-    local first = count > 0 and COMMENTS[1] or {}
-    local last = count > 0 and COMMENTS[count] or {}
+local function ass_render_signature(events)
+    local count = events and #events or 0
+    local first = count > 0 and events[1] or {}
+    local last = count > 0 and events[count] or {}
     return table.concat({
         tostring(count),
         tostring(first.start_time or ""),
@@ -153,8 +205,8 @@ local function ass_render_signature()
     }, "|")
 end
 
-local function write_ass_file(path)
-    if COMMENTS == nil then return false end
+local function write_ass_file(path, events)
+    if events == nil then return false end
     local file = io.open(path, "w")
     if not file then
         msg.error("无法写入 ASS 弹幕文件: " .. path)
@@ -182,7 +234,7 @@ local function write_ass_file(path)
     file:write("\n[Events]\n")
     file:write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
 
-    for _, event in ipairs(COMMENTS or {}) do
+    for _, event in ipairs(events) do
         file:write(ass_event_line(event))
         file:write("\n")
     end
@@ -191,8 +243,16 @@ local function write_ass_file(path)
 end
 
 local function load_ass_subtitle(path, signature)
-    ass_reload_pending = true
     local old_id = ass_sub_id or (ass_sub_path and find_sub_track_id_by_path(ass_sub_path))
+    if old_id and ass_loaded_path == path then
+        local ok = pcall(mp.commandv, "sub-reload", old_id)
+        if ok then
+            ass_sub_id = old_id
+            ass_loaded_signature = signature
+            return
+        end
+    end
+    ass_reload_pending = true
     if old_id then
         mp.commandv("sub-remove", old_id)
         ass_sub_id = nil
@@ -217,15 +277,16 @@ local function load_ass_subtitle(path, signature)
 end
 
 local function render_ass_danmaku()
-    if COMMENTS == nil then return end
+    local events = active_events()
+    if events == nil then return end
     local path = get_ass_sub_path()
-    local signature = ass_render_signature()
+    local signature = ass_render_signature(events)
     ass_sub_id = ass_sub_id or find_sub_track_id_by_path(path)
     if ass_loaded_path == path and ass_loaded_signature == signature and ass_sub_id and not ass_reload_pending then
         sync_smooth_fps_filter()
         return
     end
-    if write_ass_file(path) then
+    if write_ass_file(path, events) then
         load_ass_subtitle(path, signature)
         sync_smooth_fps_filter()
     end
@@ -262,7 +323,8 @@ local function realtime_position_text(event, pos, displayarea)
 end
 
 function render(pos_arg)
-    if COMMENTS == nil then return end
+    local events = active_events()
+    if events == nil then return end
 
     if is_ass_render_mode() then
         render_ass_danmaku()
@@ -303,15 +365,15 @@ function render(pos_arg)
     local window_start = pos - max_display
 
     -- 跳过已结束的弹幕
-    local lo = binary_search(COMMENTS, window_start, function(item) return item.start_time end)
+    local lo = binary_search(events, window_start, function(item) return item.start_time end)
 
     local re_entity = "&#%d+;"
     local re_fs = "\\fs(%d+)"
     local ass_prefix = string.format("{\\rDefault\\fn%s\\fs%d\\c&HFFFFFF&\\alpha&H%s\\bord%s\\shad%s\\b%s\\q2}",
         fontname, fontsize, alpha, options.outline, options.shadow, options.bold and "1" or "0")
 
-    for i = lo, #COMMENTS do
-        local event = COMMENTS[i]
+    for i = lo, #events do
+        local event = events[i]
         if not event then break end
 
         if event.start_time > pos then break end  -- 后续弹幕提前退出
@@ -401,9 +463,11 @@ local function filter_state(label, name)
     return false
 end
 
-function show_danmaku_func()
+function show_danmaku_func(live)
     mp.set_property_bool(HAS_DANMAKU, true)
-    set_danmaku_visibility(true)
+    if not live then
+        set_danmaku_visibility(true)
+    end
     if is_ass_render_mode() then
         overlay_low:remove()
         overlay_high:remove()
@@ -426,10 +490,12 @@ function show_danmaku_func()
     end
 end
 
-function hide_danmaku_func()
+function hide_danmaku_func(live)
     stop_time_observer()
     mp.set_property_bool(HAS_DANMAKU, false)
-    set_danmaku_visibility(false)
+    if not live then
+        set_danmaku_visibility(false)
+    end
     overlay_low:remove()
     overlay_high:remove()
     remove_ass_subtitle()
@@ -471,7 +537,7 @@ mp.observe_property('pause', 'bool', function(_, value)
     if ENABLED then
         if pause then
             stop_time_observer()
-        elseif COMMENTS ~= nil then
+        elseif COMMENTS ~= nil or (is_live_danmaku_active and is_live_danmaku_active()) then
             start_time_observer()
         end
     end
@@ -485,7 +551,10 @@ mp.register_event('playback-restart', function(event)
     if event.error then
         return msg.error(event.error)
     end
-    if ENABLED and COMMENTS ~= nil and not ass_reload_pending then
+    if ENABLED
+        and (COMMENTS ~= nil or (is_live_danmaku_active and is_live_danmaku_active()))
+        and not ass_reload_pending
+    then
         render()
     end
 end)
@@ -496,7 +565,7 @@ mp.add_hook("on_unload", 50, function()
     overlay_low:remove()
     overlay_high:remove()
     remove_ass_subtitle()
-    sync_smooth_fps_filter()
+    sync_smooth_fps_filter(true)
     mp.set_property_native(DELAY_PROPERTY, 0)
     if filter_state("danmaku") then
         mp.commandv("vf", "remove", "@danmaku")

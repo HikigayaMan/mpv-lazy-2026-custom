@@ -1,184 +1,228 @@
-# external_player.js 使用说明
+# External Player 使用说明
 
-## 1. 介绍
+## 这个脚本是做什么的
 
-`external_player.js` 是浏览器端用户脚本，用于从网页中提取视频、音频、字幕、标题、时间点、Cookie、Referer 等信息，然后通过 `ush://` URL Scheme 调用本地播放器。
+External Player 是浏览器用户脚本。它从网页取得视频地址、标题、清晰度、字幕和必要的请求信息，再通过 `ush://` 协议把内容交给本地播放器。
 
-当前整合包主要用它配合 `url-scheme-handler.exe` 拉起 `mpv.exe`，常见链路是：
+当前 2026 自定义版的主要链路：
 
 ```text
-网页视频页面 → external_player.js → ush://MPV?... → url-scheme-handler.exe → mpv.exe
+网页
+  -> External Player 1.2.14.9
+  -> ush://MPV
+  -> url-scheme-handler.exe
+  -> mpv.exe
 ```
 
-本地维护/依赖仓库：
+遇到只能由浏览器读取的媒体时，会启用本机中继：
 
-- url-scheme-handler：https://github.com/luoxue03/url-scheme-handler
-- external-player：https://github.com/luoxue03/external-player
-- 上游 external-player：https://github.com/LuckyPuppy514/external-player
+```text
+网页
+  -> External Player
+  -> 127.0.0.1:9000 WebSocket
+  -> Browser Media Bridge
+  -> 127.0.0.1:8999 HTTP Range/HLS
+  -> mpv
+```
 
-当前脚本文件：`external_player.js`。
+相关仓库：
 
-## 2. 文件介绍
+- 本地维护版：[luoxue03/external-player](https://github.com/luoxue03/external-player)
+- 上游项目：[LuckyPuppy514/external-player](https://github.com/LuckyPuppy514/external-player)
+- URL Scheme 处理器：[luoxue03/url-scheme-handler](https://github.com/luoxue03/url-scheme-handler)
+- 浏览器媒体中继：[luoxue03/telegram-web-mpv-bridge](https://github.com/luoxue03/telegram-web-mpv-bridge)
 
-| 文件/模块 | 作用 |
+本地维护版继续保留上游作者、MIT License、原有播放器配置和站点解析能力；新增功能只用于 mpv-lazy 2026 的本地播放链路。
+
+## 本版新增内容
+
+- 新的悬浮交接面板，使用 Shadow DOM 隔离网页 CSS。
+- 主按钮直接启动默认播放器，其他播放器收进下拉菜单。
+- 面板内可快速设置默认播放器、首选画质、浏览器中继和贴边隐藏。
+- 完整设置页不再自动弹出，可从面板的设置按钮打开。
+- 贴边隐藏状态会持久化，初次状态提示结束后约 1.2 秒收起。
+- 新增通用资源嗅探兜底，但专用解析器始终优先。
+- MissAV 支持 HLS 主清单、变体清晰度和浏览器授权请求信息。
+- Telegram Web K/Z 支持自动启动本机中继并交给 mpv。
+- 斗鱼直播使用新鲜签名的完整直播流，支持网页当前可用画质。
+- 斗鱼弹幕可通过 Browser Media Bridge 接入 mpv 的 `uosc_danmaku`。
+- 浏览器中继弹出通知默认关闭，失败时仍保留必要的面板状态。
+
+## 安装与更新
+
+### 浏览器脚本
+
+1. 安装 Tampermonkey 或 Violentmonkey。
+2. 安装仓库中的 [`external-player.user.js`](https://raw.githubusercontent.com/luoxue03/external-player/main/external-player.user.js)。
+3. 更新后完整刷新已经打开的视频网页。
+
+整合包中的 `external_player.js` 与独立仓库的 `external-player.user.js` 内容相同。浏览器中只需要安装一份。
+
+### 注册 MPV
+
+1. 运行 `url-scheme-handler.exe`。
+2. 点击 `Add to Registry` 注册 `ush://`。
+3. 新增应用 `MPV`，路径选择整合包根目录下的 `mpv.exe`。
+4. 如果配置了其他播放器，名称必须与脚本设置中的名称完全一致。
+
+移动整合包目录后，需要重新选择播放器路径并注册。
+
+### 注册自动中继
+
+Telegram 和斗鱼弹幕需要 Browser Media Bridge。若希望点击网页按钮时自动启动中继，在 `url-scheme-handler` 中再增加：
+
+| 名称 | 程序 |
 |---|---|
-| `external_player.js` | 浏览器用户脚本主体，包含站点识别、媒体解析、按钮注入、播放器参数拼接和 `ush://` 拉起逻辑。 |
-| `url-scheme-handler.exe` | 本地 URL Scheme 处理器，负责接收 `ush://` 链接并启动指定播放器。完整发布包根目录包含该文件，仓库不保存二进制。 |
-| `config.json` | `url-scheme-handler` 的本机配置/注册状态文件，属于本地运行态，不应提交仓库。 |
-| `cookies.txt` | 可选 Cookie 文件，用于部分需要登录态的网站；属于本地敏感文件，不应提交仓库。 |
+| `BrowserRelay` | `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` |
 
-`external_player.js` 内部主要区域：
+External Player 会把以下启动参数交给它：
 
-- `defaultConfig.global.parser`：站点匹配规则和解析器配置。
-- `defaultConfig.players`：播放器列表，例如 `MPV`、`MPVNET`、`PotPlayer`、`IINA`。
-- `playEvent`：每个播放器实际执行的参数拼接逻辑。
-- `BilibiliParser` / `BilibiliLiveParser` / `YtdlpParser` 等解析逻辑：按站点生成 `media.video`、`media.audio`、`media.subtitle` 等字段。
+```powershell
+-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\tools\telegram-web-mpv-bridge\start_browser_relay.ps1"
+```
 
-## 3. 配置
+中继安装方法见 [luoxue03/telegram-web-mpv-bridge](https://github.com/luoxue03/telegram-web-mpv-bridge#readme)。
 
-### 浏览器端
+## 悬浮面板与设置
 
-1. 安装用户脚本管理器，例如 Tampermonkey / Violentmonkey。
-2. 点击扩展->添加新脚本。
-3. 粘贴 `external_player.js`-> 保存。
-4. 打开支持的网站，页面上会注入播放器按钮。
-5. 可在脚本设置中调整播放器、代理、解析优先级和清晰度偏好。
+### 面板操作
 
-当前配置内置支持/适配的网站类型：
+- 点击主按钮：使用默认播放器播放。
+- 点击主按钮右侧箭头：选择其他已启用播放器。
+- 点击齿轮：展开快速设置。
+- 点击“完整设置”：打开原有播放器配置页。
+- 拖动面板：改变停靠位置。
+- 开启贴边隐藏后：鼠标移开会收起，只保留窄边；悬停后展开。
 
-| 类型 | 支持范围 | 备注 |
+面板不会因为一次解析失败自动打开完整配置页。
+
+### 主要设置
+
+| 设置 | 作用 | 默认值 |
 |---|---|---|
-| B 站 | 番剧、视频、合集、活动页、直播 | 可提取 DASH、字幕、`cid`，用于 mpv 播放和弹幕联动。 |
-| P 站 | 视频页、embed 页 | 走 yt-dlp 路径，当前分支会追加本地 cookies 与 impersonate 参数。 |
-| SB 站 | 视频页、embed 页 | 走 yt-dlp 路径，配合 `ytdl-retry.lua` 处理概率性 403。 |
-| MA 站 | `missav.ws` / `missav.com` / `missav.ai` / `missav.live` | 使用专门解析分支，优先提取可交给 mpv 的播放地址。 |
-| YouTube | shorts、watch、playlist | 走 yt-dlp。 |
-| 巴哈姆特动画疯 | `ani.gamer.com.tw/animeVideo.php` | 有站点匹配入口，实际播放取决于登录态与源可用性。 |
-| Anime1 | `anime1.me` | 站点匹配入口。 |
-| 直链/播放器页 | 常见 mp4、mkv、flv、m3u8、m3u、webm 等 URL；部分 moepoi/libvio/yhdmjx/cycanime/tucao/ddys/cnys 播放器页 | 会尝试直接提取媒体 URL 或把页面交给 mpv/yt-dlp。 |
+| 默认播放器 | 主按钮点击后使用的播放器 | `MPV` |
+| 首选画质 | yt-dlp、B 站或斗鱼的首选档位 | 最高可用 |
+| 浏览器中继 | `自动`、`始终中继`、`关闭` | 自动 |
+| 中继弹出通知 | 是否显示中继启动/回退通知 | 关闭 |
+| 贴边隐藏 | 面板空闲时是否收至屏幕边缘 | 关闭 |
+| 资源嗅探兜底 | 未命中专用解析器时观察网页媒体资源 | 开启 |
 
-### 本机端
+`自动`只在 Telegram、`blob:` 或明确需要浏览器授权的来源上启用中继；普通直链不会多走一层代理。`始终中继`适合临时诊断浏览器可播、mpv 直连失败的 HTTP/HLS 来源。
 
-本机端依赖 `url-scheme-handler.exe`，用于把浏览器打开的 `ush://MPV?...` 转成真正的本地命令。
+## 当前站点行为
 
-依赖仓库：[luoxue03/url-scheme-handler](https://github.com/luoxue03/url-scheme-handler)
+| 站点/类型 | 处理方式 | 重要说明 |
+|---|---|---|
+| Bilibili | 专用 DASH/直播解析 | 可传视频、音频、字幕、标题和 `cid`。 |
+| MissAV | 专用 HLS 解析 | 提取主清单与可用变体，传入 Origin、Referer、UA；不把网页 Cookie 发给 CDN。 |
+| Telegram Web K/Z | 浏览器媒体中继 | 点击时自动尝试启动中继；播放期间 Telegram 标签页必须保持打开。 |
+| 斗鱼直播 | 专用签名直播解析 | 每次点击重新取完整直播流和实时画质，不缓存过期签名。 |
+| Pornhub | yt-dlp 页面解析 | 可配合本机 `cookies.txt` 与 impersonate。 |
+| SpankBang | yt-dlp 页面解析 | 概率性 403 由整合包 `ytdl-retry.lua` 做有限重试。 |
+| YouTube 等 yt-dlp 站点 | 交给 mpv/yt-dlp | 使用全局首选画质和代理设置。 |
+| 未适配网页 | 资源嗅探兜底 | 只在发现可信媒体后显示；DRM、私有 MSE 和未知 `blob:` 不保证可用。 |
 
-配置步骤：
+### MissAV
 
-1. 确认完整包根目录存在 `url-scheme-handler.exe`。
-2. 运行 `url-scheme-handler.exe`。
-3. 点击 `+ Add to Registry` 添加注册表，让 Windows 识别 `ush://` 协议。
-4. 点击 `+` 添加应用。
-5. 在左边输入框填写应用名称，例如 `MPV`。
-6. 在右边选择当前整合包根目录下的 `mpv.exe`。
-7. 应用名称必须与 `external_player.js` 中的播放器名称保持一致，大小写也要一致。
+脚本会优先取得 HLS 播放地址，并尽量预读变体清单，把清晰度信息传给 `quality-menu.lua`。正常情况下保持浏览器中继为“自动”即可。
 
-示意图：
+如果网页可以播放但 mpv 报 403：
 
-![url-scheme-handler 添加注册表与应用](https://raw.githubusercontent.com/luoxue03/url-scheme-handler/main/screenshot/20241125202543.jpg)
+1. 刷新页面，让脚本取得当前有效地址。
+2. 确认浏览器和 mpv 使用相同网络出口。
+3. 临时把“浏览器中继”改为“始终中继”进行对比。
+4. 查看 mpv 控制台是否收到正确的 Origin、Referer 和 User-Agent。
 
-![url-scheme-handler 配置 MPV](https://raw.githubusercontent.com/luoxue03/url-scheme-handler/main/screenshot/20250514203101.jpg)
+### Telegram Web
 
-建议导入仓库里的注册表补丁，首次运行外部协议时可出现“是否始终允许”的勾选框，之后无需每次弹窗确认：
+External Player 已内置 Telegram 捕获逻辑，不需要另装旧版 Telegram userscript，也不需要 Telegram API ID/Hash。
 
-- 开启勾选框：[Enable_ExternalProtocolDialog_ShowCheckbox.reg](https://raw.githubusercontent.com/luoxue03/url-scheme-handler/main/reg/Enable_ExternalProtocolDialog_ShowCheckbox.reg)
-- 移除勾选框：[Remove_ExternalProtocolDialog_ShowCheckbox.reg](https://raw.githubusercontent.com/luoxue03/url-scheme-handler/main/reg/Remove_ExternalProtocolDialog_ShowCheckbox.reg)
+点击 MPV 后：
 
-如果移动了整合包目录，需要重新注册，否则浏览器仍可能调用旧路径。
+1. 脚本捕获 Telegram Web 当前媒体。
+2. 若本机中继未运行，通过 `BrowserRelay` 自动启动。
+3. 中继生成临时本机地址。
+4. `url-scheme-handler` 拉起 mpv。
 
-### cookies 与代理
+浏览器仍负责读取 Telegram 登录态媒体，因此播放期间不能关闭对应标签页。
 
-- 部分站点需要浏览器登录态或 cookies；我当前使用 `Get cookies` 浏览器扩展导出 `cookies.txt` 到整合包根目录。
-- 导出时建议使用 Netscape cookies.txt 格式；文件名保持为 `cookies.txt`。
-- 脚本支持把 Cookie、Referer、Origin 和代理参数传给 mpv / yt-dlp。
-- cookies、token、个人代理信息都属于本地敏感配置，不要提交到 Git。
+### 斗鱼直播与弹幕
 
-## 4. 使用
+斗鱼不会使用嗅探到的 7 秒低画质片段。专用解析器会：
 
-### 基础使用
+1. 识别真实房间号。
+2. 生成当前请求签名。
+3. 获取完整直播流与当前可用画质。
+4. 按首选画质启动 mpv。
 
-1. 打开目标网页视频。
-2. 等页面视频加载完成。
-3. 点击页面上的 `MPV` 按钮。
-4. 浏览器会打开 `ush://MPV?...`。
-5. `url-scheme-handler.exe` 接管协议并启动 `mpv.exe`。
+视频地址直连，不经过浏览器中继。只有弹幕使用本机中继和 Node helper；弹幕启动失败不会阻止视频播放。
 
-### B 站场景
+斗鱼协议实现参考了 [qianjiachun](https://github.com/qianjiachun) 的公开实现，当前仓库保留自己的边界检查、测试和 mpv 接入逻辑。
 
-脚本会尝试通过 B 站接口获取 DASH 视频、音频、字幕和 `cid`。拉起 mpv 时会追加类似：
+## 清晰度
 
-```text
---audio-file=...
---sub-file=...
---script-opts-append="cid=..."
---force-media-title="..."
+- B 站、yt-dlp 和斗鱼分别使用各自解析器的实时画质列表。
+- MissAV/HLS 会把可识别的变体交给 mpv 的 `quality-menu.lua`。
+- 斗鱼签名 URL 会在点击时重新生成，切换画质应回到网页面板重新选择并播放。
+- 如果一个来源本身只有一个档位，mpv 菜单只显示该档位是正常现象。
+
+## 本地文件与隐私
+
+以下内容不要提交到 Git：
+
+- `cookies.txt`
+- `config.json`
+- 浏览器 Cookie、Token、签名直播地址
+- 中继日志、`.venv/`、`node_modules/`
+- mpv 播放历史、最近文件和运行时状态
+
+斗鱼签名 URL 属于短期敏感地址；脚本只在当前启动中使用，不写入仓库或长期缓存。
+
+## 常见问题
+
+### 页面没有面板
+
+- 确认脚本版本为 `1.2.14.9`。
+- 更新后完整刷新页面。
+- 查看控制台是否出现页面脚本异常。
+- 未适配网页只有在嗅探到可信媒体后才显示面板。
+
+### 点击后没有 mpv 窗口
+
+- 检查 `ush://` 是否注册。
+- 检查 `MPV` 应用名和 `mpv.exe` 路径。
+- 浏览器首次调用外部协议时允许打开。
+- 移动整合包后重新注册路径。
+
+### Telegram 黑屏
+
+- 保持 Telegram 标签页打开。
+- 确认 `127.0.0.1:8999/status` 可访问。
+- 确认 `BrowserRelay` 指向 PowerShell。
+- 更新 External Player 后完整刷新 Telegram 页面。
+
+### 斗鱼有画面但没有弹幕
+
+- 视频直连成功不代表弹幕 helper 已启动。
+- 确认 Browser Media Bridge 正在运行。
+- 正式 config 包包含免 Node 的 `douyu-danmaku-client.exe`；只有源码开发模式需要 Node.js 和 `npm install`。
+- 在 mpv 中打开 `工具 > 弹幕 > 弹幕设置`，确认弹幕未关闭。
+
+### MissAV 仍然 403
+
+先重新刷新页面并点击，不要复用旧的 HLS URL。若“始终中继”可播而“自动”不可播，说明当前 CDN 需要浏览器授权链路；保留“始终中继”作为该次播放的兼容方案。
+
+## 开发验证
+
+独立仓库中的离线测试：
+
+```powershell
+node --check external-player.user.js
+node --test tests\*.test.js
 ```
 
-`cid` 可被弹幕相关脚本使用。
+测试覆盖配置迁移、面板贴边持久化、斗鱼房间/签名/画质解析和斗鱼弹幕启动参数。
 
-### P 站场景
+## License
 
-P 站当前走 yt-dlp 视频页路径，不在浏览器侧做抓流 parser。脚本会按当前配置追加本地 `cookies.txt` 和 impersonate 参数，再交给 mpv/yt-dlp 解析。
-
-常见用途：
-
-- 使用网页标题作为 mpv 标题。
-- 让 yt-dlp 处理视频页实际流地址。
-- 通过本地 cookies 提供登录态。
-
-### SB 站场景
-
-SB 站同样走 yt-dlp 视频页路径。该站可能出现概率性 403，整合包内的 `portable_config/scripts/ytdl-retry.lua` 会尝试自动重试。
-
-如果偶发失败，可以重新点击 MPV 按钮或等待脚本重试。
-
-### MA 站场景
-
-MA 站有独立匹配分支，支持 `missav.ws`、`missav.com`、`missav.ai`、`missav.live` 域名。脚本会优先尝试提取可直接交给 mpv 的播放地址。
-
-如果站点页面结构变化，可能需要更新 `external_player.js` 的 MA 解析分支。
-
-### yt-dlp / 通用网页场景
-
-对于无法直接解析出视频 URL 的站点，脚本会把页面 URL 交给 mpv/yt-dlp，并可追加：
-
-```text
---ytdl-format="bestvideo[height<=?1080]+bestaudio/best"
---ytdl-raw-options-append="proxy=[...]"
---ytdl-raw-options-append="impersonate=..."
-```
-
-### 和 MPV 清晰度菜单配合
-
-部分 HLS / yt-dlp 路径会进入 `quality-menu.lua`，在 mpv 内显示清晰度菜单。若菜单不出现，先确认视频源是否真的提供多清晰度流。
-
-## 5. 常见错误
-
-### 点击按钮后无反应
-
-- `ush://` 没注册，或注册到了旧路径。
-- 浏览器拦截外部协议调用。
-- `url-scheme-handler.exe` 配置中的播放器路径错误。
-
-处理：重新运行 `url-scheme-handler` 注册，并确认 `MPV` 指向当前 `mpv.exe`。
-
-### mpv 打开但无法播放
-
-- yt-dlp 无法解析该站点。
-- 站点需要登录态，缺少 `cookies.txt` 或 Cookie 已过期。
-- Referer / Origin / User-Agent / 代理参数不符合站点要求。
-- 视频实际是 DRM 内容，mpv 无法播放。
-
-处理：查看 mpv 控制台和日志，更新 yt-dlp，必要时重新导出 cookies。
-
-### B 站弹幕或字幕没有跟随
-
-- 页面解析未拿到 `cid`。
-- 当前链接不是脚本匹配的 B 站页面类型。
-- 弹幕脚本未启用或其配置未匹配。
-
-处理：打开浏览器控制台看 `external_player.js` 输出的 args，确认是否包含 `cid=...`。
-
-### 移动整合包目录后失效
-
-`url-scheme-handler` 记录的是本机绝对路径。移动目录后必须重新注册，否则还会调用旧的 `mpv.exe`。
+本项目遵循上游 MIT License。原作者与上游链接保留在用户脚本头部、仓库 README 和 `LICENSE` 中。

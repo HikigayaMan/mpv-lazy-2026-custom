@@ -1,9 +1,9 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name                    External Player
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.13.7
+// @version                 1.2.14.9
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -15,6 +15,7 @@
 // @grant                   GM_setValue
 // @grant                   GM_getValue
 // @grant                   GM.xmlHttpRequest
+// @grant                   unsafeWindow
 // @run-at                  document-start
 // @downloadURL https://update.greasyfork.org/scripts/518677/External%20Player.user.js
 // @updateURL https://update.greasyfork.org/scripts/518677/External%20Player.meta.js
@@ -28,6 +29,7 @@
 const DEBUG = false;
 
 const PROJECT_NAME = 'external-player';
+const NATIVE_ATTACH_SHADOW = Object.getOwnPropertyDescriptor(Element.prototype, 'attachShadow')?.value;
 
 const SETTING_URL = DEBUG === true ? 'http://127.0.0.1:5500/setting.html' : undefined;
 
@@ -37,13 +39,18 @@ const VIDEO_URL_REGEX_EXACT = /^https?:\/\/((?![^"^']*http)[^"^']+(\.|%2e)(mp4|m
 
 const defaultConfig = {
     global: {
-        version: '1.2.13.7',
+        version: '1.2.14.9',
         language: (navigator.language || navigator.userLanguage) === 'zh-CN' ? 'zh' : 'en',
         buttonXCoord: '0',
         buttonYCoord: '0',
         buttonScale: '1.00',
         buttonVisibilityDuration: '5000',
         networkProxy: '',
+        resourceSniffing: true,
+        defaultPlayer: 'MPV',
+        browserRelayMode: 'auto',
+        browserRelayNotifications: false,
+        edgeHide: false,
         parser: {
             ytdlp: {
                 regex: [
@@ -58,6 +65,16 @@ const defaultConfig = {
             missav: {
                 regex: [
                     "^https://([^.\\/]+\\.)?missav\\.(ws|com|ai|live)/.+"
+                ]
+            },
+            telegram: {
+                regex: [
+                    "^https://web(?:k|z)?\\.telegram\\.org/.+"
+                ]
+            },
+            douyu: {
+                regex: [
+                    "^https?://(?:www\\.)?douyu\\.com/(?:topic/(?:[^/?#]+/)*)?\\d+(?:[/?#].*)?$"
                 ]
             },
             video: {
@@ -127,7 +144,7 @@ const defaultConfig = {
             system: 'mac',
             icon: 'data:image/png;base64,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',
             iconSize: 53,
-            playEvent: "const delimiter = '&';\n\nlet args = [\n    `url=${encodeURIComponent(media.video)}`,\n    media.origin ? `mpv_http-header-fields=${encodeURIComponent('origin: ' + media.origin)}` : '',\n    media.referer ? `mpv_http-header-fields=${encodeURIComponent('referer: ' + media.referer)}` : '',\n]\nargs = args.filter(item => item !== '');\n\nconsole.log(args);\n\nwindow.open(`iina://weblink?${args.join(delimiter)}`, '_self');",
+            playEvent: "const delimiter = '&';\n\nlet args = [\n    `url=${encodeURIComponent(media.video)}`,\n    media.origin ? `mpv_http-header-fields=${encodeURIComponent('origin: ' + media.origin)}` : '',\n    media.referer ? `mpv_http-header-fields=${encodeURIComponent('referer: ' + media.referer)}` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`iina://weblink?${args.join(delimiter)}`, '_self');",
             presetEvent: {
                 playAuto: false,
                 pauseAuto: true,
@@ -142,7 +159,7 @@ const defaultConfig = {
             system: 'windows',
             icon: 'data:image/png;base64,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',
             iconSize: 50,
-            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.subtitle ? `/sub=\"${media.subtitle}\"` : '',\n    media.origin ? `/headers=\"origin: ${media.origin}\"` : '',\n    media.referer ? `/referer=\"${media.referer}\"` : '',\n    config.networkProxy ? `/user_agent=\"${config.networkProxy}\"` : '',\n    media.title ? `/title=\"${media.title}\"` : '',\n    media.time ? `/seek=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nconsole.log(args);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
+            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.subtitle ? `/sub=\"${media.subtitle}\"` : '',\n    media.origin ? `/headers=\"origin: ${media.origin}\"` : '',\n    media.referer ? `/referer=\"${media.referer}\"` : '',\n    config.networkProxy ? `/user_agent=\"${config.networkProxy}\"` : '',\n    media.title ? `/title=\"${media.title}\"` : '',\n    media.time ? `/seek=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
             presetEvent: {
                 playAuto: false,
                 pauseAuto: true,
@@ -157,7 +174,7 @@ const defaultConfig = {
             system: 'windows',
             icon: 'data:image/png;base64,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',
             iconSize: 52,
-            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts-append=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    media.time ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nconsole.log(args);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
+            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields-append=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields-append=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields-append=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts-append=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    media.time ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
             presetEvent: {
                 playAuto: false,
                 pauseAuto: true,
@@ -172,7 +189,7 @@ const defaultConfig = {
             system: 'windows',
             icon: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsEAAA7BAbiRa+0AAA1qSURBVHhezVt7jBXVGf/OsA8W9sXyWgoUZHkIgihSkEetQbD2ARYTtS2UAlqpVZeSSGpbEmuaJlr7h+xCEFMItoSa2tBYG2zloRCjZEEUioCyvF8Lgiyw7AN25/T3O3OHHWbv3T1z7130l5y9d86dOed83/f7HmdmVkl7Y7nOlEY9UJSUSBOaI0PFlWIc54uWruYcJefw/SJ+q8Jv+yRTDuDcSumuDshD6oo5p53QPgpY4vaDEPdBqMkQaKw4qq9kod9Bc9F07JONYD8bV+OfQ7FdfQx9FWgbRau35HF1GL1pRfoUoLWCtafj20wIOEVyVK4R5CpaI39HiwKuLAMtE41KqdWX8bke/avlpPqnPKd89aWE1BXwoO4gk/QMUaoUVr7DjFiP1mR+TR86oGV7X6VB78DSy+Ewq6EIqjdppKaAcn23ZOrnpaMaa6xMwW8EOqKRHQ16Oxj2jDzpbDT9SSA5Bbzg5kmevCgZap6xTJ3XfcORg0amNek/S71aKAtUtemPgOgKKHPHgOor4OPD5TKO0+KJKYDxoTNand4LNjwiTzkfmH5L8HJ7LHHnwg+3SCaEv4TjL1t4gmvgWjLVUKztXRhonum3hL0CyvQzsPoKkCb7S6N8a+CaXJUlueplGGqR19k27Fyg3P2D5KnfmEnSHd3TDcakTmiX9J8QHBeavlbQNgMWu78ywtfiezqFZ10QbOkC18jYlKeehuF+a/paQesMeMmdg4FWmqosVeHpq37MgNpVUPVYheZv/hxcFX+PHqKb4dcNNfpRKXXguvGReIpydxSqsK0ocDJNNZcMfKEhTDEidT+0ryF1dUceL0Rp7MYs72AVtagjPkcdcQpudgwWPILmsragIoLKigJWkaIbUaOMlyecbaYvhPgKYJ7PlW0ocIYY6ke1BAWDNfMh6MgikVFofSF8JxQvHKoJv/vC+6AS2Ph7A66lInYjq28/J3KalOYPURXBORgPGnSldFCjZZ66YPoD4LAtUeYul0L1GPZn0YHFZ0PQSb1EJvYUKYKlKfAVMCEsdCJwUZkQlo3M+PgLkbdOiJylMUjt+KuOD85ZgHZBr0KNMMf0BdByqDJ3Aiz/niltfZ+1ASfC+cNg7elfh8Wh+XocN0YZIw7IihwIfRFuSCW8e8r/IfZpA55Ld6hF6T7f2Wz6YrheAe/oDNmtK6STuj1SrqeQUMBUCP7t3p4uSON0IgNCdET76LzIXyqR9hmXyAZbsGyu1bsky7jCtah2vR736ocQ9SMLn4WFzB4s8t0+HtXDwpP6TSkygUyqAStv7yJSOlSkJ307ipIpU566VRr1w16Hh2YF/B3b2kbsrEh9W9DUwKyBIuO7e/4a9HPS6yoW3gFfchELrmDBqboEldAvV+TxIXBtprkoSqBsTZDxWTA9hmYFVMlUlJEjIm1pIcz0/iKj4ff00YDsBhS+G6g3Y4TI3NvAECiqE3yxDgsJnxsFVHQPjDtnkBdwrWMVZctVt0hXPc3rCCpA6bmRoisWMQZR/l5E+8vUbBzQ2hP7gq5IgR2x0JE4/6e3iozoATfBNVRQsqAShiK6T++HgyjapIxK5noHvgKWub3ReY+19bHwQvjgAxCOPp9ofkZwUj+IfND2fsSL6aBwPn6rjcMcW9Tg2rug1BHdcJDACC1AGR2ZhBIfEctXQJNMAzU6WfsTVvw9RPsCCNCWFRPl/mGIGbNHitwBBjE2sEUFh2ZwnQZRspjmbDTJeTqrHEh+Pw99F7jX2o8wQJ88+H1X+HISiw6C8YBx4UFE9SL4tGFDRDo0YN2sOcZCodYG9GSdwj8OImIWNDfWut7HAifAhzsi9dlWdj4Y/D5EIRNOiYMQRGcjNtwJVjFuRGUDWcg1OQyINmvyZB0LN8h2pIcukUzVy8qHMHgeLDWiMPlCZ9NhFDK7RE7yLk4AjOZTBoj8cDgiPIIm2WCrYMah3mDBEJa8IeXGBWXNUsWQZ5CDC0rMQwubySD0INC/CIGsMaL1CQZg0v44hF+9W2TzEc/iQfSHELPAhm+iqqQ72CiaS8nA4MNhGCs5eA5l7iADGAP4uMoOmGQAihAKkgpobY6x5SjY8D9sfUN7NG6C7kZ6Y/3QGwq3YQPdgAWSsnUDLkBLCUXns7q2wUFxdh/QM9VqjmCKJBuqakT+9onIhkMtrU3hfwIlTEKxRbTGBjKyG5jZxZbNlEHJUAd/elpdANBy+Vh0GuS/hmwEU5bKHxwXeXWnSCW2vkFQURNQb8wMsCFepmAfd41UgrUCEAHJgEJbBhRA+Fwogfv7dMJnwzlsWF7fi20vdnsUNIheoDeVQGWQ7mGX4GEmxuliqwCe46pCB1+K0mrSFMBdZSbadqTKV5Ep9nx+vbuRKXSH72MPQISZYGSyEZ7guEoX0QUw7FcHXAzZcOayyNpPRQ7FedjFvUSXjulhIl3gnG0W4OLaW1u0OG92sDjixmkg9v9hnELgvNjguU4QPAz3JQRl1uoLusAFWwXwFhdLz/ZQAqlLv89DFCfFf4yCqG8+5gpNtvO0yD8QJxgHgsLyKxlhdqY2C+Q5jq6mC5y2veDCFa/RF9OJ+lgVOg6bmjnYIN1W7B0HcQLF0xoUT2/u9xTFW2RBUFH1SJNnuNuzWZ93/RkqYI8VAzgoJqjCBOHJkwWtyP3BQNCdEX7yTUhl8P8gaqDw/x5A5YiCifEgB1ko3vw0SjUUc54PcWwV4Mo+B3XxQessAIodhCVsxm8NPt0LEch+MFjk4WFemguC8W0HssEq1AYVJz2686ZKIrB65AOVqxjXaoGcQMkB6uGAefRlqbX9UAD9zDrYhEC681LW+twBDkdED+MoSmNafB0sfxkCMSvYzLePzzEoWFvgWJS5kQropSrlqj5lXjlpC1AA09OnmIjb4aig5Qd39aI7a/2wRRnZ16EIWoPS+BjmSET3MHjOeVy7lynTZl2c94qugiL2O7H38Cq852gWgBDvo0CJeuOCoEBTEeGLQ3SnYraB5qQ7ac+dHUtkW/B5QcU5kUu2AZCy8vW7+U6Dr9/1VoGQgBCfnPdYwNo7CsIpjWBg4/2B/4DuDIgMgvHOSwQqqxom3FyFA1sZeJ6WDf5XRsM35LKus37SgqD5L2xemHfb8s1EwpyHtd78TOQ10P0kChv6eTLZhaxaD+Gr+eDD5nrKWKPrpUm9wUPvkvnOcWhko3n9zAYY5DAstwkTd6Y/JQDdJLx15vHW2M5v5xkvekehuw96IJ8270XA3MLnhbZjeJulTfJLdZSHzTrTstKMagtM+O9j3iPsREqg9enbjOQUfO9Zj+7rsffnfT9aLwrdg6DSSP01B5H6eJ8g2jgrY5+By/i4qKv+WDqpW6yfD2BiPp5agDzOlx7i3SVmscPylpbmdpfgri8VcCxiGTZL+3j/oBUWXgcyvE7vkbNqpP+GaTMD2OHIC9aDERDkAtLPy/BllqCkZBhcLBlAn6fgqQpPyzNrrEK6jCQ84WW6PwZfr21WAJGpXpNLepd5lGwLLKgKtcFibFDoj3mYJLxX4HGq5TOH5M0Y5vul+0Q+QiqOJDxluqh3S5Za43V4aOk5S9y7JFttNvfOQwGsVYD+GVDGfb1R0/fyLM/NSZSwkghZGIsK/BC5fu0RKIGuFEV4Kp/3Chv0JHnCecf0xdBSAUS5u0IK1FxslKMFF0oLoW8qQMHTF1UftrNMk7yZGfXmBa+j4GTPiVqRtxFMK5A1zHookC04L58XVOu/Sqkzy/QFEF+85bpAGjVfkhqU1EtSDIa4Zjh2eXd2w24vz3sQan7CgvhkKEwuTmFcBY2ZgU9/j8K1dsDqFcgeDWRkFKv7YOBr0Acx6Gj5hUIJdz04b3wsdb+BCd/HKRlJvSZHzcek7AL/GwI2DIAiirEgPlRl6mQwIwxLcC7vNfBVOb4ix3hyyn85k4Ez8UoTwyhMN0mDTESts9X0hdD6sGXuzyRXvWLSYpR4EAavZeNsoG8uAiWbv5+gxRkvLkIBLgVmP2keheph8Fpav0b/HNRfbvrioG29lrmLJF/93rhCKkrwERP62mcQXE3bK2obFL4z2kV5Tp5SvzN9CWA3XZn7IoLi02l/X7g94At/Sb8kTzoLTF8rsCNZqbMQOXSRqaOTCUQ3ClybyfewvIXwRDTClbuPIp8uRajOivQqXXuD7kTBXX1Vrsh8CL/M9FsguseVu+Og6ZXYM9z8FfuXmc+kXj2CXd57pt8Sdi4QBP8np1qNl1q98hrlvixwbtb3dXoVjDEuqvBEajF3iXsPcvTzkoMig9sL211kqmB6o/Lr9A4w8Ncob982/Ukg9aTzLWyjf6Rn4FspNhqjTB82LGnPFiyGGISJBmzblZTJDrVaXml+7zcZpK4AH89qR4r1AxhxJqwyGTGis4kPXB7ZES/vtwaujFYmxemotboWnxtQNa3G37XyukqLitOngCCW6f6i9Hcg9GS0MSjy+1wTxK8KqRA/gLKfK+EnG3/jvepGfQL9FejbiLZOHnMOoTetaB8FBLHYzUawGgihSuAaJaDyzXCPYgiUDwV0NQLzCTWzN59T8t/nM+QAzqtEqq3krWtzRrtA5P/q10sKtGxUxgAAAABJRU5ErkJggg==',
             iconSize: 50,
-            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    media.time ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nconsole.log(args);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
+            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields-append=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields-append=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields-append=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    media.time ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
             presetEvent: {
                 playAuto: false,
                 pauseAuto: true,
@@ -197,7 +214,37 @@ const translations = {
         loadFail: 'Load fail',
         requireLoginOrVip: 'Require login or vip',
         noMatchingParserFound: 'No matching parser found',
-        onlyNewTabsCanCloseAutomatically: 'Only new tabs can close automatically'
+        onlyNewTabsCanCloseAutomatically: 'Only new tabs can close automatically',
+        handoffDedicated: 'Dedicated parser',
+        handoffSniffing: 'Sniffing media',
+        handoffResourceReady: 'Media resource ready',
+        handoffResolving: 'Resolving',
+        handoffSuccess: 'Sent to player',
+        handoffFailed: 'Resolve failed',
+        handoffSettings: 'Settings',
+        handoffMorePlayers: 'More players',
+        handoffTitle: 'External Player',
+        handoffCurrentSource: 'Current source',
+        handoffPlayWith: 'Play with',
+        handoffOtherPlayers: 'Other players',
+        handoffFullSettings: 'Full settings',
+        handoffOpenPanel: 'Open player panel',
+        handoffClosePanel: 'Close player panel'
+        ,handoffRelayFallback: 'Relay unavailable, using direct source'
+        ,handoffRelayUnavailable: 'Local browser relay is unavailable'
+        ,handoffRelayStarting: 'Starting local browser relay'
+        ,handoffRelayStartFailed: 'Could not start the local browser relay'
+        ,handoffRelayReady: 'Browser relay ready'
+        ,handoffTelegramBlobUnavailable: 'Telegram media was not captured. Refresh the page and try again.'
+        ,handoffDefaultPlayer: 'Default player'
+        ,handoffPreferredQuality: 'Preferred quality'
+        ,handoffRelayMode: 'Browser relay'
+        ,handoffEdgeHide: 'Hide at edge'
+        ,handoffRelayAuto: 'Automatic'
+        ,handoffRelayAlways: 'Always relay'
+        ,handoffRelayOff: 'Off'
+        ,handoffQualityAuto: 'Best available'
+        ,handoffDanmakuUnavailable: 'Danmaku unavailable; playing video only'
     },
     zh: {
         loadSuccessfully: '加载成功',
@@ -206,12 +253,47 @@ const translations = {
         loadFail: '加载失败',
         requireLoginOrVip: '需要登录或会员',
         noMatchingParserFound: '没有匹配的解析器',
-        onlyNewTabsCanCloseAutomatically: '只有新标签页才能自动关闭'
+        onlyNewTabsCanCloseAutomatically: '只有新标签页才能自动关闭',
+        handoffDedicated: '专用解析器',
+        handoffSniffing: '正在嗅探媒体',
+        handoffResourceReady: '媒体资源就绪',
+        handoffResolving: '正在解析',
+        handoffSuccess: '已交给播放器',
+        handoffFailed: '解析失败',
+        handoffSettings: '设置',
+        handoffMorePlayers: '更多播放器',
+        handoffTitle: 'External Player',
+        handoffCurrentSource: '当前解析源',
+        handoffPlayWith: '使用',
+        handoffOtherPlayers: '其他播放器',
+        handoffFullSettings: '完整设置',
+        handoffOpenPanel: '打开播放器面板',
+        handoffClosePanel: '关闭播放器面板'
+        ,handoffRelayFallback: '浏览器中继不可用，已使用直连'
+        ,handoffRelayUnavailable: '本地浏览器中继不可用'
+        ,handoffRelayStarting: '正在启动本地浏览器中继'
+        ,handoffRelayStartFailed: '无法启动本地浏览器中继'
+        ,handoffRelayReady: '浏览器中继已就绪'
+        ,handoffTelegramBlobUnavailable: '未捕获 Telegram 媒体。请刷新页面后重试。'
+        ,handoffDefaultPlayer: '默认播放器'
+        ,handoffPreferredQuality: '首选画质'
+        ,handoffRelayMode: '浏览器中继'
+        ,handoffEdgeHide: '贴边隐藏'
+        ,handoffRelayAuto: '自动'
+        ,handoffRelayAlways: '始终中继'
+        ,handoffRelayOff: '关闭'
+        ,handoffQualityAuto: '最高可用'
+        ,handoffDanmakuUnavailable: '弹幕不可用，仍将播放视频'
     }
 };
 
 const REFRESH_INTERVAL = 500;
 const MAX_TRY_COUNT = 5;
+const RESOURCE_SNIFFER_MAX_CANDIDATES = 120;
+const MISSAV_HLS_FETCH_TIMEOUT = 8000;
+const MISSAV_HLS_MAX_PLAYLIST_LENGTH = 256 * 1024;
+const MISSAV_HLS_MAX_VARIANTS = 12;
+const MISSAV_HLS_MAX_OPTION_LENGTH = 8192;
 
 var currentTryCount;
 var currentConfig;
@@ -221,6 +303,808 @@ var currentMedia;
 var currentPlayer;
 var translation;
 var iframe;
+var resourceSniffer;
+var handoffEdgeHideId;
+var handoffIsDragging = false;
+var handoffEdgeRevealUntil = 0;
+var handoffDefaultPlayer;
+var handoffPreferredQuality;
+var handoffRelayMode;
+var handoffEdgeHide;
+
+const BROWSER_RELAY_WS_URL = 'ws://127.0.0.1:9000/ws';
+const BROWSER_RELAY_CHUNK_SIZE = 256 * 1024;
+const BROWSER_RELAY_BOOTSTRAP_APP = 'BrowserRelay';
+const BROWSER_RELAY_BOOTSTRAP_COMMAND = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\tools\\telegram-web-mpv-bridge\\start_browser_relay.ps1"';
+const BROWSER_RELAY_BOOTSTRAP_TIMEOUT = 8000;
+const BROWSER_RELAY_RETRY_INTERVAL = 400;
+const DOUYU_DANMAKU_PIPE_PREFIX = 'mpv-lazy-douyu-';
+const DOUYU_DANMAKU_TOKEN_MAX_LENGTH = 64;
+const TELEGRAM_CAPTURE_KEY = '__externalPlayerTelegramCaptureV2';
+const TELEGRAM_FETCH_EVENT = 'external-player-telegram-fetch-v2';
+const TELEGRAM_RESPONSE_EVENT = 'external-player-telegram-response-v2';
+const TELEGRAM_CANCEL_EVENT = 'external-player-telegram-cancel-v2';
+
+function createBridgeRequestId() {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function packBridgeChunk(header, buffer) {
+    const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+    const body = new Uint8Array(buffer);
+    const frame = new Uint8Array(4 + headerBytes.length + body.byteLength);
+    new DataView(frame.buffer).setUint32(0, headerBytes.length, false);
+    frame.set(headerBytes, 4);
+    frame.set(body, 4 + headerBytes.length);
+    return frame.buffer;
+}
+
+// DOUYU_DANMAKU_HELPERS_START
+var douyuDanmakuSessionSequence = 0;
+
+function isMpvDanmakuPlayer(player) {
+    return String(player?.name || '').trim().toUpperCase() === 'MPV';
+}
+
+function createDouyuDanmakuSessionId() {
+    douyuDanmakuSessionSequence = (douyuDanmakuSessionSequence % 0xffffff) + 1;
+    const suffix = douyuDanmakuSessionSequence.toString(36);
+    const requestToken = String(createBridgeRequestId())
+        .replace(/[^a-z0-9-]/gi, '')
+        .replace(/^-+|-+$/g, '') || Date.now().toString(36);
+    const maxRequestLength = DOUYU_DANMAKU_TOKEN_MAX_LENGTH - 'douyu--'.length - suffix.length;
+    return `douyu-${requestToken.slice(0, maxRequestLength)}-${suffix}`;
+}
+
+function isSafeDouyuDanmakuToken(value) {
+    const token = String(value || '');
+    return token.length <= DOUYU_DANMAKU_TOKEN_MAX_LENGTH &&
+        /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(token);
+}
+
+function createDouyuDanmakuPipeName(sessionId) {
+    if (!isSafeDouyuDanmakuToken(sessionId)) {
+        throw new Error('Invalid Douyu danmaku session id');
+    }
+    const source = String(sessionId).replace(/^douyu-/, '');
+    const maxSuffixLength = DOUYU_DANMAKU_TOKEN_MAX_LENGTH - DOUYU_DANMAKU_PIPE_PREFIX.length;
+    const pipeName = `${DOUYU_DANMAKU_PIPE_PREFIX}${source.slice(-maxSuffixLength)}`;
+    if (!isSafeDouyuDanmakuToken(pipeName)) {
+        throw new Error('Invalid Douyu danmaku pipe name');
+    }
+    return pipeName;
+}
+
+function buildDouyuDanmakuStartRequest({ requestId, roomId, sessionId, pipeName }) {
+    if (!/^\d+$/.test(String(roomId || '')) || !isSafeDouyuDanmakuToken(sessionId) ||
+        !isSafeDouyuDanmakuToken(pipeName)) {
+        throw new Error('Invalid Douyu danmaku session');
+    }
+    return {
+        type: 'startDanmaku',
+        requestId: String(requestId),
+        roomId: String(roomId),
+        sessionId: String(sessionId),
+        pipeName: String(pipeName)
+    };
+}
+
+function isDouyuDanmakuStarted(message, sessionId) {
+    return message?.type === 'danmakuStarted' && message.sessionId === sessionId;
+}
+
+function buildDouyuDanmakuMpvOption(pipeName) {
+    if (!isSafeDouyuDanmakuToken(pipeName)) {
+        throw new Error('Invalid Douyu danmaku pipe name');
+    }
+    const pipePath = '\\\\.\\pipe\\';
+    return `--input-ipc-server=${pipePath}${pipeName}`;
+}
+
+async function prepareDouyuDanmakuLaunch(media, parserKey, player, roomId, bridge) {
+    const launchMedia = {
+        ...media,
+        mpvOptions: [...(media?.mpvOptions || [])]
+    };
+    if (parserKey !== 'douyu' || !isMpvDanmakuPlayer(player) || !/^\d+$/.test(String(roomId || ''))) {
+        return { media: launchMedia, started: false };
+    }
+
+    let sessionId;
+    let pipeName;
+    try {
+        sessionId = createDouyuDanmakuSessionId();
+        pipeName = createDouyuDanmakuPipeName(sessionId);
+        const acknowledgement = await bridge.startDanmaku({
+            roomId: String(roomId), sessionId, pipeName
+        });
+        if (!isDouyuDanmakuStarted(acknowledgement, sessionId)) {
+            throw new Error('Douyu danmaku bridge returned an invalid acknowledgement');
+        }
+        const ipcOption = buildDouyuDanmakuMpvOption(pipeName);
+        if (!launchMedia.mpvOptions.includes(ipcOption)) {
+            launchMedia.mpvOptions.push(ipcOption);
+        }
+        return { media: launchMedia, started: true, sessionId, pipeName };
+    } catch (error) {
+        return { media: launchMedia, started: false, sessionId, pipeName, error };
+    }
+}
+// DOUYU_DANMAKU_HELPERS_END
+
+class BrowserMediaBridge {
+    constructor() {
+        this.socket = undefined;
+        this.connecting = undefined;
+        this.pendingRegistrations = new Map();
+        this.pendingDanmakuStarts = new Map();
+        this.inflightFetches = new Map();
+        this.clientId = createBridgeRequestId();
+        this.telegramResponses = new Map();
+        this.bootstrapPromise = undefined;
+        document.addEventListener(TELEGRAM_RESPONSE_EVENT, event => this.handleTelegramResponse(event.detail));
+    }
+    async ensureConnected() {
+        if (this.socket?.readyState === WebSocket.OPEN) {
+            return this.socket;
+        }
+        if (this.connecting) {
+            return this.connecting;
+        }
+        this.connecting = new Promise((resolve, reject) => {
+            const socket = new WebSocket(BROWSER_RELAY_WS_URL);
+            socket.binaryType = 'arraybuffer';
+            const timeout = setTimeout(() => reject(new Error('local relay connection timed out')), 1800);
+            socket.addEventListener('open', () => {
+                clearTimeout(timeout);
+                this.socket = socket;
+                socket.send(JSON.stringify({
+                    type: 'hello', protocol: 2, clientId: this.clientId,
+                    userAgent: navigator.userAgent, location: location.href
+                }));
+                resolve(socket);
+            }, { once: true });
+            socket.addEventListener('error', () => {
+                clearTimeout(timeout);
+                reject(new Error('local relay connection failed'));
+            }, { once: true });
+            socket.addEventListener('message', event => this.handleMessage(event));
+            socket.addEventListener('close', () => {
+                this.socket = undefined;
+                for (const pending of this.pendingRegistrations.values()) {
+                    pending.reject(new Error('local relay disconnected'));
+                }
+                this.pendingRegistrations.clear();
+                for (const pending of this.pendingDanmakuStarts.values()) {
+                    pending.reject(new Error('local bridge disconnected'));
+                }
+                this.pendingDanmakuStarts.clear();
+            });
+        }).finally(() => {
+            this.connecting = undefined;
+        });
+        return this.connecting;
+    }
+    async registerSource(source) {
+        const socket = await this.ensureConnected();
+        const requestId = createBridgeRequestId();
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                this.pendingRegistrations.delete(requestId);
+                reject(new Error('local relay registration timed out'));
+            }, 5000);
+            this.pendingRegistrations.set(requestId, {
+                resolve: result => { clearTimeout(timeout); resolve(result); },
+                reject: error => { clearTimeout(timeout); reject(error); }
+            });
+            socket.send(JSON.stringify({ type: 'registerSource', requestId, source }));
+        });
+    }
+    async registerTelegramSource(source) {
+        await this.ensureLocalBridge();
+        return this.registerSource(source);
+    }
+    async ensureLocalBridge() {
+        try {
+            await this.ensureConnected();
+        } catch (initialError) {
+            await this.bootstrapLocalBridge();
+        }
+    }
+    async bootstrapLocalBridge() {
+        if (this.bootstrapPromise) {
+            return this.bootstrapPromise;
+        }
+        this.bootstrapPromise = (async () => {
+            updateHandoffStatus('relay-starting');
+            window.open(`ush://${BROWSER_RELAY_BOOTSTRAP_APP}?${compress(BROWSER_RELAY_BOOTSTRAP_COMMAND)}`, '_self');
+            const deadline = Date.now() + BROWSER_RELAY_BOOTSTRAP_TIMEOUT;
+            while (Date.now() < deadline) {
+                try {
+                    await this.ensureConnected();
+                    return;
+                } catch (error) {
+                    await sleep(BROWSER_RELAY_RETRY_INTERVAL);
+                }
+            }
+            const error = new Error('local browser relay bootstrap timed out');
+            error.code = 'relay_bootstrap_failed';
+            throw error;
+        })().finally(() => {
+            this.bootstrapPromise = undefined;
+        });
+        return this.bootstrapPromise;
+    }
+    async bootstrapTelegramRelay() {
+        return this.bootstrapLocalBridge();
+    }
+    async startDanmaku({ roomId, sessionId, pipeName }) {
+        await this.ensureLocalBridge();
+        const request = buildDouyuDanmakuStartRequest({
+            requestId: createBridgeRequestId(), roomId, sessionId, pipeName
+        });
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                this.pendingDanmakuStarts.delete(request.requestId);
+                reject(new Error('Douyu danmaku bridge timed out'));
+            }, 5000);
+            this.pendingDanmakuStarts.set(request.requestId, {
+                sessionId: request.sessionId,
+                resolve: result => { clearTimeout(timeout); resolve(result); },
+                reject: error => { clearTimeout(timeout); reject(error); }
+            });
+            this.socket.send(JSON.stringify(request));
+        });
+    }
+    stopDanmaku(sessionId) {
+        if (!isSafeDouyuDanmakuToken(sessionId)) {
+            return;
+        }
+        this.sendJson({ type: 'stopDanmaku', requestId: createBridgeRequestId(), sessionId });
+    }
+    handleMessage(event) {
+        if (typeof event.data !== 'string') {
+            return;
+        }
+        let message;
+        try { message = JSON.parse(event.data); } catch (error) { return; }
+        if (message.type === 'sourceRegistered') {
+            const pending = this.pendingRegistrations.get(message.requestId);
+            if (pending) {
+                this.pendingRegistrations.delete(message.requestId);
+                pending.resolve(message);
+            }
+        } else if (message.type === 'danmakuStarted') {
+            const pending = this.pendingDanmakuStarts.get(message.requestId);
+            if (pending && isDouyuDanmakuStarted(message, pending.sessionId)) {
+                this.pendingDanmakuStarts.delete(message.requestId);
+                pending.resolve(message);
+            }
+        } else if (message.type === 'error') {
+            const requestId = message.requestId || message.id;
+            const pending = this.pendingRegistrations.get(requestId);
+            if (pending) {
+                this.pendingRegistrations.delete(requestId);
+                pending.reject(new Error(message.message || 'local relay registration failed'));
+            }
+            const danmakuPending = this.pendingDanmakuStarts.get(requestId);
+            if (danmakuPending) {
+                this.pendingDanmakuStarts.delete(requestId);
+                danmakuPending.reject(new Error(message.message || 'Douyu danmaku bridge failed'));
+            }
+        } else if (message.type === 'fetchResource') {
+            this.fetchResource(message);
+        } else if (message.type === 'cancel' || message.type === 'cancelResource' || message.type === 'cancelFetch') {
+            this.inflightFetches.get(message.id)?.abort();
+        }
+    }
+    sendJson(message) {
+        if (this.socket?.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify(message));
+        }
+    }
+    async fetchResource(message) {
+        const controller = new AbortController();
+        this.inflightFetches.set(message.id, controller);
+        try {
+            if (isTelegramUrl()) {
+                await this.fetchTelegramResource(message, controller);
+            } else {
+                await this.fetchBrowserResource(message, controller);
+            }
+        } catch (error) {
+            if (error?.name === 'AbortError') {
+                return;
+            }
+            this.sendJson({ type: 'error', id: message.id, message: error?.message || 'browser fetch failed' });
+        } finally {
+            this.inflightFetches.delete(message.id);
+        }
+    }
+    async fetchBrowserResource(message, controller) {
+        const headers = message.range ? { Range: message.range } : undefined;
+        const response = await fetch(message.url, {
+            method: message.method || 'GET', headers, credentials: 'include', signal: controller.signal
+        });
+        this.sendResponseStart(message.id, response.status, response.statusText, response.url, response.headers);
+        const reader = response.body?.getReader();
+        let sequence = 0;
+        if (reader) {
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                for (let offset = 0; offset < value.byteLength; offset += BROWSER_RELAY_CHUNK_SIZE) {
+                    await this.waitForSocketDrain(controller.signal);
+                    if (controller.signal.aborted) return;
+                    this.socket.send(packBridgeChunk({ type: 'responseChunk', id: message.id, sequence: sequence++ },
+                        value.slice(offset, offset + BROWSER_RELAY_CHUNK_SIZE)));
+                }
+            }
+        }
+        if (!controller.signal.aborted) {
+            this.sendJson({ type: 'responseEnd', id: message.id, sequenceCount: sequence });
+        }
+    }
+    sendResponseStart(id, status, statusText, finalUrl, headers) {
+        const picked = {};
+        for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+            const value = headers?.get?.(name);
+            if (value) picked[name] = value;
+        }
+        this.sendJson({ type: 'responseStart', id, status, statusText, finalUrl, headers: picked });
+    }
+    async waitForSocketDrain(signal) {
+        while (!signal?.aborted && this.socket?.bufferedAmount > BROWSER_RELAY_CHUNK_SIZE * 8) {
+            await sleep(20);
+        }
+    }
+    async fetchTelegramResource(message, controller) {
+        const id = createBridgeRequestId();
+        const response = new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                this.telegramResponses.delete(id);
+                reject(new Error('Telegram page capture is unavailable; refresh Telegram Web after updating External Player'));
+            }, 5000);
+            this.telegramResponses.set(id, { resolve, reject, timeout, bridgeId: message.id });
+        });
+        const abort = () => {
+            const pending = this.telegramResponses.get(id);
+            if (pending) {
+                clearTimeout(pending.timeout);
+                this.telegramResponses.delete(id);
+                pending.reject(new DOMException('Telegram resource request cancelled', 'AbortError'));
+            }
+            document.dispatchEvent(new CustomEvent(TELEGRAM_CANCEL_EVENT, { detail: { id } }));
+        };
+        controller.signal.addEventListener('abort', abort, { once: true });
+        document.dispatchEvent(new CustomEvent(TELEGRAM_FETCH_EVENT, { detail: {
+            id, url: message.url, method: message.method || 'GET', range: message.range || null
+        }}));
+        try {
+            await response;
+        } finally {
+            controller.signal.removeEventListener('abort', abort);
+        }
+    }
+    handleTelegramResponse(detail) {
+        const pending = this.telegramResponses.get(detail?.id);
+        if (!pending) return;
+        if (detail.type === 'error') {
+            clearTimeout(pending.timeout); this.telegramResponses.delete(detail.id); pending.reject(new Error(detail.message)); return;
+        }
+        if (detail.type === 'responseStart') {
+            this.sendJson({ ...detail, id: pending.bridgeId }); return;
+        }
+        if (detail.type === 'responseChunk') {
+            this.socket?.send(packBridgeChunk({ type: 'responseChunk', id: pending.bridgeId, sequence: detail.sequence }, detail.buffer)); return;
+        }
+        if (detail.type === 'responseEnd') {
+            clearTimeout(pending.timeout); this.telegramResponses.delete(detail.id);
+            this.sendJson({ type: 'responseEnd', id: pending.bridgeId, sequenceCount: detail.sequenceCount });
+            pending.resolve();
+        }
+    }
+}
+
+const browserMediaBridge = new BrowserMediaBridge();
+
+function isTelegramUrl(url = location.href) {
+    return /^https:\/\/web(?:k|z)?\.telegram\.org\//i.test(url || '');
+}
+
+function getTelegramCapture() {
+    if (!isTelegramUrl()) return undefined;
+    const page = typeof unsafeWindow === 'object' ? unsafeWindow : window;
+    const capture = page?.[TELEGRAM_CAPTURE_KEY];
+    return capture?.version === 'external-player-v3' ? capture : undefined;
+}
+
+function resolveTelegramCaptureSource() {
+    try {
+        return getTelegramCapture()?.resolveSource?.() || undefined;
+    } catch (error) {
+        console.warn('Telegram capture source lookup failed', error);
+        return undefined;
+    }
+}
+
+function installTelegramPageCapture() {
+    if (!isTelegramUrl()) return;
+    const page = typeof unsafeWindow === 'object' ? unsafeWindow : window;
+    if (!page || page[TELEGRAM_CAPTURE_KEY]) return;
+    try {
+        const pageDocument = page.document;
+        const blobs = new page.Map();
+        const controllers = new page.Map();
+        const streamCandidates = [];
+        const absoluteUrl = value => {
+            if (!value) return '';
+            try { return new page.URL(String(value), page.location.href).href; } catch (error) { return String(value); }
+        };
+        const isTelegramStreamUrl = value => {
+            const url = absoluteUrl(value);
+            return /^https:\/\/web(?:k|z)?\.telegram\.org\//i.test(url) &&
+                /\/(?:stream|download|hls|hls_stream|hls_quality_file)(?:[/?#]|$)/i.test(url);
+        };
+        // Telegram's opaque /hls_stream endpoint serves range-addressable MP4 bytes,
+        // despite its name. Only real playlist endpoints should enter HLS rewriting.
+        const getStreamKind = url => /\.m3u8(?:$|[?#])/i.test(url) ||
+            /\/(?:hls|hls_quality_file)(?:[/?#]|$)/i.test(url) ? 'hls' : 'direct';
+        const rememberCandidate = (value, reason) => {
+            const url = absoluteUrl(value);
+            if (!isTelegramStreamUrl(url)) return;
+            const now = Date.now();
+            streamCandidates.unshift({ url, reason, kind: getStreamKind(url), time: now });
+            const seen = new page.Set();
+            for (let index = 0; index < streamCandidates.length;) {
+                const candidate = streamCandidates[index];
+                if (seen.has(candidate.url) || now - candidate.time > 10 * 60 * 1000) {
+                    streamCandidates.splice(index, 1);
+                } else {
+                    seen.add(candidate.url);
+                    index += 1;
+                }
+            }
+            if (streamCandidates.length > 30) streamCandidates.length = 30;
+        };
+        const rememberBlob = (url, blob) => {
+            if (url && blob instanceof page.Blob) {
+                blobs.set(url, blob);
+            }
+        };
+        const createObjectURL = page.URL.createObjectURL.bind(page.URL);
+        page.URL.createObjectURL = object => {
+            const url = createObjectURL(object);
+            rememberBlob(url, object);
+            return url;
+        };
+        const setAttribute = page.Element.prototype.setAttribute;
+        page.Element.prototype.setAttribute = function patchedSetAttribute(name, value) {
+            if (this?.tagName === 'VIDEO' && String(name).toLowerCase() === 'src') {
+                rememberCandidate(value, 'video.setAttribute');
+            }
+            return setAttribute.call(this, name, value);
+        };
+        const mediaSource = page.Object.getOwnPropertyDescriptor(page.HTMLMediaElement.prototype, 'src');
+        if (mediaSource?.get && mediaSource?.set) {
+            page.Object.defineProperty(page.HTMLMediaElement.prototype, 'src', {
+                configurable: true,
+                enumerable: mediaSource.enumerable,
+                get() { return mediaSource.get.call(this); },
+                set(value) {
+                    rememberCandidate(value, 'video.src');
+                    return mediaSource.set.call(this, value);
+                }
+            });
+        }
+        const pageFetch = page.fetch.bind(page);
+        page.fetch = function patchedFetch(input, init) {
+            rememberCandidate(typeof input === 'string' ? input : input?.url, 'fetch');
+            return pageFetch(input, init);
+        };
+        const latestPerformanceStream = () => {
+            try {
+                const entries = page.performance.getEntriesByType('resource') || [];
+                for (let index = entries.length - 1; index >= 0; index -= 1) {
+                    if (isTelegramStreamUrl(entries[index].name)) {
+                        return absoluteUrl(entries[index].name);
+                    }
+                }
+            } catch (error) { /* Performance entries are optional. */ }
+            return '';
+        };
+        const getBestVideo = () => {
+            const videos = [...pageDocument.querySelectorAll('video')];
+            return videos.map((video, index) => {
+                const rect = video.getBoundingClientRect();
+                const visible = rect.width > 80 && rect.height > 80;
+                const score = (video.paused ? 0 : 1000000) + Math.round(rect.width * rect.height) +
+                    (Number.isFinite(video.duration) ? Math.round(video.duration) : 0);
+                return { video, index, visible, score };
+            }).filter(item => item.visible).sort((left, right) => right.score - left.score)[0]?.video;
+        };
+        const resolveSource = () => {
+            const video = getBestVideo();
+            const sources = [video?.getAttribute?.('src'), video?.currentSrc, video?.src, video?.querySelector?.('source')?.src]
+                .map(absoluteUrl).filter(Boolean);
+            const direct = sources.find(isTelegramStreamUrl);
+            if (direct) return { url: direct, kind: getStreamKind(direct), capture: 'video' };
+            const performance = latestPerformanceStream();
+            if (performance) return { url: performance, kind: getStreamKind(performance), capture: 'performance' };
+            const candidate = streamCandidates[0];
+            if (candidate) return { url: candidate.url, kind: candidate.kind, capture: candidate.reason };
+            const blob = sources.find(url => url.startsWith('blob:')) || '';
+            if (blob) return { url: blob, kind: 'blob', capturedBlob: blobs.has(blob) };
+            return { url: sources[0] || '', kind: 'unknown', capturedBlob: false };
+        };
+        page[TELEGRAM_CAPTURE_KEY] = {
+            version: 'external-player-v3',
+            resolveSource,
+            hasBlob: url => blobs.has(url)
+        };
+        const emit = detail => pageDocument.dispatchEvent(new page.CustomEvent(TELEGRAM_RESPONSE_EVENT, { detail }));
+        const pack = async (id, response, reader, signal) => {
+            const headers = {};
+            ['content-type', 'content-length', 'content-range', 'accept-ranges'].forEach(name => {
+                const value = response.headers?.get?.(name);
+                if (value) headers[name] = value;
+            });
+            emit({ type: 'responseStart', id, status: response.status, statusText: response.statusText, finalUrl: response.url, headers });
+            let sequence = 0;
+            while (reader && !signal.aborted) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                for (let offset = 0; offset < value.byteLength && !signal.aborted; offset += BROWSER_RELAY_CHUNK_SIZE) {
+                    emit({ type: 'responseChunk', id, sequence: sequence++, buffer: value.slice(offset, offset + BROWSER_RELAY_CHUNK_SIZE).buffer });
+                }
+            }
+            if (!signal.aborted) emit({ type: 'responseEnd', id, sequenceCount: sequence });
+        };
+        pageDocument.addEventListener(TELEGRAM_CANCEL_EVENT, event => controllers.get(event.detail?.id)?.abort());
+        pageDocument.addEventListener(TELEGRAM_FETCH_EVENT, async event => {
+            const request = event.detail;
+            const controller = new page.AbortController();
+            controllers.set(request.id, controller);
+            try {
+                if (request.url.startsWith('blob:')) {
+                    const blob = blobs.get(request.url);
+                    if (!blob) throw new Error('captured Blob is unavailable');
+                    let start = 0;
+                    let end = blob.size - 1;
+                    const match = request.range?.match(/bytes=(\\d*)-(\\d*)/);
+                    if (match) {
+                        start = match[1] ? Number(match[1]) : 0;
+                        end = match[2] ? Math.min(Number(match[2]), end) : end;
+                    }
+                    const body = blob.slice(start, end + 1);
+                    const headers = new page.Headers({ 'content-type': blob.type || 'video/mp4', 'content-length': String(body.size), 'accept-ranges': 'bytes' });
+                    if (match) headers.set('content-range', 'bytes ' + start + '-' + end + '/' + blob.size);
+                    await pack(request.id, new page.Response(body, { status: match ? 206 : 200, headers }), body.stream().getReader(), controller.signal);
+                } else {
+                    const headers = request.range ? { Range: request.range } : undefined;
+                    const response = await page.fetch(request.url, { method: request.method || 'GET', headers, credentials: 'include', signal: controller.signal });
+                    await pack(request.id, response, response.body?.getReader(), controller.signal);
+                }
+            } catch (error) {
+                if (!controller.signal.aborted) emit({ type: 'error', id: request.id, message: error?.message || 'Telegram capture failed' });
+            } finally {
+                controllers.delete(request.id);
+            }
+        });
+    } catch (error) {
+        try { delete page[TELEGRAM_CAPTURE_KEY]; } catch (ignored) { /* page realm denied cleanup */ }
+        console.warn('Telegram page capture could not be installed', error);
+    }
+}
+
+installTelegramPageCapture();
+
+// DOUYU_HELPERS_START
+const DOUYU_DEFAULT_DID = '10000000000000000000000000001501';
+const DOUYU_MD5_ROTATIONS = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
+];
+const DOUYU_MD5_CONSTANTS = Array.from({
+    length: 64
+}, (_, index) => Math.floor(Math.abs(Math.sin(index + 1)) * 0x100000000) >>> 0);
+
+function douyuMd5(value) {
+    const bytes = new TextEncoder().encode(String(value));
+    const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+    const buffer = new Uint8Array(paddedLength);
+    buffer.set(bytes);
+    buffer[bytes.length] = 0x80;
+
+    const view = new DataView(buffer.buffer);
+    const bitLength = bytes.length * 8;
+    view.setUint32(paddedLength - 8, bitLength >>> 0, true);
+    view.setUint32(paddedLength - 4, Math.floor(bitLength / 0x100000000), true);
+
+    let stateA = 0x67452301;
+    let stateB = 0xefcdab89;
+    let stateC = 0x98badcfe;
+    let stateD = 0x10325476;
+
+    for (let offset = 0; offset < paddedLength; offset += 64) {
+        const words = Array.from({
+            length: 16
+        }, (_, index) => view.getUint32(offset + index * 4, true));
+        let a = stateA;
+        let b = stateB;
+        let c = stateC;
+        let d = stateD;
+
+        for (let index = 0; index < 64; index++) {
+            let valueF;
+            let wordIndex;
+            if (index < 16) {
+                valueF = (b & c) | (~b & d);
+                wordIndex = index;
+            } else if (index < 32) {
+                valueF = (d & b) | (~d & c);
+                wordIndex = (5 * index + 1) % 16;
+            } else if (index < 48) {
+                valueF = b ^ c ^ d;
+                wordIndex = (3 * index + 5) % 16;
+            } else {
+                valueF = c ^ (b | ~d);
+                wordIndex = (7 * index) % 16;
+            }
+
+            const sum = (a + valueF + DOUYU_MD5_CONSTANTS[index] + words[wordIndex]) >>> 0;
+            const shift = DOUYU_MD5_ROTATIONS[index];
+            const rotated = ((sum << shift) | (sum >>> (32 - shift))) >>> 0;
+            a = d;
+            d = c;
+            c = b;
+            b = (b + rotated) >>> 0;
+        }
+
+        stateA = (stateA + a) >>> 0;
+        stateB = (stateB + b) >>> 0;
+        stateC = (stateC + c) >>> 0;
+        stateD = (stateD + d) >>> 0;
+    }
+
+    return [stateA, stateB, stateC, stateD].map(value =>
+        [0, 8, 16, 24].map(shift =>
+            ((value >>> shift) & 0xff).toString(16).padStart(2, '0')
+        ).join('')
+    ).join('');
+}
+
+function buildDouyuAuth(encryption, roomId, timestamp) {
+    const key = String(encryption?.key || '');
+    const random = String(encryption?.rand_str || '');
+    const encryptionCount = Number(encryption?.enc_time);
+    if (!key || !random || !Number.isInteger(encryptionCount) ||
+        encryptionCount < 0 || encryptionCount > 1024) {
+        throw new Error('Douyu returned invalid encryption data');
+    }
+    let digest = random;
+    for (let index = 0; index < encryptionCount; index++) {
+        digest = douyuMd5(digest + key);
+    }
+    const suffix = Number(encryption?.is_special) === 1 ? '' : `${roomId}${timestamp}`;
+    return douyuMd5(digest + key + suffix);
+}
+
+function extractDouyuRoomId({
+    url = '',
+    html = '',
+    canonicalUrl = '',
+    pageRoomId
+} = {}) {
+    const normalize = value => /^\d+$/.test(String(value || '').trim()) ?
+        String(value).trim() :
+        undefined;
+    const direct = normalize(pageRoomId);
+    if (direct) {
+        return direct;
+    }
+
+    const markupPatterns = [
+        /\$ROOM\.room_id\s*=\s*["']?(\d+)/i,
+        /\broomID\s*:\s*["']?(\d+)/i
+    ];
+    for (const pattern of markupPatterns) {
+        const match = String(html || '').match(pattern);
+        if (match?.[1]) {
+            return match[1];
+        }
+    }
+
+    for (const candidate of [canonicalUrl, url]) {
+        try {
+            const parsed = new URL(candidate);
+            if (!/(^|\.)douyu\.com$/i.test(parsed.hostname)) {
+                continue;
+            }
+            const segments = parsed.pathname.split('/').filter(Boolean);
+            const roomId = normalize(segments.at(-1));
+            if (roomId) {
+                return roomId;
+            }
+        } catch (error) {}
+    }
+}
+
+function normalizeDouyuQualities(multirates) {
+    if (!Array.isArray(multirates)) {
+        return [];
+    }
+    const byRate = new Map();
+    for (const item of multirates) {
+        const rate = Number(item?.rate);
+        const bit = Number(item?.bit);
+        if (!Number.isFinite(rate)) {
+            continue;
+        }
+        const quality = {
+            name: String(item?.name || `Rate ${rate}`).trim(),
+            rate,
+            bit: Number.isFinite(bit) && bit >= 0 ? bit : 0
+        };
+        const previous = byRate.get(rate);
+        if (!previous || quality.bit > previous.bit) {
+            byRate.set(rate, quality);
+        }
+    }
+    return [...byRate.values()].sort((left, right) => {
+        const sourceScore = quality =>
+            quality.rate === 0 && quality.bit === 0 ? Number.MAX_SAFE_INTEGER : quality.bit;
+        return sourceScore(right) - sourceScore(left) || right.rate - left.rate;
+    });
+}
+
+function selectDouyuQuality(qualities, selectedRate = 'auto') {
+    if (!Array.isArray(qualities) || qualities.length === 0) {
+        return undefined;
+    }
+    if (selectedRate !== 'auto') {
+        const requestedRate = Number(selectedRate);
+        return qualities.find(item => item.rate === requestedRate);
+    }
+    return qualities[0];
+}
+
+function buildDouyuDirectMedia(playData, title) {
+    const baseUrl = String(playData?.rtmp_url || '').replace(/\/+$/, '');
+    const streamPath = String(playData?.rtmp_live || '').replace(/^\/+/, '');
+    const video = baseUrl && streamPath ? `${baseUrl}/${streamPath}` : '';
+    if (!/^https?:\/\//i.test(video)) {
+        throw new Error('Douyu returned an invalid live stream');
+    }
+    return {
+        video,
+        title,
+        origin: undefined,
+        referer: 'https://www.douyu.com/',
+        cookie: undefined,
+        time: undefined,
+        mpvOptions: ['--no-ytdl', '--force-window=immediate'],
+        sensitiveUrl: true,
+        disableBrowserRelay: true
+    };
+}
+// DOUYU_HELPERS_END
+
+// LAUNCH_LOG_HELPER_START
+function logLaunchArgs(args, media) {
+    if (!media?.sensitiveUrl) {
+        console.log(args);
+        return;
+    }
+    const redacted = Array.isArray(args) ? [...args] : [args];
+    if (redacted.length > 0) {
+        redacted[0] = '[sensitive media URL redacted]';
+    }
+    console.log(redacted);
+}
+// LAUNCH_LOG_HELPER_END
 
 class BaseParser {
     constructor() {
@@ -234,6 +1118,8 @@ class BaseParser {
             cookie: undefined,
             time: undefined,
             mpvOptions: [],
+            sensitiveUrl: false,
+            disableBrowserRelay: false,
             bilibili: {
                 cid: undefined
             },
@@ -318,9 +1204,62 @@ class BaseParser {
             console.error('关闭失败', error);
         }
     }
+    async prepareLaunchMedia(player) {
+        const media = {
+            ...currentMedia,
+            mpvOptions: [...(currentMedia.mpvOptions || [])],
+            bilibili: { ...(currentMedia.bilibili || {}) },
+            ytdlp: { ...(currentMedia.ytdlp || {}) }
+        };
+        const relayMode = currentConfig.global.browserRelayMode || 'auto';
+        const telegramRelayRequired = isTelegramUrl() && isRelayPlayer(player) && relayMode !== 'off';
+        if (!shouldUseBrowserRelay(media, player)) {
+            return media;
+        }
+        try {
+            const source = buildRelaySource(media);
+            if (isTelegramUrl() && source.kind === 'blob' && media.telegramBlobCaptured !== true) {
+                const error = new Error(translation.handoffTelegramBlobUnavailable);
+                error.code = 'uncaptured_telegram_blob';
+                throw error;
+            }
+            const registered = isTelegramUrl() ?
+                await browserMediaBridge.registerTelegramSource(source) :
+                await browserMediaBridge.registerSource(source);
+            media.video = registered.localUrl;
+            media.origin = undefined;
+            media.referer = undefined;
+            media.cookie = undefined;
+            ['--no-ytdl', '--force-window=immediate'].forEach(option => {
+                if (!media.mpvOptions.includes(option)) media.mpvOptions.push(option);
+            });
+            if (source.kind === 'hls') {
+                const bitrate = await probeHlsBitrate(currentMedia.video, source.preferredHeight);
+                if (bitrate) media.mpvOptions.push(`--hls-bitrate=${bitrate}`);
+            }
+            updateHandoffStatus('relay-ready');
+            return media;
+        } catch (error) {
+            const relayErrorMessage = error?.code === 'uncaptured_telegram_blob' ?
+                translation.handoffTelegramBlobUnavailable : error?.code === 'relay_bootstrap_failed' ?
+                    translation.handoffRelayStartFailed : translation.handoffRelayUnavailable;
+            if (telegramRelayRequired || isBrowserOnlySource(media)) {
+                updateHandoffStatus('relay-unavailable', relayErrorMessage);
+                showBrowserRelayToast(relayErrorMessage);
+                throw new Error(relayErrorMessage);
+            }
+            updateHandoffStatus('relay-fallback');
+            showBrowserRelayToast(translation.handoffRelayFallback);
+            return media;
+        }
+    }
     async play(player) {
         try {
-            showLoading(6000);
+            updateHandoffStatus('resolving');
+            const relayMode = currentConfig.global.browserRelayMode || 'auto';
+            const telegramRelayLaunch = isTelegramUrl() && isRelayPlayer(player) && relayMode !== 'off';
+            const douyuDanmakuLaunch = currentParser?.parserKey === 'douyu' && isMpvDanmakuPlayer(player);
+            showLoading(telegramRelayLaunch || douyuDanmakuLaunch ? BROWSER_RELAY_BOOTSTRAP_TIMEOUT + 8000 : 6000);
 
             // 别名，方便播放事件使用
             currentPlayer = player;
@@ -352,14 +1291,16 @@ class BaseParser {
             }
             while (currentTryCount < MAX_TRY_COUNT);
             if (latestError) {
+                updateHandoffStatus('failed');
                 showToast(translation.loadFail + ': ' + latestError.message);
                 return;
             }
             if (!await parser.check()) {
+                updateHandoffStatus('failed');
                 showToast(translation.loadFail);
                 return;
             }
-            media = currentMedia;
+            media = await this.prepareLaunchMedia(player);
 
             if (!player.presetEvent.syncTime) {
                 media.time = undefined;
@@ -378,9 +1319,9 @@ class BaseParser {
                                 media.audio ? `--audio-file="${media.audio}"` : '',
                                 media.subtitle ? `--sub-file="${media.subtitle}"` : '',
                                 ...(media.mpvOptions || []),
-                                media.origin ? `--http-header-fields="origin: ${media.origin}"` : '',
-                                media.referer ? `--http-header-fields="referer: ${media.referer}"` : '',
-                                media.cookie ? `--http-header-fields="cookie: ${media.cookie}"` : '',
+                                media.origin ? `--http-header-fields-append="origin: ${media.origin}"` : '',
+                                media.referer ? `--http-header-fields-append="referer: ${media.referer}"` : '',
+                                media.cookie ? `--http-header-fields-append="cookie: ${media.cookie}"` : '',
                                 config.networkProxy ? `--http-proxy="${config.networkProxy}"` : '',
                                 media.ytdlp.networkProxy ? `--ytdl-raw-options-append="proxy=[${media.ytdlp.networkProxy}]"` : '',
                                 media.ytdlp.impersonate ? `--ytdl-raw-options-append="impersonate=${media.ytdlp.impersonate}"` : '',
@@ -391,7 +1332,7 @@ class BaseParser {
                                 media.time ? `--start="${media.time}"` : '',
                             ]
                             args = args.filter(item => item !== '');
-                            console.log(args);
+                            logLaunchArgs(args, media);
                             window.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');
 
                         } else if ('MPVNET' === player.name) {
@@ -400,9 +1341,9 @@ class BaseParser {
                                 media.audio ? `--audio-file="${media.audio}"` : '',
                                 media.subtitle ? `--sub-file="${media.subtitle}"` : '',
                                 ...(media.mpvOptions || []),
-                                media.origin ? `--http-header-fields="origin: ${media.origin}"` : '',
-                                media.referer ? `--http-header-fields="referer: ${media.referer}"` : '',
-                                media.cookie ? `--http-header-fields="cookie: ${media.cookie}"` : '',
+                                media.origin ? `--http-header-fields-append="origin: ${media.origin}"` : '',
+                                media.referer ? `--http-header-fields-append="referer: ${media.referer}"` : '',
+                                media.cookie ? `--http-header-fields-append="cookie: ${media.cookie}"` : '',
                                 config.networkProxy ? `--http-proxy="${config.networkProxy}"` : '',
                                 media.ytdlp.networkProxy ? `--ytdl-raw-options-append="proxy=[${media.ytdlp.networkProxy}]"` : '',
                                 media.ytdlp.impersonate ? `--ytdl-raw-options-append="impersonate=${media.ytdlp.impersonate}"` : '',
@@ -413,7 +1354,7 @@ class BaseParser {
                                 media.time ? `--start="${media.time}"` : '',
                             ]
                             args = args.filter(item => item !== '');
-                            console.log(args);
+                            logLaunchArgs(args, media);
                             window.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');
 
                         } else if ('PotPlayer' === player.name) {
@@ -427,7 +1368,7 @@ class BaseParser {
                                 media.time ? `/seek="${media.time}"` : '',
                             ]
                             args = args.filter(item => item !== '');
-                            console.log(args);
+                            logLaunchArgs(args, media);
                             window.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');
 
                         } else if ('IINA' === player.name) {
@@ -438,7 +1379,7 @@ class BaseParser {
                                 media.referer ? `mpv_http-header-fields=${encodeURIComponent('referer: ' + media.referer)}` : '',
                             ]
                             args = args.filter(item => item !== '');
-                            console.log(args);
+                            logLaunchArgs(args, media);
                             window.open(`iina://weblink?${args.join(delimiter)}`, '_self');
 
                         } else {
@@ -449,6 +1390,7 @@ class BaseParser {
                     }
                 }
             }
+            updateHandoffStatus('success', player.name);
 
             if (player.presetEvent.closeAuto) {
                 parser.close();
@@ -457,10 +1399,283 @@ class BaseParser {
                 parser.pause();
             }
         } catch (error) {
+            updateHandoffStatus('failed');
             showToast(translation.loadFail + ': ' + error.message);
         } finally {
             hideLoading();
         }
+    }
+}
+
+function isRelayPlayer(player) {
+    return ['MPV', 'MPVNET'].includes(String(player?.name || '').toUpperCase());
+}
+
+function isBrowserOnlySource(media) {
+    return String(media?.video || '').startsWith('blob:') || media?.browserOnly === true;
+}
+
+function shouldUseBrowserRelay(media, player) {
+    const mode = currentConfig.global.browserRelayMode || 'auto';
+    if (media?.disableBrowserRelay === true || mode === 'off' || !isRelayPlayer(player)) return false;
+    const url = String(media?.video || '');
+    if (!/^(https?:|blob:)/i.test(url)) return false;
+    if (mode === 'always') return true;
+    return isBrowserOnlySource(media) || isTelegramUrl();
+}
+
+function buildRelaySource(media) {
+    const url = String(media.video || '');
+    const isHls = /\.m3u8?(?:$|[?#])/i.test(url) || currentParser?.parserKey === 'missav' ||
+        media.telegramSourceKind === 'hls';
+    return {
+        url,
+        kind: url.startsWith('blob:') ? 'blob' : (isHls ? 'hls' : 'direct'),
+        title: media.title || document.title,
+        pageUrl: location.href,
+        contentType: isHls ? 'application/vnd.apple.mpegurl' : null,
+        size: null,
+        preferredHeight: currentConfig.global.parser.ytdlp.preferredQuality === 'unlimited' ? null :
+            Number(currentConfig.global.parser.ytdlp.preferredQuality) || null
+    };
+}
+
+async function probeHlsBitrate(url, preferredHeight) {
+    if (!preferredHeight || !/^https?:/i.test(url)) return undefined;
+    try {
+        const text = await (await fetch(url, { credentials: 'include' })).text();
+        const variants = [...text.matchAll(/#EXT-X-STREAM-INF:([^\n]+)\n[^\n]+/g)].map(match => {
+            const height = Number(match[1].match(/RESOLUTION=\d+x(\d+)/i)?.[1] || 0);
+            const bandwidth = Number(match[1].match(/(?:AVERAGE-)?BANDWIDTH=(\d+)/i)?.[1] || 0);
+            return { height, bandwidth };
+        }).filter(item => item.bandwidth);
+        variants.sort((a, b) => a.height - b.height || a.bandwidth - b.bandwidth);
+        return (variants.filter(item => item.height <= preferredHeight).pop() || variants[0])?.bandwidth;
+    } catch (error) {
+        return undefined;
+    }
+}
+
+class PassiveResourceSniffer {
+    constructor(onChange, minimumPerformanceStartTime = 0) {
+        this.onChange = onChange;
+        this.minimumPerformanceStartTime = minimumPerformanceStartTime;
+        this.candidates = new Map();
+        this.sequence = 0;
+        this.hasMediaElement = false;
+        this.started = false;
+        this.bestUrl = undefined;
+        this.presenceNotified = false;
+        this.performanceObserver = undefined;
+        this.mutationObserver = undefined;
+        this.domReadyHandler = undefined;
+    }
+
+    start() {
+        if (this.started) {
+            return;
+        }
+        this.started = true;
+        this.collectFromPerformance();
+        this.observePerformance();
+        this.observeDocument();
+    }
+
+    stop() {
+        this.performanceObserver?.disconnect();
+        this.mutationObserver?.disconnect();
+        if (this.domReadyHandler) {
+            document.removeEventListener('DOMContentLoaded', this.domReadyHandler);
+        }
+        this.started = false;
+    }
+
+    refresh() {
+        this.collectFromPerformance();
+        this.collectFromDom(document);
+        return this.getBestCandidate();
+    }
+
+    observePerformance() {
+        if (typeof PerformanceObserver === 'undefined') {
+            return;
+        }
+        try {
+            this.performanceObserver = new PerformanceObserver(entries => {
+                for (const entry of entries.getEntries()) {
+                    this.addCandidate(entry.name, 'performance', entry.startTime);
+                }
+            });
+            try {
+                this.performanceObserver.observe({
+                    type: 'resource',
+                    buffered: true
+                });
+            } catch (error) {
+                this.performanceObserver.observe({
+                    entryTypes: ['resource']
+                });
+            }
+        } catch (error) {
+            console.debug('Passive resource observer unavailable', error);
+        }
+    }
+
+    collectFromPerformance() {
+        try {
+            const entries = performance.getEntriesByType ? performance.getEntriesByType('resource') : [];
+            for (const entry of entries) {
+                this.addCandidate(entry.name, 'performance', entry.startTime);
+            }
+        } catch (error) {
+            console.debug('Resource timing entries unavailable', error);
+        }
+    }
+
+    observeDocument() {
+        const begin = () => {
+            this.collectFromDom(document);
+            if (!document.documentElement || typeof MutationObserver === 'undefined') {
+                return;
+            }
+            this.mutationObserver = new MutationObserver(mutations => {
+                for (const mutation of mutations) {
+                    if (mutation.type === 'attributes') {
+                        this.collectFromDom(mutation.target);
+                        continue;
+                    }
+                    for (const node of mutation.addedNodes) {
+                        this.collectFromDom(node);
+                    }
+                }
+            });
+            this.mutationObserver.observe(document.documentElement, {
+                subtree: true,
+                childList: true,
+                attributes: true,
+                attributeFilter: [
+                    'src',
+                    'content',
+                    'data-src',
+                    'data-video',
+                    'data-hls',
+                    'data-m3u8'
+                ]
+            });
+        };
+
+        if (document.documentElement) {
+            begin();
+        } else {
+            this.domReadyHandler = begin;
+            document.addEventListener('DOMContentLoaded', begin, {
+                once: true
+            });
+        }
+    }
+
+    collectFromDom(root) {
+        if (!root || (root.nodeType !== Node.DOCUMENT_NODE && root.nodeType !== Node.ELEMENT_NODE)) {
+            return;
+        }
+
+        const selector = [
+            'video',
+            'audio',
+            'source',
+            'meta[property^="og:video"]',
+            'meta[name="twitter:player:stream"]',
+            '[data-video]',
+            '[data-hls]',
+            '[data-m3u8]'
+        ].join(',');
+        const elements = [];
+        if (root.nodeType === Node.ELEMENT_NODE && root.matches?.(selector)) {
+            elements.push(root);
+        }
+        root.querySelectorAll?.(selector).forEach(element => elements.push(element));
+
+        for (const element of elements) {
+            const tagName = element.tagName?.toLowerCase();
+            const isVideoElement = tagName === 'video';
+            const isMediaElement = isVideoElement || tagName === 'audio' || tagName === 'source';
+            if (isVideoElement && !this.hasMediaElement) {
+                this.hasMediaElement = true;
+                this.notifyIfChanged();
+            }
+            const source = isMediaElement ? 'dom-media' : 'dom-metadata';
+            const values = [
+                element.currentSrc,
+                element.src,
+                element.getAttribute?.('src'),
+                element.getAttribute?.('content'),
+                element.getAttribute?.('data-src'),
+                element.getAttribute?.('data-video'),
+                element.getAttribute?.('data-hls'),
+                element.getAttribute?.('data-m3u8')
+            ];
+            for (const value of values) {
+                this.addCandidate(value, source);
+            }
+        }
+    }
+
+    addCandidate(url, source, performanceStartTime) {
+        if (source === 'performance' && Number.isFinite(performanceStartTime) &&
+            performanceStartTime < this.minimumPerformanceStartTime) {
+            return;
+        }
+        const candidate = createResourceCandidate(url, source);
+        if (!candidate) {
+            return;
+        }
+        const previous = this.candidates.get(candidate.url);
+        candidate.sequence = ++this.sequence;
+        if (previous) {
+            candidate.score = Math.max(candidate.score, previous.score);
+        }
+        this.candidates.set(candidate.url, candidate);
+        this.trimCandidates();
+        this.notifyIfChanged();
+    }
+
+    trimCandidates() {
+        while (this.candidates.size > RESOURCE_SNIFFER_MAX_CANDIDATES) {
+            let worst;
+            for (const candidate of this.candidates.values()) {
+                if (!worst || candidate.score < worst.score ||
+                    (candidate.score === worst.score && candidate.sequence < worst.sequence)) {
+                    worst = candidate;
+                }
+            }
+            if (!worst) {
+                return;
+            }
+            this.candidates.delete(worst.url);
+        }
+    }
+
+    getBestCandidate() {
+        let best;
+        for (const candidate of this.candidates.values()) {
+            if (!best || candidate.score > best.score ||
+                (candidate.score === best.score && candidate.sequence > best.sequence)) {
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    notifyIfChanged() {
+        const best = this.getBestCandidate();
+        const nextBestUrl = best?.url;
+        const presenceChanged = this.hasMediaElement && !this.presenceNotified;
+        if (this.bestUrl === nextBestUrl && !presenceChanged) {
+            return;
+        }
+        this.bestUrl = nextBestUrl;
+        this.presenceNotified = this.presenceNotified || this.hasMediaElement;
+        this.onChange?.(best, this.hasMediaElement);
     }
 }
 
@@ -489,7 +1704,7 @@ const PARSER = {
                 `--log-file="${PROJECT_NAME}-ytdlp.log"`,
             ];
             if (isPornhubUrl()) {
-                currentMedia.mpvOptions.push('--ytdl-raw-options-append="cookies=F:\\mpv_2026\\mpv-lazy\\cookies.txt"');
+                currentMedia.mpvOptions.push('--ytdl-raw-options-append="cookies=cookies.txt"');
             }
             currentMedia.ytdlp.quality = undefined;
             currentMedia.ytdlp.impersonate = isSpankbangUrl() ? 'Safari-18.0' : 'chrome';
@@ -630,6 +1845,59 @@ const PARSER = {
         }
         async parseVideo() {
             currentMedia.video = this.video;
+        }
+    },
+    RESOURCE: class Parser extends BaseParser {
+        constructor(sniffer = resourceSniffer) {
+            super();
+            this.sniffer = sniffer;
+            this.isResourceFallback = true;
+            this.parserKey = 'resource';
+        }
+        async execute() {
+            await this.parseVideo();
+            await this.parseTitle();
+            await this.parseOrigin();
+            await this.parseReferer();
+            await this.parseTime();
+            currentMedia.mpvOptions = currentMedia.video ? ['--no-ytdl'] : [];
+        }
+        async parseVideo() {
+            const candidate = this.sniffer?.refresh();
+            currentMedia.video = candidate?.url;
+            if (candidate) {
+                updateHandoffStatus('resource-ready', getResourceCandidateLabel(candidate));
+            }
+        }
+        async check(video) {
+            video = video || currentMedia.video;
+            return Boolean(video && this.sniffer?.candidates.has(video));
+        }
+    },
+    TELEGRAM: class Parser extends BaseParser {
+        constructor() {
+            super();
+            this.parserKey = 'telegram';
+        }
+        async execute() {
+            const videos = [...document.querySelectorAll('video')];
+            const video = videos.sort((left, right) => {
+                const leftRect = left.getBoundingClientRect();
+                const rightRect = right.getBoundingClientRect();
+                return rightRect.width * rightRect.height - leftRect.width * leftRect.height;
+            })[0];
+            const captured = resolveTelegramCaptureSource();
+            const fallbackSource = video?.currentSrc || video?.src || video?.querySelector('source')?.src;
+            const source = captured?.url || fallbackSource;
+            currentMedia.video = source || undefined;
+            currentMedia.title = document.title.replace(/^Telegram\s*/i, '').trim() || document.title;
+            currentMedia.browserOnly = String(source || '').startsWith('blob:');
+            currentMedia.telegramBlobCaptured = currentMedia.browserOnly && captured?.capturedBlob === true;
+            currentMedia.telegramSourceKind = captured?.kind;
+            currentMedia.time = video?.currentTime;
+        }
+        async check(video) {
+            return Boolean(video || currentMedia.video);
         }
     },
     BILIBILI: class Parser extends BaseParser {
@@ -912,6 +2180,184 @@ const PARSER = {
             }
         }
     },
+    DOUYU: class Parser extends BaseParser {
+        constructor() {
+            super();
+            this.pageUrl = location.href;
+            this.selectedRate = 'auto';
+            this.qualities = [];
+            this.qualityLoadPromise = undefined;
+            this.roomInfo = undefined;
+        }
+        async execute() {
+            const room = await this.resolveRoomInfo();
+            const initial = await this.requestPlayInfo(room.roomId, 0);
+            this.qualities = normalizeDouyuQualities(initial.data?.multirates);
+            const selected = selectDouyuQuality(this.qualities, this.selectedRate);
+            let playData = initial.data;
+
+            if (selected?.rate && selected.rate !== 0) {
+                try {
+                    playData = (await this.requestPlayInfo(room.roomId, selected.rate)).data;
+                } catch (error) {
+                    playData = (await this.requestPlayInfo(room.roomId, 0)).data;
+                }
+            }
+
+            Object.assign(currentMedia, buildDouyuDirectMedia(playData, room.title));
+        }
+        async prepareLaunchMedia(player) {
+            const media = await super.prepareLaunchMedia(player);
+            const result = await prepareDouyuDanmakuLaunch(
+                media,
+                this.parserKey,
+                player,
+                this.roomInfo?.roomId,
+                browserMediaBridge
+            );
+            if (result.error) {
+                console.warn(`Douyu danmaku unavailable; starting video without danmaku: ${result.error.message}`);
+                updateHandoffStatus('danmaku-unavailable');
+            }
+            return result.media;
+        }
+        async getQualityOptions() {
+            if (this.qualities.length > 0) {
+                return this.qualities;
+            }
+            if (this.qualityLoadPromise) {
+                return this.qualityLoadPromise;
+            }
+            this.qualityLoadPromise = (async () => {
+                const room = await this.resolveRoomInfo();
+                const initial = await this.requestPlayInfo(room.roomId, 0);
+                this.qualities = normalizeDouyuQualities(initial.data?.multirates);
+                return this.qualities;
+            })();
+            try {
+                return await this.qualityLoadPromise;
+            } finally {
+                this.qualityLoadPromise = undefined;
+            }
+        }
+        async resolveRoomInfo() {
+            if (this.roomInfo) {
+                return this.roomInfo;
+            }
+            const canonicalUrl = document.querySelector('link[rel="canonical"]')?.href || '';
+            let pageRoomId = globalThis.$ROOM?.room_id;
+            try {
+                if (typeof unsafeWindow !== 'undefined') {
+                    pageRoomId = unsafeWindow.$ROOM?.room_id || pageRoomId;
+                }
+            } catch (error) {}
+            const routeRoomId = extractDouyuRoomId({
+                url: this.pageUrl
+            });
+            const roomId = routeRoomId || extractDouyuRoomId({
+                url: currentUrl || location.href,
+                html: document.documentElement?.innerHTML || '',
+                canonicalUrl,
+                pageRoomId
+            });
+            if (!roomId) {
+                throw new Error('Cannot find Douyu room id');
+            }
+
+            let canonicalRoomId = roomId;
+            let title = document.querySelector('meta[property="og:title"]')?.content || document.title;
+            try {
+                const response = await fetch(`https://www.douyu.com/betard/${roomId}`, {
+                    method: 'GET',
+                    credentials: 'include',
+                    cache: 'no-store'
+                });
+                if (response.ok) {
+                    const payload = await response.json();
+                    const metadata = payload?.room || payload?.data?.room || payload?.data || payload;
+                    const resolvedRoomId = String(metadata?.room_id || '').trim();
+                    if (/^\d+$/.test(resolvedRoomId)) {
+                        canonicalRoomId = resolvedRoomId;
+                    }
+                    title = metadata?.room_name || metadata?.roomName || title;
+                }
+            } catch (error) {
+                console.warn(`Douyu room metadata unavailable: ${error.message}`);
+            }
+
+            this.roomInfo = {
+                roomId: canonicalRoomId,
+                title
+            };
+            return this.roomInfo;
+        }
+        getDid() {
+            try {
+                const queryDid = new URL(this.pageUrl).searchParams.get('dyshid');
+                if (queryDid) {
+                    return queryDid;
+                }
+            } catch (error) {}
+            const cookieDid = document.cookie.match(/(?:^|;\s*)dy_did=([^;]+)/)?.[1];
+            return cookieDid ? decodeURIComponent(cookieDid) : DOUYU_DEFAULT_DID;
+        }
+        async requestPlayInfo(roomId, rate) {
+            const did = this.getDid();
+            const encryptionResponse = await fetch(
+                `https://www.douyu.com/wgapi/livenc/liveweb/websec/getEncryption?did=${encodeURIComponent(did)}`, {
+                    method: 'GET',
+                    credentials: 'include',
+                    cache: 'no-store'
+                }
+            );
+            if (!encryptionResponse.ok) {
+                throw new Error(`Douyu encryption request failed (${encryptionResponse.status})`);
+            }
+            const encryptionPayload = await encryptionResponse.json();
+            if (Number(encryptionPayload?.error) !== 0) {
+                throw new Error(encryptionPayload?.msg || 'Douyu encryption request failed');
+            }
+            const encryption = encryptionPayload?.data || encryptionPayload;
+            const timestamp = Math.round(Date.now() / 1000);
+            const auth = buildDouyuAuth(encryption, roomId, timestamp);
+            const body = new URLSearchParams({
+                enc_data: String(encryption?.enc_data || ''),
+                tt: String(timestamp),
+                did,
+                auth,
+                cdn: '',
+                rate: String(rate),
+                hevc: '0',
+                fa: '0',
+                ive: '0'
+            });
+            if (!body.get('enc_data')) {
+                throw new Error('Douyu returned invalid encryption data');
+            }
+
+            const playResponse = await fetch(`https://www.douyu.com/lapi/live/getH5PlayV1/${roomId}`, {
+                method: 'POST',
+                credentials: 'include',
+                cache: 'no-store',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: body.toString()
+            });
+            if (!playResponse.ok) {
+                throw new Error(`Douyu playback request failed (${playResponse.status})`);
+            }
+            const payload = await playResponse.json();
+            if (Number(payload?.error) !== 0 || !payload?.data) {
+                throw new Error(payload?.msg || 'Douyu playback request failed');
+            }
+            return payload;
+        }
+        async check(video) {
+            video = video || currentMedia.video;
+            return /^https?:\/\/.+\.(?:flv|m3u8?)(?:[?#].*)?$/i.test(String(video || ''));
+        }
+    },
     BILIBILI_LIVE: class Parser extends BaseParser {
         async execute() {
             await this.parseVideo();
@@ -1013,6 +2459,8 @@ const PARSER = {
         constructor() {
             super();
             this.candidates = [];
+            this.hlsVariants = [];
+            this.hlsVariantsOption = undefined;
             this.installRequestObserver();
         }
         async execute() {
@@ -1031,9 +2479,11 @@ const PARSER = {
         parseMpvOptions() {
             currentMedia.mpvOptions = [
                 '--no-ytdl',
-                '--force-window=immediate',
-                '--user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"'
+                '--force-window=immediate'
             ];
+            if (this.hlsVariantsOption) {
+                currentMedia.mpvOptions.push(this.hlsVariantsOption);
+            }
         }
         async parseCookie() {
             currentMedia.cookie = document.cookie;
@@ -1041,7 +2491,41 @@ const PARSER = {
         async parseVideo() {
             this.collectFromDocument();
             this.collectFromPerformance();
-            currentMedia.video = this.selectBestCandidate();
+            const masterUrl = this.selectBestCandidate();
+            currentMedia.video = masterUrl;
+            this.hlsVariants = [];
+            this.hlsVariantsOption = undefined;
+
+            if (!isHttpHlsPlaylistUrl(masterUrl)) {
+                return;
+            }
+
+            try {
+                const variants = await fetchMissavHlsVariants(masterUrl);
+                if (!variants.length) {
+                    throw new Error('no HLS variants found');
+                }
+                const selected = selectMissavHlsVariant(
+                    variants,
+                    currentConfig.global.parser.ytdlp.preferredQuality
+                );
+                if (!selected) {
+                    throw new Error('no HLS variant selected');
+                }
+                const payload = encodeMissavHlsVariants(variants, selected);
+                if (!payload) {
+                    throw new Error('HLS variant metadata is too large');
+                }
+
+                this.hlsVariants = payload.variants;
+                this.hlsVariantsOption =
+                    `--script-opts-append="quality-menu-hls_variants=${payload.encoded}"`;
+                currentMedia.video = selected.url;
+            } catch (error) {
+                const reason = error?.name === 'AbortError' ?
+                    'playlist request timed out' : error?.message || 'playlist unavailable';
+                console.warn(`MissAV HLS fast start skipped (${reason}); using master playlist`);
+            }
         }
         collectUrl(value) {
             if (!value) {
@@ -1226,6 +2710,225 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isHttpHlsPlaylistUrl(value) {
+    try {
+        const url = new URL(String(value));
+        return /^https?:$/i.test(url.protocol) && /\.m3u8$/i.test(url.pathname);
+    } catch (error) {
+        return false;
+    }
+}
+
+function parseHlsAttributeList(value) {
+    const attributes = {};
+    const pattern = /([A-Z0-9-]+)=("(?:[^"]*)"|[^,]*)/gi;
+    let match;
+    while ((match = pattern.exec(String(value || ''))) !== null) {
+        let attributeValue = match[2].trim();
+        if (attributeValue.startsWith('"') && attributeValue.endsWith('"')) {
+            attributeValue = attributeValue.slice(1, -1);
+        }
+        attributes[match[1].toUpperCase()] = attributeValue;
+    }
+    return attributes;
+}
+
+function parseMissavHlsVariants(playlistText, masterUrl, maxVariants = MISSAV_HLS_MAX_VARIANTS) {
+    if (!isHttpHlsPlaylistUrl(masterUrl) || typeof playlistText !== 'string') {
+        return [];
+    }
+
+    const lines = playlistText.split(/\r\n|\n|\r/);
+    const variantsByUrl = new Map();
+    const limit = Math.max(1, Math.min(Number(maxVariants) || 1, MISSAV_HLS_MAX_VARIANTS));
+
+    for (let index = 0; index < lines.length; index++) {
+        const line = lines[index].replace(/^\uFEFF/, '').trim();
+        if (!/^#EXT-X-STREAM-INF:/i.test(line)) {
+            continue;
+        }
+
+        let uri;
+        for (let uriIndex = index + 1; uriIndex < lines.length; uriIndex++) {
+            const candidate = lines[uriIndex].trim();
+            if (!candidate) {
+                continue;
+            }
+            if (/^#EXT-X-STREAM-INF:/i.test(candidate)) {
+                break;
+            }
+            if (candidate.startsWith('#')) {
+                continue;
+            }
+            uri = candidate;
+            index = uriIndex;
+            break;
+        }
+        if (!uri) {
+            continue;
+        }
+        if (uri.startsWith('"') && uri.endsWith('"')) {
+            uri = uri.slice(1, -1);
+        }
+
+        let resolved;
+        try {
+            resolved = new URL(uri, masterUrl);
+        } catch (error) {
+            continue;
+        }
+        if (!/^https?:$/i.test(resolved.protocol) || !/\.m3u8$/i.test(resolved.pathname)) {
+            continue;
+        }
+
+        const attributes = parseHlsAttributeList(line.slice(line.indexOf(':') + 1));
+        const resolution = String(attributes.RESOLUTION || '').match(/^(\d+)\s*x\s*(\d+)$/i);
+        const height = resolution ? Number(resolution[2]) : 0;
+        const bandwidth = Number(attributes['AVERAGE-BANDWIDTH'] || attributes.BANDWIDTH || 0);
+        if (!height && (!Number.isFinite(bandwidth) || bandwidth <= 0)) {
+            continue;
+        }
+
+        const existing = variantsByUrl.get(resolved.href);
+        if (existing) {
+            if (!existing.height && height > 0) existing.height = height;
+            if (!existing.bandwidth && Number.isFinite(bandwidth) && bandwidth > 0) {
+                existing.bandwidth = Math.floor(bandwidth);
+            }
+            continue;
+        }
+        if (variantsByUrl.size >= limit) {
+            continue;
+        }
+
+        const variant = { url: resolved.href };
+        if (height > 0) variant.height = Math.floor(height);
+        if (Number.isFinite(bandwidth) && bandwidth > 0) {
+            variant.bandwidth = Math.floor(bandwidth);
+        }
+        variantsByUrl.set(variant.url, variant);
+    }
+
+    return Array.from(variantsByUrl.values());
+}
+
+function compareMissavHlsQuality(left, right) {
+    const leftHeight = Number(left?.height) || 0;
+    const rightHeight = Number(right?.height) || 0;
+    if (leftHeight && rightHeight) {
+        return leftHeight - rightHeight ||
+            (Number(left?.bandwidth) || 0) - (Number(right?.bandwidth) || 0);
+    }
+    if (leftHeight || rightHeight) {
+        return leftHeight ? 1 : -1;
+    }
+    return (Number(left?.bandwidth) || 0) - (Number(right?.bandwidth) || 0);
+}
+
+function selectMissavHlsVariant(variants, preferredQuality) {
+    const available = Array.isArray(variants) ? variants.filter(variant =>
+        isHttpHlsPlaylistUrl(variant?.url)
+    ) : [];
+    if (!available.length) {
+        return undefined;
+    }
+
+    const preferredHeight = preferredQuality === 'unlimited' ?
+        0 : Number(preferredQuality) || 0;
+    const withResolution = available.filter(variant => Number(variant.height) > 0);
+    if (!preferredHeight || !withResolution.length) {
+        return available.reduce((best, variant) =>
+            compareMissavHlsQuality(variant, best) > 0 ? variant : best
+        );
+    }
+
+    const withinLimit = withResolution.filter(variant => Number(variant.height) <= preferredHeight);
+    if (withinLimit.length) {
+        return withinLimit.reduce((best, variant) =>
+            compareMissavHlsQuality(variant, best) > 0 ? variant : best
+        );
+    }
+    return withResolution.reduce((lowest, variant) =>
+        compareMissavHlsQuality(variant, lowest) < 0 ? variant : lowest
+    );
+}
+
+function encodeMissavHlsVariants(
+    variants,
+    selected,
+    maxVariants = MISSAV_HLS_MAX_VARIANTS,
+    maxLength = MISSAV_HLS_MAX_OPTION_LENGTH
+) {
+    const selectedUrl = selected?.url;
+    const sanitized = [];
+    const seen = new Set();
+    const limit = Math.max(1, Math.min(Number(maxVariants) || 1, MISSAV_HLS_MAX_VARIANTS));
+
+    for (const variant of Array.isArray(variants) ? variants : []) {
+        if (sanitized.length >= limit || !isHttpHlsPlaylistUrl(variant?.url) ||
+            seen.has(variant.url)) {
+            continue;
+        }
+        const item = { url: new URL(variant.url).href };
+        const height = Number(variant.height);
+        const bandwidth = Number(variant.bandwidth);
+        if (Number.isFinite(height) && height > 0) item.height = Math.floor(height);
+        if (Number.isFinite(bandwidth) && bandwidth > 0) {
+            item.bandwidth = Math.floor(bandwidth);
+        }
+        if (!item.height && !item.bandwidth) {
+            continue;
+        }
+        seen.add(item.url);
+        sanitized.push(item);
+    }
+
+    if (!selectedUrl || !seen.has(selectedUrl)) {
+        return undefined;
+    }
+
+    const payloadLimit = Math.max(256, Number(maxLength) || MISSAV_HLS_MAX_OPTION_LENGTH);
+    while (sanitized.length) {
+        const encoded = encodeURIComponent(JSON.stringify(sanitized));
+        if (encoded.length <= payloadLimit) {
+            return { variants: sanitized, encoded };
+        }
+        const removableIndex = sanitized.findLastIndex(variant => variant.url !== selectedUrl);
+        if (removableIndex === -1) {
+            return undefined;
+        }
+        sanitized.splice(removableIndex, 1);
+    }
+    return undefined;
+}
+
+async function fetchMissavHlsVariants(masterUrl) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), MISSAV_HLS_FETCH_TIMEOUT);
+    try {
+        const response = await fetch(masterUrl, {
+            method: 'GET',
+            credentials: 'omit',
+            signal: controller.signal
+        });
+        if (!response.ok) {
+            throw new Error(`playlist request returned HTTP ${response.status}`);
+        }
+
+        const contentLength = Number(response.headers.get('content-length') || 0);
+        if (contentLength > MISSAV_HLS_MAX_PLAYLIST_LENGTH) {
+            throw new Error('playlist response is too large');
+        }
+        const playlistText = await response.text();
+        if (playlistText.length > MISSAV_HLS_MAX_PLAYLIST_LENGTH) {
+            throw new Error('playlist response is too large');
+        }
+        return parseMissavHlsVariants(playlistText, response.url || masterUrl);
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 function normalizeMediaCandidateUrl(url) {
     if (!url) {
         return undefined;
@@ -1244,6 +2947,73 @@ function normalizeMediaCandidateUrl(url) {
     }
 
     return normalized.startsWith('http') ? normalized : undefined;
+}
+
+function createResourceCandidate(url, source = 'performance') {
+    url = normalizeMediaCandidateUrl(url);
+    if (!url) {
+        return undefined;
+    }
+
+    let inspected = url.toLowerCase();
+    try {
+        inspected = decodeURIComponent(inspected);
+    } catch (error) {}
+
+    const rejectedResource = /(?:^|[\/_.?&=%-])(preview|trailer|sample|teaser|thumb(?:nail)?|sprite|poster|ads?|advert(?:ising)?|preroll|midroll|postroll|tracking|analytics)(?:[\/_.?&=%-]|$)/i;
+    const segmentOrSidecar = /\.(?:m4s|ts|m4a|aac|vtt|srt|ass|key|jpg|jpeg|png|gif|webp)(?:$|[?#])/i;
+    if (rejectedResource.test(inspected) || segmentOrSidecar.test(inspected)) {
+        return undefined;
+    }
+
+    let kind;
+    let score;
+    if (/\.m3u8?(?:$|[?#])/.test(inspected)) {
+        kind = /(?:^|[\/_.-])(master|playlist|index)(?:[\/_.-]|$)/.test(inspected) ? 'hls-master' : 'hls';
+        score = kind === 'hls-master' ? 120 : 105;
+    } else if (/\.mpd(?:$|[?#])/.test(inspected)) {
+        kind = 'dash';
+        score = 115;
+    } else if (/\.(?:mp4|mkv|flv|mov|avi|wmv|webm)(?:$|[?#])/.test(inspected)) {
+        kind = 'video';
+        score = 70;
+    } else if (source === 'dom-media') {
+        kind = 'media-source';
+        score = 55;
+    } else {
+        return undefined;
+    }
+
+    if (source === 'dom-media') {
+        score += 3;
+    } else if (source === 'dom-metadata') {
+        score += 1;
+    }
+
+    return {
+        url,
+        kind,
+        score,
+        source
+    };
+}
+
+function getResourceCandidateLabel(candidate) {
+    const isChinese = currentConfig?.global?.language === 'zh';
+    const labels = isChinese ? {
+        'hls-master': 'HLS 主播放列表',
+        hls: 'HLS 播放列表',
+        dash: 'DASH 清单',
+        video: '视频直链',
+        'media-source': '网页媒体源'
+    } : {
+        'hls-master': 'HLS master playlist',
+        hls: 'HLS playlist',
+        dash: 'DASH manifest',
+        video: 'Direct video',
+        'media-source': 'Page media source'
+    };
+    return labels[candidate?.kind] || translation?.handoffResourceReady;
 }
 
 function buildMissavPackedPlaylistUrl(matchString) {
@@ -1313,10 +3083,36 @@ function collectMediaCandidateUrls(text) {
     return [...new Set(urls.map(url => normalizeMediaCandidateUrl(url)).filter(url => url))];
 }
 
+// CONFIG_MIGRATION_HELPERS_START
+function configNeedsDefaultMerge(defaultObj, currentObj) {
+    if (defaultObj === null || typeof defaultObj !== 'object') {
+        return currentObj === undefined;
+    }
+
+    if (Array.isArray(defaultObj)) {
+        return !Array.isArray(currentObj);
+    }
+
+    if (currentObj === null || typeof currentObj !== 'object' || Array.isArray(currentObj)) {
+        return true;
+    }
+
+    return Object.keys(defaultObj).some(key =>
+        !Object.prototype.hasOwnProperty.call(currentObj, key) ||
+        configNeedsDefaultMerge(defaultObj[key], currentObj[key])
+    );
+}
+
+function configNeedsMigration(defaultConfig, config) {
+    return config?.global?.version !== defaultConfig.global.version ||
+        configNeedsDefaultMerge(defaultConfig, config);
+}
+// CONFIG_MIGRATION_HELPERS_END
+
 function loadConfig() {
     let config = GM_getValue('config');
     if (config) {
-        if (config.global.version === defaultConfig.global.version) {
+        if (!configNeedsMigration(defaultConfig, config)) {
             return config;
         }
         console.log('更新配置 ......');
@@ -1376,11 +3172,15 @@ function updateConfig(defaultConfig, config) {
 function matchParser(parser, url) {
     if (isPornhubVideoUrl(url)) {
         console.log(`match parser fallback: pornhub video\n${url}`);
-        return new PARSER.YTDLP();
+        const matchedParser = new PARSER.YTDLP();
+        matchedParser.parserKey = 'ytdlp';
+        return matchedParser;
     }
     if (isSpankbangVideoUrl(url)) {
         console.log(`match parser fallback: spankbang video\n${url}`);
-        return new PARSER.YTDLP();
+        const matchedParser = new PARSER.YTDLP();
+        matchedParser.parserKey = 'ytdlp';
+        return matchedParser;
     }
 
     for (const key in parser) {
@@ -1393,7 +3193,9 @@ function matchParser(parser, url) {
                     continue;
                 }
                 console.log(`match parser regex: ${new RegExp(regex)}\n${url}`);
-                return new PARSER[key.replace(/[A-Z]/g, letter => `_${letter}`).toUpperCase()]();
+                const matchedParser = new PARSER[key.replace(/[A-Z]/g, letter => `_${letter}`).toUpperCase()]();
+                matchedParser.parserKey = key;
+                return matchedParser;
             }
         }
     }
@@ -1449,7 +3251,48 @@ var loadingDiv;
 var settingButton;
 var settingIframe;
 var loadingId;
+var handoffShadow;
+var handoffPanel;
+var handoffPanelToggle;
+var handoffPanelCloseButton;
+var handoffStatusMark;
+var handoffStatusText;
+var handoffDockStatusMark;
+var handoffDockStatusText;
+var handoffPrimaryButton;
+var handoffDockPlayButton;
+var handoffOverflowMenu;
+var handoffAlternativeSection;
+var handoffParserBadge;
+var handoffAutoHideId;
+var handoffInitialEdgeHideId;
+var handoffInitialPreviewStarted = false;
+var resourceFallbackDisplayPromise;
+var topListenersAttached = false;
 var isReloading = false;
+
+// HANDOFF_EDGE_HIDE_HELPERS_START
+const HANDOFF_EDGE_HIDE_DELAY = 450;
+const HANDOFF_INITIAL_EDGE_HIDE_DELAY = 1200;
+
+function canHideHandoffAtEdge({
+    edgeHide,
+    hasButton,
+    panelOpen,
+    isDragging,
+    isHovered,
+    hasFocus,
+    settingsOpen
+}) {
+    return Boolean(edgeHide && hasButton && !panelOpen && !isDragging &&
+        !isHovered && !hasFocus && !settingsOpen);
+}
+
+function shouldAutoOpenHandoffPanel(edgeHide, state) {
+    return edgeHide !== true &&
+        ['resolving', 'success', 'failed', 'relay-unavailable'].includes(state);
+}
+// HANDOFF_EDGE_HIDE_HELPERS_END
 
 function appendCss() {
     if (style) {
@@ -1519,53 +3362,19 @@ function appendCss() {
             z-index: ${THIRD_Z_INDEX};
             position: fixed;
             display: none;
-            align-items: center;
             width: auto;
             height: auto;
             left: ${currentConfig.global.buttonXCoord}px;
             bottom: ${currentConfig.global.buttonYCoord}px;
-            padding: 5px;
-            border: 3px solid rgba(0, 0, 0, 0);
-            border-radius: 5px;
+            padding: 0;
+            border: 2px solid rgba(0, 0, 0, 0);
+            border-radius: 8px;
             cursor: move;
-            gap: 10px;
             background-color: rgba(0, 0, 0, 0);
-            min-width: ${50 * currentConfig.global.buttonScale}px;
-            min-height: ${50 * currentConfig.global.buttonScale}px;
-        }
-        #${PROJECT_NAME}-button-div button {
-            color: white;
-            font-size: 20px;
-            font-weight: bold;
-            width: 50px;
-            height: 50px;
-            outline: none;
-            border: none;
-            border-radius: 50%;
-            cursor: pointer;
-            background-size: cover;
-            background-color: rgba(0, 0, 0, 0);
-            transition: opacity 0.5s ease, visibility 0s linear 0.5s;
-        }
-        #${PROJECT_NAME}-button-div:hover {
-            background-color: rgb(255, 255, 255, 0.3) !important;
-        }
-        #${PROJECT_NAME}-button-div:hover button {
-            visibility: visible !important;
-            transition: opacity 0.5s ease, visibility 0s;
-        }
-        #${PROJECT_NAME}-button-div button:hover {
-            transform: scale(1.06);
-            box-shadow: 0px 0px 16px #e6e6e6;
-        }
-        #${PROJECT_NAME}-setting-button {
-            visibility: hidden;
-            position: absolute;
-            right: ${-12 * currentConfig.global.buttonScale}px !important;
-            top: ${-12 * currentConfig.global.buttonScale}px !important;
-            width: ${25 * currentConfig.global.buttonScale}px !important;
-            height: ${25 * currentConfig.global.buttonScale}px !important;
-            background-image: url('data:image/svg+xml,<svg t="1731846507027" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="4281" width="16" height="16"><path d="M616.533333 512.128c0-25.6-9.941333-49.536-28.16-67.669333a95.744 95.744 0 0 0-67.84-28.074667c-25.685333 0-49.706667 9.984-67.925333 28.074667a95.146667 95.146667 0 0 0-28.16 67.669333c0 25.6 10.069333 49.578667 28.16 67.712 18.218667 18.048 42.24 28.074667 67.925333 28.074667 25.642667 0 49.664-10.026667 67.84-28.074667 18.218667-18.133333 28.16-42.112 28.16-67.712z m-202.112 352.896l48-55.978667a309.290667 309.290667 0 0 0 99.029334 0l48 55.978667a27.52 27.52 0 0 0 30.208 7.978667l2.218666-0.768a380.074667 380.074667 0 0 0 118.186667-68.138667l1.834667-1.536a27.434667 27.434667 0 0 0 8.106666-30.037333l-24.746666-69.546667a298.666667 298.666667 0 0 0 49.322666-85.205333l72.874667-13.44a27.477333 27.477333 0 0 0 22.058667-22.101334l0.426666-2.304a384.64 384.64 0 0 0 0-135.936l-0.426666-2.304a27.477333 27.477333 0 0 0-22.058667-22.058666l-73.216-13.525334a302.293333 302.293333 0 0 0-49.194667-84.650666l25.002667-70.016a27.306667 27.306667 0 0 0-8.149333-30.037334l-1.834667-1.536a383.018667 383.018667 0 0 0-118.186667-68.138666l-2.218666-0.768a27.605333 27.605333 0 0 0-30.208 7.936l-48.512 56.661333a302.592 302.592 0 0 0-97.834667 0L414.592 159.146667a27.52 27.52 0 0 0-30.208-7.978667l-2.218667 0.768a381.056 381.056 0 0 0-118.186666 68.138667l-1.834667 1.536a27.434667 27.434667 0 0 0-8.106667 30.037333l24.96 69.973333a296.192 296.192 0 0 0-49.194666 84.693334l-73.216 13.525333a27.477333 27.477333 0 0 0-22.058667 22.058667l-0.426667 2.304a382.592 382.592 0 0 0 0 135.936l0.426667 2.304c2.048 11.221333 10.794667 20.053333 22.058667 22.101333l72.874666 13.44a300.672 300.672 0 0 0 49.365334 85.248l-24.832 69.504a27.306667 27.306667 0 0 0 8.149333 30.037333l1.834667 1.536a383.018667 383.018667 0 0 0 118.186666 68.138667l2.218667 0.768a27.733333 27.733333 0 0 0 30.037333-8.149333z m-44.8-352.853333A150.656 150.656 0 0 1 520.533333 361.642667a150.656 150.656 0 0 1 150.869334 150.442666A150.656 150.656 0 0 1 520.533333 662.613333a150.656 150.656 0 0 1-150.912-150.485333z" fill="${COLOR.PRIMARY}" p-id="4282"></path></svg>');
+            min-width: ${310 * currentConfig.global.buttonScale}px;
+            min-height: ${48 * currentConfig.global.buttonScale}px;
+            box-sizing: border-box;
+            isolation: isolate;
         }
         #${PROJECT_NAME}-setting-iframe {
             z-index: ${SECOND_Z_INDEX};
@@ -1590,6 +3399,7 @@ function appendCss() {
 function appendToastDiv() {
     const TOAST_DIV_ID = `${PROJECT_NAME}-toast-div`;
     if (document.getElementById(TOAST_DIV_ID)) {
+        toastDiv = document.getElementById(TOAST_DIV_ID);
         return;
     }
     toastDiv = document.createElement('div');
@@ -1610,6 +3420,7 @@ function showToast(message) {
 function appendLoadingDiv() {
     const LOADING_DIV_ID = `${PROJECT_NAME}-loading-div`;
     if (document.getElementById(LOADING_DIV_ID)) {
+        loadingDiv = document.getElementById(LOADING_DIV_ID);
         return;
     }
     loadingDiv = document.createElement('div');
@@ -1635,22 +3446,1212 @@ function showLoading(timeout) {
     }, timeout);
 }
 
+function showBrowserRelayToast(message) {
+    if (currentConfig?.global?.browserRelayNotifications === true) {
+        showToast(message);
+    }
+}
+
 function hideLoading() {
     loadingDiv.style.display = 'none';
+}
+
+function setHandoffHostDisplay(display) {
+    buttonDiv?.style.setProperty('display', display, 'important');
+}
+
+function setHandoffHostPosition(left, bottom) {
+    buttonDiv?.style.setProperty('left', `${left}px`, 'important');
+    buttonDiv?.style.setProperty('bottom', `${bottom}px`, 'important');
+}
+
+function isResourceFallbackParser(parser = currentParser) {
+    return Boolean(parser?.isResourceFallback);
+}
+
+function getParserName(parser = currentParser) {
+    const names = {
+        ytdlp: 'yt-dlp',
+        missav: 'MissAV',
+        bilibili: 'Bilibili',
+        bilibiliLive: 'Bilibili Live',
+        douyu: 'Douyu Live',
+        aniGamer: 'AniGamer',
+        anime1: 'Anime1',
+        video: 'Video',
+        url: 'URL',
+        html: 'HTML',
+        script: 'Script',
+        request: 'Request',
+        telegram: 'Telegram',
+        iframe: 'Iframe'
+    };
+    return names[parser?.parserKey] || (isResourceFallbackParser(parser) ? 'Sniffer' : 'Parser');
+}
+
+function getDedicatedParserLabel(parser = currentParser) {
+    const name = getParserName(parser);
+    return name ? `${name} · ${translation.handoffDedicated}` : translation.handoffDedicated;
+}
+
+function updateHandoffPanelPlacement() {
+    if (!buttonDiv || !handoffShadow) {
+        return;
+    }
+    const shell = handoffShadow.querySelector('.handoff-shell');
+    const scale = Number(currentConfig?.global?.buttonScale) || 1;
+    const panelWidth = 352 * scale;
+    const hostRect = buttonDiv.getBoundingClientRect();
+    shell?.classList.toggle('align-right', hostRect.left + panelWidth > window.innerWidth - 8);
+}
+
+function setHandoffPanelOpen(open) {
+    if (!handoffPanel || !handoffPanelToggle) {
+        return;
+    }
+    handoffPanel.classList.toggle('is-open', open);
+    handoffPanel.setAttribute('aria-hidden', String(!open));
+    handoffPanelToggle.setAttribute('aria-expanded', String(open));
+    handoffPanelToggle.setAttribute(
+        'aria-label',
+        open ? translation.handoffClosePanel : translation.handoffOpenPanel
+    );
+    handoffShadow?.querySelector('.handoff-shell')?.classList.toggle('is-panel-open', open);
+    if (open) {
+        revealHandoffEdge();
+        updateHandoffPanelPlacement();
+    } else {
+        scheduleHandoffEdgeHide();
+    }
+}
+
+function revealHandoffEdge() {
+    clearTimeout(handoffEdgeHideId);
+    clearTimeout(handoffInitialEdgeHideId);
+    if (buttonDiv?.classList.contains('is-edge-hidden')) {
+        handoffEdgeRevealUntil = Date.now() + 250;
+    }
+    buttonDiv?.classList.remove('is-edge-hidden', 'edge-left', 'edge-right');
+    buttonDiv?.style.removeProperty('--edge-hide-offset');
+}
+
+function getHandoffEdgeHideState() {
+    return {
+        edgeHide: currentConfig?.global?.edgeHide === true,
+        hasButton: Boolean(buttonDiv),
+        panelOpen: handoffPanel?.classList.contains('is-open') === true,
+        isDragging: handoffIsDragging,
+        isHovered: buttonDiv?.matches(':hover') === true,
+        hasFocus: buttonDiv?.matches(':focus-within') === true,
+        settingsOpen: settingIframe?.style.display === 'block'
+    };
+}
+
+function hideHandoffAtEdge() {
+    if (!canHideHandoffAtEdge(getHandoffEdgeHideState())) {
+        return;
+    }
+    const dockRect = handoffShadow?.querySelector('.handoff-dock')?.getBoundingClientRect() ||
+        buttonDiv.getBoundingClientRect();
+    const nearLeft = dockRect.left <= 24;
+    const nearRight = dockRect.right >= window.innerWidth - 24;
+    if (!nearLeft && !nearRight) return;
+    const offset = nearLeft ?
+        14 - dockRect.right :
+        window.innerWidth - 14 - dockRect.left;
+    buttonDiv.style.setProperty('--edge-hide-offset', `${offset}px`);
+    buttonDiv.classList.remove('edge-left', 'edge-right');
+    buttonDiv.classList.add('is-edge-hidden', nearLeft ? 'edge-left' : 'edge-right');
+}
+
+function scheduleHandoffEdgeHide() {
+    clearTimeout(handoffEdgeHideId);
+    clearTimeout(handoffInitialEdgeHideId);
+    if (!canHideHandoffAtEdge(getHandoffEdgeHideState())) {
+        return;
+    }
+    handoffEdgeHideId = setTimeout(hideHandoffAtEdge, HANDOFF_EDGE_HIDE_DELAY);
+}
+
+function scheduleHandoffInitialEdgeHide() {
+    if (handoffInitialPreviewStarted ||
+        !canHideHandoffAtEdge(getHandoffEdgeHideState())) {
+        return;
+    }
+    handoffInitialPreviewStarted = true;
+    clearTimeout(handoffInitialEdgeHideId);
+    handoffInitialEdgeHideId = setTimeout(
+        hideHandoffAtEdge,
+        HANDOFF_INITIAL_EDGE_HIDE_DELAY
+    );
+}
+
+function scheduleHandoffAutoHide() {
+    if (!handoffPanel) {
+        return;
+    }
+    clearTimeout(handoffAutoHideId);
+    if (!handoffPanel.classList.contains('is-open')) {
+        return;
+    }
+
+    const duration = Number(currentConfig.global.buttonVisibilityDuration);
+    if (duration < 0) {
+        return;
+    }
+    if (duration === 0) {
+        setHandoffPanelOpen(false);
+        return;
+    }
+    handoffAutoHideId = setTimeout(() => {
+        setHandoffPanelOpen(false);
+    }, duration);
+}
+
+function updateHandoffStatus(state, detail) {
+    if (!handoffStatusMark || !handoffStatusText) {
+        return;
+    }
+    const states = {
+        dedicated: {
+            text: detail || getDedicatedParserLabel(),
+            tone: 'is-ready'
+        },
+        sniffing: {
+            text: translation.handoffSniffing,
+            tone: 'is-working'
+        },
+        'resource-ready': {
+            text: detail || translation.handoffResourceReady,
+            tone: 'is-ready'
+        },
+        resolving: {
+            text: translation.handoffResolving,
+            tone: 'is-working'
+        },
+        success: {
+            text: detail ? `${detail} · ${translation.handoffSuccess}` : translation.handoffSuccess,
+            tone: 'is-ready'
+        },
+        failed: {
+            text: translation.handoffFailed,
+            tone: 'is-error'
+        },
+        'relay-ready': {
+            text: translation.handoffRelayReady,
+            tone: 'is-ready'
+        },
+        'relay-starting': {
+            text: translation.handoffRelayStarting,
+            tone: 'is-working'
+        },
+        'relay-fallback': {
+            text: translation.handoffRelayFallback,
+            tone: 'is-working'
+        },
+        'relay-unavailable': {
+            text: detail || translation.handoffRelayUnavailable,
+            tone: 'is-error'
+        },
+        'danmaku-unavailable': {
+            text: detail || translation.handoffDanmakuUnavailable,
+            tone: 'is-working'
+        }
+    };
+    const next = states[state] || states.dedicated;
+    handoffStatusMark.className = `status-mark panel-status-mark ${next.tone}`;
+    handoffStatusText.textContent = next.text;
+    handoffStatusText.title = next.text;
+    if (handoffDockStatusMark) {
+        handoffDockStatusMark.className = `status-mark dock-status-mark ${next.tone}`;
+    }
+    if (handoffDockStatusText) {
+        handoffDockStatusText.textContent = next.text;
+        handoffDockStatusText.title = next.text;
+    }
+    if (handoffParserBadge) {
+        handoffParserBadge.textContent = getParserName();
+    }
+    const edgeHide = currentConfig?.global?.edgeHide === true;
+    if (shouldAutoOpenHandoffPanel(edgeHide, state)) {
+        setHandoffPanelOpen(true);
+    }
+    if (!edgeHide) {
+        scheduleHandoffAutoHide();
+    }
+}
+
+function updateHandoffForCurrentParser() {
+    if (isResourceFallbackParser()) {
+        const candidate = resourceSniffer?.getBestCandidate();
+        if (candidate) {
+            updateHandoffStatus('resource-ready', getResourceCandidateLabel(candidate));
+        } else {
+            updateHandoffStatus('sniffing');
+        }
+        return;
+    }
+    updateHandoffStatus('dedicated', getDedicatedParserLabel());
+}
+
+function resourceFallbackCanShow() {
+    return isResourceFallbackParser() && Boolean(
+        resourceSniffer?.hasMediaElement || resourceSniffer?.getBestCandidate()
+    );
+}
+
+async function showResourceFallbackControl(sniffer) {
+    if (self !== top || sniffer !== resourceSniffer || !resourceFallbackCanShow()) {
+        return;
+    }
+    if (resourceFallbackDisplayPromise) {
+        return resourceFallbackDisplayPromise;
+    }
+    resourceFallbackDisplayPromise = (async () => {
+        await appendAll();
+        if (sniffer !== resourceSniffer || !resourceFallbackCanShow()) {
+            return;
+        }
+        showButtonDiv();
+        updateHandoffForCurrentParser();
+    })();
+    try {
+        await resourceFallbackDisplayPromise;
+    } finally {
+        resourceFallbackDisplayPromise = undefined;
+    }
+}
+
+async function launchWithPlayer(player, button) {
+    if (!player || button.disabled) {
+        return;
+    }
+    const launchButtons = button === handoffPrimaryButton || button === handoffDockPlayButton ?
+        [handoffPrimaryButton, handoffDockPlayButton].filter(item => item) :
+        [button];
+    launchButtons.forEach(item => item.disabled = true);
+    try {
+        if (currentParser) {
+            await currentParser.play(player);
+        } else {
+            updateHandoffStatus('failed');
+            showToast(translation.noMatchingParserFound);
+        }
+    } finally {
+        setTimeout(() => {
+            launchButtons.forEach(item => item.disabled = false);
+        }, REFRESH_INTERVAL * 3);
+    }
+}
+
+function cacheHandoffElements() {
+    handoffPanel = handoffShadow?.querySelector('.handoff-panel');
+    handoffPanelToggle = handoffShadow?.querySelector('.panel-toggle');
+    handoffPanelCloseButton = handoffShadow?.querySelector('.panel-close');
+    handoffStatusMark = handoffShadow?.querySelector('.panel-status-mark');
+    handoffStatusText = handoffShadow?.querySelector('.status-text');
+    handoffDockStatusMark = handoffShadow?.querySelector('.dock-status-mark');
+    handoffDockStatusText = handoffShadow?.querySelector('.dock-status-text');
+    handoffPrimaryButton = handoffShadow?.querySelector('.primary-action');
+    handoffDockPlayButton = handoffShadow?.querySelector('.dock-play');
+    handoffOverflowMenu = handoffShadow?.querySelector('.player-list');
+    handoffAlternativeSection = handoffShadow?.querySelector('.alternative-section');
+    handoffParserBadge = handoffShadow?.querySelector('.parser-badge');
+    settingButton = handoffShadow?.querySelector('.settings-button');
+    handoffDefaultPlayer = handoffShadow?.querySelector('.quick-default-player');
+    handoffPreferredQuality = handoffShadow?.querySelector('.quick-preferred-quality');
+    handoffRelayMode = handoffShadow?.querySelector('.quick-relay-mode');
+    handoffEdgeHide = handoffShadow?.querySelector('.quick-edge-hide');
 }
 
 function appendButtonDiv() {
     const BUTTON_DIV_ID = `${PROJECT_NAME}-button-div`;
     if (document.getElementById(BUTTON_DIV_ID)) {
         buttonDiv = document.getElementById(BUTTON_DIV_ID);
+        handoffShadow = buttonDiv.shadowRoot;
+        cacheHandoffElements();
+        appendPlayButton();
         return;
     }
+    handoffInitialPreviewStarted = false;
+    clearTimeout(handoffInitialEdgeHideId);
     buttonDiv = document.createElement('div');
     buttonDiv.id = BUTTON_DIV_ID;
+    buttonDiv.style.setProperty('z-index', THIRD_Z_INDEX, 'important');
+    buttonDiv.style.setProperty('position', 'fixed', 'important');
+    buttonDiv.style.setProperty('box-sizing', 'border-box', 'important');
+    buttonDiv.style.setProperty('margin', '0', 'important');
+    buttonDiv.style.setProperty('padding', '0', 'important');
+    buttonDiv.style.setProperty('border', '2px solid rgba(0, 0, 0, 0)', 'important');
+    buttonDiv.style.setProperty('background', 'transparent', 'important');
+    buttonDiv.style.setProperty('cursor', 'move', 'important');
+    setHandoffHostPosition(currentConfig.global.buttonXCoord, currentConfig.global.buttonYCoord);
+    if (typeof NATIVE_ATTACH_SHADOW !== 'function') {
+        throw new Error('Shadow DOM is unavailable');
+    }
+    handoffShadow = Reflect.apply(NATIVE_ATTACH_SHADOW, buttonDiv, [{
+        mode: 'open'
+    }]);
+    handoffShadow.innerHTML = policy.createHTML(`
+        <style>
+            :host {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+                font-size: 14px;
+                letter-spacing: 0;
+                color: #17191d;
+            }
+            *, *::before, *::after {
+                box-sizing: border-box;
+            }
+            button {
+                appearance: none;
+                border: 0;
+                margin: 0;
+                font: inherit;
+                letter-spacing: 0;
+            }
+            .handoff-control {
+                position: relative;
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                width: 310px;
+                min-height: 46px;
+                padding: 6px;
+                border: 1px solid rgba(23, 25, 29, 0.16);
+                border-radius: 8px;
+                background: rgba(248, 249, 251, 0.97);
+                box-shadow: 0 8px 24px rgba(18, 22, 30, 0.24);
+                backdrop-filter: blur(12px);
+                zoom: ${currentConfig.global.buttonScale};
+                opacity: 1;
+                transition: opacity 160ms ease, box-shadow 160ms ease;
+            }
+            .handoff-control.is-auto-hidden {
+                width: max-content;
+                border-color: transparent;
+                background: transparent;
+                box-shadow: none;
+            }
+            :host(:hover) .handoff-control,
+            .handoff-control.is-menu-open {
+                width: 310px;
+                opacity: 1;
+            }
+            .handoff-control.is-auto-hidden .status-line,
+            .handoff-control.is-auto-hidden .overflow-button,
+            .handoff-control.is-auto-hidden .settings-button {
+                display: none;
+            }
+            :host(:hover) .handoff-control.is-auto-hidden .status-line,
+            .handoff-control.is-menu-open .status-line {
+                display: flex;
+            }
+            :host(:hover) .handoff-control.is-auto-hidden .overflow-button,
+            :host(:hover) .handoff-control.is-auto-hidden .settings-button,
+            .handoff-control.is-menu-open .overflow-button,
+            .handoff-control.is-menu-open .settings-button {
+                display: inline-flex;
+            }
+            .status-line {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                min-width: 0;
+                flex: 1 1 auto;
+                padding: 0 4px;
+                cursor: move;
+            }
+            .status-mark {
+                width: 9px;
+                height: 9px;
+                border-radius: 50%;
+                flex: 0 0 auto;
+                background: #87909f;
+                box-shadow: 0 0 0 3px rgba(135, 144, 159, 0.14);
+            }
+            .status-mark.is-ready {
+                background: #1f9d67;
+                box-shadow: 0 0 0 3px rgba(31, 157, 103, 0.14);
+            }
+            .status-mark.is-working {
+                background: #d69416;
+                box-shadow: 0 0 0 3px rgba(214, 148, 22, 0.14);
+                animation: status-pulse 1.2s ease-in-out infinite;
+            }
+            .status-mark.is-error {
+                background: #d9485f;
+                box-shadow: 0 0 0 3px rgba(217, 72, 95, 0.14);
+            }
+            @keyframes status-pulse {
+                50% {
+                    opacity: 0.42;
+                }
+            }
+            .status-text {
+                min-width: 0;
+                overflow: hidden;
+                color: #3e4652;
+                font-size: 12px;
+                font-weight: 600;
+                line-height: 1.2;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .action-button {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                height: 34px;
+                border-radius: 6px;
+                cursor: pointer;
+                transition: background-color 140ms ease, color 140ms ease, transform 140ms ease;
+            }
+            .action-button:hover {
+                transform: translateY(-1px);
+            }
+            .action-button:focus-visible {
+                outline: 2px solid #3976d9;
+                outline-offset: 2px;
+            }
+            .action-button:disabled {
+                cursor: wait;
+                opacity: 0.56;
+                transform: none;
+            }
+            .action-button svg {
+                width: 16px;
+                height: 16px;
+                flex: 0 0 auto;
+                fill: none;
+                stroke: currentColor;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+                stroke-width: 2;
+            }
+            .primary-action {
+                flex: 0 0 auto;
+                min-width: 72px;
+                padding: 0 12px;
+                background: #2f6fd0;
+                color: #fff;
+                font-weight: 700;
+            }
+            .quick-settings {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+                padding: 10px;
+                border: 1px solid #e0e3e8;
+                border-radius: 7px;
+                background: #fff;
+            }
+            .quick-settings label {
+                display: grid;
+                gap: 4px;
+                color: #657080;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            .quick-settings select {
+                width: 100%;
+                min-height: 28px;
+                border: 1px solid #cfd6e0;
+                border-radius: 4px;
+                background: #fff;
+                color: #27303c;
+                font: inherit;
+            }
+            .quick-edge-label {
+                display: flex !important;
+                grid-column: 1 / -1;
+                align-items: center;
+                grid-template-columns: 16px 1fr;
+                cursor: pointer;
+            }
+            .primary-action:hover {
+                background: #255fb5;
+            }
+            .icon-button {
+                flex: 0 0 34px;
+                width: 34px;
+                padding: 0;
+                background: transparent;
+                color: #56606e;
+            }
+            .icon-button:hover {
+                background: #e7eaf0;
+                color: #17191d;
+            }
+            .overflow-menu {
+                position: absolute;
+                right: 38px;
+                bottom: calc(100% + 8px);
+                display: none;
+                width: 178px;
+                max-height: 224px;
+                overflow-y: auto;
+                padding: 5px;
+                border: 1px solid rgba(23, 25, 29, 0.16);
+                border-radius: 8px;
+                background: rgba(248, 249, 251, 0.99);
+                box-shadow: 0 8px 24px rgba(18, 22, 30, 0.24);
+            }
+            .overflow-menu.is-open {
+                display: grid;
+                gap: 3px;
+            }
+            .player-option {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                width: 100%;
+                min-height: 34px;
+                padding: 6px 9px;
+                border-radius: 6px;
+                background: transparent;
+                color: #29313d;
+                cursor: pointer;
+                text-align: left;
+            }
+            .player-option:hover {
+                background: #e7eaf0;
+            }
+            .player-option-mark {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 20px;
+                height: 20px;
+                border-radius: 4px;
+                background: #dce6f7;
+                color: #255fb5;
+                font-size: 11px;
+                font-weight: 800;
+            }
+            [hidden] {
+                display: none !important;
+            }
+            @media (prefers-reduced-motion: reduce) {
+                .handoff-control,
+                .action-button,
+                .status-mark {
+                    animation: none;
+                    transition: none;
+                }
+            }
+        </style>
+        <style>
+            :host {
+                transition: transform 180ms ease;
+            }
+            :host(.is-edge-hidden) {
+                transform: translateX(var(--edge-hide-offset, 0));
+            }
+            .handoff-shell {
+                position: relative;
+                width: 280px;
+                color: #17191d;
+                zoom: ${currentConfig.global.buttonScale};
+            }
+            .edge-reveal-handle {
+                position: absolute;
+                z-index: 4;
+                top: 0;
+                display: none;
+                width: 14px;
+                height: 50px;
+                padding: 0;
+                border: 0;
+                border-radius: 0;
+                background: #2f6fd0;
+                box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.32), 0 4px 12px rgba(8, 10, 14, 0.34);
+                color: #fff;
+                cursor: pointer;
+            }
+            .edge-reveal-handle::after {
+                position: absolute;
+                top: 15px;
+                left: 5px;
+                width: 4px;
+                height: 20px;
+                border-radius: 2px;
+                background: rgba(255, 255, 255, 0.78);
+                content: '';
+            }
+            :host(.is-edge-hidden) .edge-reveal-handle {
+                display: block;
+            }
+            :host(.edge-left) .edge-reveal-handle {
+                right: 0;
+            }
+            :host(.edge-right) .edge-reveal-handle {
+                left: 0;
+            }
+            .handoff-panel {
+                position: absolute;
+                left: 0;
+                bottom: 58px;
+                display: flex;
+                flex-direction: column;
+                width: 352px;
+                max-width: calc(100vw - 16px);
+                max-height: calc(100vh - 82px);
+                overflow: hidden;
+                border: 1px solid rgba(22, 27, 35, 0.14);
+                border-radius: 8px;
+                background: #f6f7f9;
+                box-shadow: 0 18px 52px rgba(9, 12, 18, 0.28);
+                opacity: 0;
+                visibility: hidden;
+                pointer-events: none;
+                transform: translateY(8px);
+                transform-origin: bottom left;
+                transition: opacity 160ms ease, transform 160ms ease, visibility 160ms ease;
+            }
+            .handoff-shell.align-right .handoff-panel {
+                right: 0;
+                left: auto;
+                transform-origin: bottom right;
+            }
+            .handoff-panel.is-open {
+                opacity: 1;
+                visibility: visible;
+                pointer-events: auto;
+                transform: translateY(0);
+            }
+            .panel-header {
+                display: grid;
+                grid-template-columns: 38px minmax(0, 1fr) 32px;
+                align-items: center;
+                gap: 10px;
+                min-height: 64px;
+                padding: 10px 12px;
+                border-bottom: 1px solid #e0e3e8;
+                background: #fff;
+                cursor: move;
+            }
+            .brand-mark,
+            .dock-brand {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                flex: 0 0 auto;
+                background: #17191d;
+                color: #fff;
+            }
+            .brand-mark {
+                width: 38px;
+                height: 38px;
+                border-radius: 7px;
+                box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+            }
+            .brand-mark svg,
+            .dock-brand svg {
+                width: 18px;
+                height: 18px;
+                fill: currentColor;
+            }
+            .panel-heading {
+                min-width: 0;
+            }
+            .panel-heading strong {
+                display: block;
+                overflow: hidden;
+                color: #17191d;
+                font-size: 14px;
+                font-weight: 750;
+                line-height: 1.25;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .panel-heading span {
+                display: block;
+                margin-top: 2px;
+                color: #747c88;
+                font-size: 11px;
+                font-weight: 600;
+                line-height: 1.25;
+            }
+            .panel-close,
+            .panel-toggle,
+            .dock-play,
+            .settings-button {
+                appearance: none;
+                border: 0;
+                margin: 0;
+                font: inherit;
+                letter-spacing: 0;
+                cursor: pointer;
+            }
+            .panel-close {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 32px;
+                height: 32px;
+                border-radius: 6px;
+                background: transparent;
+                color: #707986;
+            }
+            .panel-close:hover {
+                background: #edf0f4;
+                color: #17191d;
+            }
+            .panel-close svg,
+            .settings-button svg,
+            .dock-chevron,
+            .dock-play svg,
+            .primary-arrow {
+                width: 17px;
+                height: 17px;
+                fill: none;
+                stroke: currentColor;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+                stroke-width: 2;
+            }
+            .panel-content {
+                display: grid;
+                gap: 12px;
+                min-height: 0;
+                overflow-y: auto;
+                padding: 12px;
+            }
+            .source-card {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                min-height: 58px;
+                padding: 10px 11px;
+                border: 1px solid #e0e3e8;
+                border-radius: 7px;
+                background: #fff;
+            }
+            .source-copy {
+                min-width: 0;
+            }
+            .section-kicker,
+            .section-heading {
+                color: #7b8491;
+                font-size: 10px;
+                font-weight: 750;
+                line-height: 1.2;
+                text-transform: uppercase;
+            }
+            .source-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                min-width: 0;
+                margin-top: 6px;
+            }
+            .status-mark {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                flex: 0 0 auto;
+                background: #8a929e;
+                box-shadow: 0 0 0 3px rgba(138, 146, 158, 0.14);
+            }
+            .status-mark.is-ready {
+                background: #1f9d67;
+                box-shadow: 0 0 0 3px rgba(31, 157, 103, 0.14);
+            }
+            .status-mark.is-working {
+                background: #d69416;
+                box-shadow: 0 0 0 3px rgba(214, 148, 22, 0.14);
+                animation: status-pulse 1.2s ease-in-out infinite;
+            }
+            .status-mark.is-error {
+                background: #d9485f;
+                box-shadow: 0 0 0 3px rgba(217, 72, 95, 0.14);
+            }
+            .status-text {
+                min-width: 0;
+                overflow: hidden;
+                color: #303742;
+                font-size: 12px;
+                font-weight: 650;
+                line-height: 1.25;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .parser-badge {
+                flex: 0 0 auto;
+                max-width: 108px;
+                overflow: hidden;
+                padding: 5px 7px;
+                border: 1px solid #d8dee8;
+                border-radius: 6px;
+                background: #edf2fa;
+                color: #2c5f9f;
+                font-size: 10px;
+                font-weight: 800;
+                line-height: 1;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .primary-action {
+                display: grid;
+                grid-template-columns: 36px minmax(0, 1fr) 18px;
+                align-items: center;
+                gap: 10px;
+                width: 100%;
+                min-height: 58px;
+                padding: 8px 12px;
+                border: 0;
+                border-radius: 7px;
+                background: #2f6fd0;
+                color: #fff;
+                cursor: pointer;
+                text-align: left;
+                transition: background-color 140ms ease, transform 140ms ease;
+            }
+            .primary-action:hover {
+                background: #255fb5;
+                transform: translateY(-1px);
+            }
+            .primary-action:disabled,
+            .dock-play:disabled,
+            .player-option:disabled {
+                cursor: wait;
+                opacity: 0.56;
+                transform: none;
+            }
+            .primary-icon {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 36px;
+                height: 36px;
+                border-radius: 7px;
+                background: rgba(255, 255, 255, 0.16);
+            }
+            .primary-icon svg {
+                width: 18px;
+                height: 18px;
+                fill: currentColor;
+            }
+            .primary-copy {
+                min-width: 0;
+            }
+            .primary-command {
+                display: block;
+                overflow: hidden;
+                font-size: 14px;
+                font-weight: 780;
+                line-height: 1.25;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .primary-meta {
+                display: block;
+                margin-top: 2px;
+                color: rgba(255, 255, 255, 0.72);
+                font-size: 10px;
+                font-weight: 600;
+                line-height: 1.2;
+            }
+            .alternative-section {
+                display: grid;
+                gap: 7px;
+            }
+            .player-list {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 6px;
+            }
+            .player-option {
+                display: grid;
+                grid-template-columns: 28px minmax(0, 1fr);
+                align-items: center;
+                gap: 8px;
+                min-width: 0;
+                min-height: 42px;
+                padding: 6px 8px;
+                border: 1px solid #dde1e7;
+                border-radius: 7px;
+                background: #fff;
+                color: #333a45;
+                cursor: pointer;
+                text-align: left;
+            }
+            .player-option:hover {
+                border-color: #bdc9da;
+                background: #f0f4fa;
+            }
+            .player-option-mark {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 28px;
+                height: 28px;
+                overflow: hidden;
+                border-radius: 6px;
+                background: #e7edf6;
+                color: #2c5f9f;
+                font-size: 11px;
+                font-weight: 800;
+            }
+            .player-option-mark img {
+                display: block;
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+            }
+            .player-option-label {
+                min-width: 0;
+                overflow: hidden;
+                font-size: 11px;
+                font-weight: 700;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .panel-footer {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                min-height: 52px;
+                padding: 8px 12px;
+                border-top: 1px solid #e0e3e8;
+                background: #fff;
+            }
+            .settings-button {
+                display: inline-flex;
+                align-items: center;
+                gap: 7px;
+                min-height: 34px;
+                padding: 0 9px;
+                border-radius: 6px;
+                background: transparent;
+                color: #3d4653;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            .settings-button:hover {
+                background: #edf0f4;
+                color: #17191d;
+            }
+            .shortcut {
+                color: #8a929e;
+                font-family: "SFMono-Regular", Consolas, monospace;
+                font-size: 9px;
+                font-weight: 600;
+            }
+            .handoff-dock {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) 42px;
+                gap: 4px;
+                width: 280px;
+                min-height: 50px;
+                padding: 4px;
+                border: 1px solid rgba(255, 255, 255, 0.14);
+                border-radius: 8px;
+                background: rgba(18, 20, 24, 0.96);
+                box-shadow: 0 10px 30px rgba(8, 10, 14, 0.3);
+                backdrop-filter: blur(12px);
+            }
+            .panel-toggle {
+                display: grid;
+                grid-template-columns: 34px minmax(0, 1fr) 18px;
+                align-items: center;
+                gap: 8px;
+                min-width: 0;
+                min-height: 40px;
+                padding: 3px 6px 3px 3px;
+                border-radius: 6px;
+                background: transparent;
+                color: #fff;
+                text-align: left;
+            }
+            .panel-toggle:hover {
+                background: rgba(255, 255, 255, 0.08);
+            }
+            .dock-brand {
+                width: 34px;
+                height: 34px;
+                border-radius: 6px;
+                background: #fff;
+                color: #17191d;
+            }
+            .dock-copy {
+                min-width: 0;
+            }
+            .dock-copy strong {
+                display: block;
+                overflow: hidden;
+                font-size: 11px;
+                font-weight: 760;
+                line-height: 1.2;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .dock-status {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                min-width: 0;
+                margin-top: 3px;
+            }
+            .dock-status-mark {
+                width: 6px;
+                height: 6px;
+                box-shadow: none !important;
+            }
+            .dock-status-text {
+                min-width: 0;
+                overflow: hidden;
+                color: #aeb5c0;
+                font-size: 9px;
+                font-weight: 600;
+                line-height: 1.2;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .dock-chevron {
+                color: #98a1ad;
+                transition: transform 160ms ease;
+            }
+            .handoff-shell.is-panel-open .dock-chevron {
+                transform: rotate(180deg);
+            }
+            .dock-play {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 42px;
+                height: 42px;
+                border-radius: 6px;
+                background: #2f6fd0;
+                color: #fff;
+                transition: background-color 140ms ease, transform 140ms ease;
+            }
+            .dock-play:hover {
+                background: #3f7ee0;
+                transform: translateY(-1px);
+            }
+            .panel-close:focus-visible,
+            .panel-toggle:focus-visible,
+            .dock-play:focus-visible,
+            .primary-action:focus-visible,
+            .player-option:focus-visible,
+            .settings-button:focus-visible {
+                outline: 2px solid #4b87e6;
+                outline-offset: 2px;
+            }
+            @media (max-width: 420px) {
+                .handoff-shell,
+                .handoff-dock {
+                    width: 248px;
+                }
+                .handoff-panel {
+                    width: calc(100vw - 16px);
+                }
+                .player-list {
+                    grid-template-columns: 1fr;
+                }
+            }
+            @media (prefers-reduced-motion: reduce) {
+                :host,
+                .handoff-panel,
+                .dock-chevron,
+                .dock-play,
+                .primary-action {
+                    animation: none;
+                    transition: none;
+                }
+            }
+        </style>
+        <div class="handoff-shell" role="group" aria-label="${translation.handoffTitle}">
+            <button class="edge-reveal-handle" type="button" aria-label="${translation.handoffOpenPanel}"></button>
+            <section class="handoff-panel" aria-hidden="true">
+                <header class="panel-header drag-handle">
+                    <span class="brand-mark" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"></path></svg>
+                    </span>
+                    <div class="panel-heading">
+                        <strong>${translation.handoffTitle}</strong>
+                        <span>MPV Handoff</span>
+                    </div>
+                    <button class="panel-close" type="button" aria-label="${translation.handoffClosePanel}">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg>
+                    </button>
+                </header>
+                <div class="panel-content">
+                    <div class="source-card">
+                        <div class="source-copy">
+                            <div class="section-kicker">${translation.handoffCurrentSource}</div>
+                            <div class="source-row" aria-live="polite">
+                                <span class="status-mark panel-status-mark" aria-hidden="true"></span>
+                                <span class="status-text"></span>
+                            </div>
+                        </div>
+                        <span class="parser-badge">Parser</span>
+                    </div>
+                    <div class="quick-settings">
+                        <label>${translation.handoffDefaultPlayer}<select class="quick-default-player"></select></label>
+                        <label>${translation.handoffRelayMode}<select class="quick-relay-mode"><option value="auto">${translation.handoffRelayAuto}</option><option value="always">${translation.handoffRelayAlways}</option><option value="off">${translation.handoffRelayOff}</option></select></label>
+                        <label>${translation.handoffPreferredQuality}<select class="quick-preferred-quality"><option value="unlimited">${translation.handoffQualityAuto}</option></select></label>
+                        <label class="quick-edge-label"><input class="quick-edge-hide" type="checkbox">${translation.handoffEdgeHide}</label>
+                    </div>
+                    <button class="primary-action" type="button">
+                        <span class="primary-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"></path></svg>
+                        </span>
+                        <span class="primary-copy">
+                            <span class="primary-command">${translation.handoffPlayWith} <span class="primary-label">MPV</span></span>
+                            <span class="primary-meta">${translation.handoffTitle}</span>
+                        </span>
+                        <svg class="primary-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
+                    </button>
+                    <section class="alternative-section">
+                        <div class="section-heading">${translation.handoffOtherPlayers}</div>
+                        <div class="player-list" role="menu"></div>
+                    </section>
+                </div>
+                <footer class="panel-footer">
+                    <button class="settings-button" type="button">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"></path><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.14.37.36.7.66.96.3.26.69.4 1.09.4H21v4h-.09c-.4 0-.79.14-1.09.4-.3.26-.52.59-.66.96z"></path></svg>
+                        <span>${translation.handoffFullSettings}</span>
+                    </button>
+                    <span class="shortcut">Ctrl + Alt + E</span>
+                </footer>
+            </section>
+            <div class="handoff-dock">
+                <button class="panel-toggle" type="button" aria-expanded="false" aria-label="${translation.handoffOpenPanel}">
+                    <span class="dock-brand" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"></path></svg>
+                    </span>
+                    <span class="dock-copy">
+                        <strong>${translation.handoffTitle}</strong>
+                        <span class="dock-status">
+                            <span class="status-mark dock-status-mark" aria-hidden="true"></span>
+                            <span class="dock-status-text"></span>
+                        </span>
+                    </span>
+                    <svg class="dock-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
+                </button>
+                <button class="dock-play" type="button" title="MPV" aria-label="MPV">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"></path></svg>
+                </button>
+            </div>
+        </div>
+    `);
+
+    cacheHandoffElements();
     buttonDiv.addEventListener('mousedown', (e) => {
-        if (e.target.tagName === 'BUTTON') {
+        const path = e.composedPath();
+        if (e.button !== 0 ||
+            path.some(node => node?.tagName === 'BUTTON') ||
+            !path.some(node => node?.classList?.contains('drag-handle'))) {
             return;
         }
+        handoffIsDragging = true;
+        revealHandoffEdge();
         let offsetX = e.clientX - buttonDiv.getBoundingClientRect().left;
         let offsetY = e.clientY - buttonDiv.getBoundingClientRect().top;
 
@@ -1658,13 +4659,15 @@ function appendButtonDiv() {
         document.addEventListener('mousemove', mouseMoveHandler);
 
         function mouseUpHandler() {
-            buttonDiv.style.border = '3px solid rgba(0, 0, 0, 0)';
+            buttonDiv.style.setProperty('border', '2px solid rgba(0, 0, 0, 0)', 'important');
+            handoffIsDragging = false;
             document.removeEventListener('mousemove', mouseMoveHandler);
             document.removeEventListener('mouseup', mouseUpHandler);
+            scheduleHandoffEdgeHide();
         }
 
         function mouseMoveHandler(e) {
-            buttonDiv.style.border = `3px solid ${COLOR.PRIMARY}`;
+            buttonDiv.style.setProperty('border', `2px solid ${COLOR.PRIMARY}`, 'important');
             let newX = e.clientX - offsetX;
             let newY = e.clientY - offsetY;
 
@@ -1679,8 +4682,8 @@ function appendButtonDiv() {
             if (newY + divHeight > windowHeight) newY = windowHeight - divHeight;
 
             newY = windowHeight - newY - divHeight;
-            buttonDiv.style.left = `${newX}px`;
-            buttonDiv.style.bottom = `${newY}px`;
+            setHandoffHostPosition(newX, newY);
+            updateHandoffPanelPlacement();
             currentConfig.global.buttonXCoord = newX;
             currentConfig.global.buttonYCoord = newY;
             GM_setValue('config', currentConfig);
@@ -1688,113 +4691,261 @@ function appendButtonDiv() {
     });
     document.body.appendChild(buttonDiv);
 
+    buttonDiv.addEventListener('click', event => {
+        if (Date.now() < handoffEdgeRevealUntil) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+        }
+    }, true);
+    buttonDiv.addEventListener('mouseenter', revealHandoffEdge);
+    buttonDiv.addEventListener('focusin', revealHandoffEdge);
+    buttonDiv.addEventListener('mouseleave', scheduleHandoffEdgeHide);
+    buttonDiv.addEventListener('focusout', () => setTimeout(scheduleHandoffEdgeHide, 0));
+
+    handoffShadow.querySelector('.edge-reveal-handle').addEventListener('click', event => {
+        event.preventDefault();
+        revealHandoffEdge();
+    });
+
+    handoffPanelToggle.addEventListener('click', () => {
+        clearTimeout(handoffAutoHideId);
+        setHandoffPanelOpen(!handoffPanel.classList.contains('is-open'));
+    });
+    handoffPanelCloseButton.addEventListener('click', () => {
+        clearTimeout(handoffAutoHideId);
+        setHandoffPanelOpen(false);
+    });
+    window.addEventListener('resize', updateHandoffPanelPlacement);
+    updateHandoffPanelPlacement();
+
     appendPlayButton();
     appendSettingButton();
 
     // 全屏隐藏
     document.addEventListener("fullscreenchange", () => {
         if (document.fullscreenElement) {
-            buttonDiv.style.display = "none";
+            setHandoffHostDisplay('none');
         } else {
             if (currentParser) {
-                buttonDiv.style.display = "flex";
+                setHandoffHostDisplay('block');
             }
         }
     });
 }
 
 function appendPlayButton() {
-    if (!currentConfig.players) {
+    const enabledPlayers = (currentConfig.players || []).filter(player => player.enable === true);
+    const primaryPlayer = getEffectiveDefaultPlayer(enabledPlayers);
+    const overflowPlayers = enabledPlayers.filter(player => player !== primaryPlayer);
+    const primaryLabel = handoffPrimaryButton.querySelector('.primary-label');
+
+    if (primaryPlayer) {
+        primaryLabel.textContent = primaryPlayer.name || 'Player';
+        handoffPrimaryButton.title = primaryPlayer.name || 'Player';
+        handoffDockPlayButton.title = primaryPlayer.name || 'Player';
+        handoffDockPlayButton.setAttribute('aria-label', primaryPlayer.name || 'Player');
+        handoffPrimaryButton.disabled = false;
+        handoffDockPlayButton.disabled = false;
+        handoffPrimaryButton.onclick = () => launchWithPlayer(primaryPlayer, handoffPrimaryButton);
+        handoffDockPlayButton.onclick = () => launchWithPlayer(primaryPlayer, handoffDockPlayButton);
+    } else {
+        primaryLabel.textContent = 'MPV';
+        handoffPrimaryButton.title = translation.noMatchingParserFound;
+        handoffDockPlayButton.title = translation.noMatchingParserFound;
+        handoffPrimaryButton.disabled = true;
+        handoffDockPlayButton.disabled = true;
+    }
+
+    handoffOverflowMenu.replaceChildren();
+    for (const player of overflowPlayers) {
+        const option = document.createElement('button');
+        option.className = 'player-option';
+        option.type = 'button';
+        option.setAttribute('role', 'menuitem');
+
+        const mark = document.createElement('span');
+        mark.className = 'player-option-mark';
+        mark.textContent = (player.name || 'P').substring(0, 1).toUpperCase();
+        if (player.icon) {
+            const icon = document.createElement('img');
+            icon.src = player.icon;
+            icon.alt = '';
+            icon.addEventListener('error', () => {
+                mark.textContent = (player.name || 'P').substring(0, 1).toUpperCase();
+            }, {
+                once: true
+            });
+            mark.replaceChildren(icon);
+        }
+        const label = document.createElement('span');
+        label.className = 'player-option-label';
+        label.textContent = player.name || 'Player';
+        option.append(mark, label);
+        option.addEventListener('click', () => launchWithPlayer(player, option));
+        handoffOverflowMenu.appendChild(option);
+    }
+    handoffAlternativeSection.hidden = overflowPlayers.length === 0;
+    renderQuickSettings(enabledPlayers);
+}
+
+function getEffectiveDefaultPlayer(enabledPlayers) {
+    const configuredDefault = String(currentConfig?.global?.defaultPlayer || '');
+    return enabledPlayers.find(player => player.name === configuredDefault) ||
+        enabledPlayers.find(player => String(player.name).toUpperCase() === configuredDefault.toUpperCase()) ||
+        enabledPlayers.find(player => String(player.name).toUpperCase() === 'MPV') ||
+        enabledPlayers[0];
+}
+
+function persistQuickSettings() {
+    GM_setValue('config', currentConfig);
+    if (settingIframe?.style.display === 'block') {
+        settingIframe.contentWindow.postMessage({
+            name: PROJECT_NAME, method: 'loadConfig', defaultConfig, config: currentConfig
+        }, '*');
+    }
+}
+
+function setQuickQualityOptions(options, selectedValue) {
+    if (!handoffPreferredQuality) {
         return;
     }
-    currentConfig.players.forEach(player => {
-        if (player.enable !== true) {
-            return;
+    handoffPreferredQuality.replaceChildren(...options.map(item => {
+        const option = document.createElement('option');
+        option.value = String(item.value);
+        option.textContent = item.label;
+        if (item.bit !== undefined) {
+            option.dataset.bit = String(item.bit);
         }
-        const playButton = document.createElement('button');
-        const useTextFallback = isPornhubUrl();
-        playButton.title = player.name || 'Player';
-        playButton.style.backgroundColor = COLOR.PRIMARY;
-        playButton.textContent = player.name ? player.name.substring(0, 1) : 'P';
-        if (useTextFallback) {
-            playButton.textContent = player.name || 'Play';
-            playButton.style.borderRadius = '6px';
-            playButton.style.width = `${Math.max(player.iconSize, 64) * currentConfig.global.buttonScale}px`;
-        } else if (player.icon) {
-            const image = new Image();
-            image.src = player.icon;
-            image.onload = () => {
-                playButton.style.backgroundImage = `url(${image.src})`;
-                playButton.textContent = '';
-            };
-            image.onerror = () => {
-                playButton.style.backgroundColor = COLOR.PRIMARY;
-                playButton.textContent = player.name ? player.name.substring(0, 1) : 'P';
-            };
-        } else {
-            playButton.style.backgroundColor = COLOR.PRIMARY;
-        }
-        if (!useTextFallback) {
-            playButton.style.width = `${player.iconSize * currentConfig.global.buttonScale}px`;
-        }
-        playButton.style.height = `${player.iconSize * currentConfig.global.buttonScale}px`;
+        return option;
+    }));
+    handoffPreferredQuality.value = String(selectedValue);
+}
 
-        // 自动隐藏
-        if (isPornhubUrl()) {
-            playButton.style.visibility = 'visible';
-        } else if (currentConfig.global.buttonVisibilityDuration == 0) {
-            playButton.style.visibility = 'hidden';
-        } else if (currentConfig.global.buttonVisibilityDuration > 0) {
-            setTimeout(() => {
-                playButton.style.visibility = 'hidden';
-            }, currentConfig.global.buttonVisibilityDuration);
-        }
-
-        playButton.addEventListener('click', async function () {
-            playButton.disabled = true;
-            if (currentParser) {
-                currentParser.play(player);
-            } else {
-                showToast(translation.noMatchingParserFound);
+function renderQuickQualitySettings() {
+    if (!handoffPreferredQuality) {
+        return;
+    }
+    const parser = currentParser;
+    if (parser?.parserKey === 'douyu' && typeof parser.getQualityOptions === 'function') {
+        setQuickQualityOptions([{
+            value: 'auto',
+            label: translation.handoffQualityAuto
+        }], parser.selectedRate);
+        handoffPreferredQuality.disabled = true;
+        handoffPreferredQuality.onchange = () => {
+            parser.selectedRate = handoffPreferredQuality.value === 'auto' ?
+                'auto' :
+                Number(handoffPreferredQuality.value);
+        };
+        parser.getQualityOptions().then(qualities => {
+            if (currentParser !== parser || !handoffPreferredQuality) {
+                return;
             }
-            setTimeout(() => {
-                playButton.disabled = false;
-            }, REFRESH_INTERVAL * 3);
+            const options = [{
+                value: 'auto',
+                label: translation.handoffQualityAuto
+            }, ...qualities.map(quality => ({
+                value: quality.rate,
+                label: `${quality.name}${quality.bit > 0 ? ` · ${quality.bit} kbps` : ''}`,
+                bit: quality.bit
+            }))];
+            if (parser.selectedRate !== 'auto' &&
+                !qualities.some(quality => quality.rate === Number(parser.selectedRate))) {
+                parser.selectedRate = 'auto';
+            }
+            setQuickQualityOptions(options, parser.selectedRate);
+            handoffPreferredQuality.disabled = false;
+        }).catch(error => {
+            if (currentParser !== parser || !handoffPreferredQuality) {
+                return;
+            }
+            handoffPreferredQuality.disabled = false;
+            console.warn(`Douyu quality list unavailable: ${error.message}`);
         });
+        return;
+    }
 
-        buttonDiv.appendChild(playButton);
-    });
+    setQuickQualityOptions([
+        { value: 'unlimited', label: translation.handoffQualityAuto },
+        { value: '2160', label: '2160p' },
+        { value: '1440', label: '1440p' },
+        { value: '1080', label: '1080p' },
+        { value: '720', label: '720p' },
+        { value: '480', label: '480p' }
+    ], currentConfig.global.parser.ytdlp.preferredQuality || 'unlimited');
+    handoffPreferredQuality.disabled = false;
+    handoffPreferredQuality.onchange = () => {
+        currentConfig.global.parser.ytdlp.preferredQuality = handoffPreferredQuality.value;
+        persistQuickSettings();
+    };
+}
+
+function renderQuickSettings(enabledPlayers) {
+    if (!handoffDefaultPlayer) return;
+    handoffDefaultPlayer.replaceChildren(...enabledPlayers.map(player => {
+        const option = document.createElement('option');
+        option.value = player.name;
+        option.textContent = player.name;
+        return option;
+    }));
+    const fallback = getEffectiveDefaultPlayer(enabledPlayers);
+    handoffDefaultPlayer.disabled = enabledPlayers.length === 0;
+    handoffDefaultPlayer.value = fallback?.name || '';
+    renderQuickQualitySettings();
+    handoffRelayMode.value = currentConfig.global.browserRelayMode || 'auto';
+    handoffEdgeHide.checked = currentConfig.global.edgeHide === true;
+    handoffDefaultPlayer.onchange = () => {
+        currentConfig.global.defaultPlayer = handoffDefaultPlayer.value;
+        persistQuickSettings();
+        appendPlayButton();
+    };
+    handoffRelayMode.onchange = () => {
+        currentConfig.global.browserRelayMode = handoffRelayMode.value;
+        persistQuickSettings();
+    };
+    handoffEdgeHide.onchange = () => {
+        currentConfig.global.edgeHide = handoffEdgeHide.checked;
+        persistQuickSettings();
+        if (handoffEdgeHide.checked) scheduleHandoffEdgeHide(); else revealHandoffEdge();
+    };
 }
 
 function appendSettingButton() {
-    settingButton = document.createElement('button');
-    settingButton.id = `${PROJECT_NAME}-setting-button`;
+    settingButton = handoffShadow.querySelector('.settings-button');
     settingButton.title = 'Ctrl + Alt + E';
+    settingButton.setAttribute('aria-label', translation.handoffFullSettings);
 
     settingButton.addEventListener('click', async () => {
-        await appendSettingIframe();
-        if (settingIframe.style.display === "block") {
-            settingIframe.style.display = "none";
-        } else {
-            settingIframe.contentWindow.postMessage({
-                name: PROJECT_NAME,
-                method: 'loadConfig',
-                defaultConfig: defaultConfig,
-                config: currentConfig
-            }, '*');
-            settingIframe.style.display = "block";
-        }
+        await toggleSettingIframe();
     });
-    buttonDiv.appendChild(settingButton);
 
     // 失去焦点隐藏设置页面
     document.addEventListener('click', (event) => {
+        const path = event.composedPath();
         if (settingIframe && settingIframe.style.display === 'block' &&
-            !settingButton.contains(event.target) &&
-            !settingIframe.contains(event.target)) {
+            !path.includes(settingButton) &&
+            !path.includes(settingIframe)) {
             settingIframe.style.display = 'none';
+            scheduleHandoffEdgeHide();
         }
     });
+}
+
+async function toggleSettingIframe() {
+    await appendSettingIframe();
+    if (settingIframe.style.display === "block") {
+        settingIframe.style.display = "none";
+        scheduleHandoffEdgeHide();
+        return;
+    }
+    settingIframe.contentWindow.postMessage({
+        name: PROJECT_NAME,
+        method: 'loadConfig',
+        defaultConfig: defaultConfig,
+        config: currentConfig
+    }, '*');
+    settingIframe.style.display = "block";
+    revealHandoffEdge();
 }
 
 async function appendSettingIframe() {
@@ -2297,6 +5448,39 @@ async function appendSettingIframe() {
                         <label data-translate="networkProxy">网络代理</label>
                         <input type="text" id="networkProxy" placeholder="http://127.0.0.1:7890"></input>
                     </div>
+                <div class="input-group">
+                    <label data-translate="resourceSniffing">资源嗅探兜底</label>
+                    <label class="switch">
+                        <input type="checkbox" id="resourceSniffing">
+                        <span class="switch-slider"></span>
+                    </label>
+                </div>
+                <div class="input-group">
+                    <label data-translate="defaultPlayer">默认播放器</label>
+                    <select id="defaultPlayer"></select>
+                </div>
+                    <div class="input-group">
+                        <label data-translate="browserRelayMode">浏览器中继</label>
+                        <select id="browserRelayMode">
+                            <option value="auto" data-translate="relayAuto">自动</option>
+                            <option value="always" data-translate="relayAlways">始终中继</option>
+                            <option value="off" data-translate="relayOff">关闭</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label data-translate="browserRelayNotifications">浏览器中继弹出通知</label>
+                        <label class="switch">
+                            <input type="checkbox" id="browserRelayNotifications">
+                            <span class="switch-slider"></span>
+                        </label>
+                    </div>
+                <div class="input-group">
+                    <label data-translate="edgeHide">贴边隐藏</label>
+                    <label class="switch">
+                        <input type="checkbox" id="edgeHide">
+                        <span class="switch-slider"></span>
+                    </label>
+                </div>
                     <label data-translate="parser">解析器</label>
                     <div class="input-group parser" id="ytdlp">
                         <label><a href="https://github.com/yt-dlp/yt-dlp" target="_blank">YTDLP</a></label>
@@ -2309,7 +5493,18 @@ async function appendSettingIframe() {
                             <div class="radio-button" value="1440">1440P</div>
                             <div class="radio-button" value="1080">1080P</div>
                             <div class="radio-button" value="720">720P</div>
+                            <div class="radio-button" value="480">480P</div>
                         </div>
+                    </div>
+                    <div class="input-group parser" id="telegram">
+                        <label>TELEGRAM</label>
+                        <textarea name="regex" disabled></textarea>
+                        <textarea name="regex"></textarea>
+                    </div>
+                    <div class="input-group parser" id="douyu">
+                        <label>DOUYU LIVE</label>
+                        <textarea name="regex" disabled></textarea>
+                        <textarea name="regex"></textarea>
                     </div>
                     <div class="input-group parser" id="video">
                         <label><a href="https://github.com/LuckyPuppy514/external-player" target="_blank">VIDEO</a></label>
@@ -2424,6 +5619,14 @@ async function appendSettingIframe() {
                 buttonScale: 'Button Scale',
                 buttonVisibilityDuration: 'Button Visibility Duration (ms, -1: Keep Visible)',
                 networkProxy: 'Network Proxy',
+            resourceSniffing: 'Resource Sniffing Fallback',
+            defaultPlayer: 'Default Player',
+            browserRelayMode: 'Browser Relay',
+            browserRelayNotifications: 'Browser Relay Popup Notifications',
+            edgeHide: 'Hide At Edge',
+            relayAuto: 'Automatic',
+            relayAlways: 'Always relay',
+            relayOff: 'Off',
                 reset: 'Reset',
                 save: 'Save',
                 delete: 'Delete',
@@ -2461,6 +5664,14 @@ async function appendSettingIframe() {
                 buttonScale: '按钮比例',
                 buttonVisibilityDuration: '按钮可见时长（毫秒，-1：一直可见）',
                 networkProxy: '网络代理',
+            resourceSniffing: '资源嗅探兜底',
+            defaultPlayer: '默认播放器',
+            browserRelayMode: '浏览器中继',
+            browserRelayNotifications: '浏览器中继弹出通知',
+            edgeHide: '贴边隐藏',
+            relayAuto: '自动',
+            relayAlways: '始终中继',
+            relayOff: '关闭',
                 reset: '重置',
                 save: '保存',
                 delete: '删除',
@@ -2593,6 +5804,7 @@ async function appendSettingIframe() {
                 const previousElement = tabButton.previousElementSibling;
                 sidebar.removeChild(tabButton);
                 content.removeChild(tab);
+                refreshDefaultPlayerOptions();
                 activateTab(previousElement.getAttribute('data-tab'));
             };
 
@@ -2600,6 +5812,7 @@ async function appendSettingIframe() {
             nameInput.oninput = () => {
                 tabButton.innerHTML = policy.createHTML(SYSTEM_SVG[tab.querySelector('[name=system] .active').getAttribute('value')] + (
                     nameInput.value || tabName));
+                refreshDefaultPlayerOptions();
             };
 
             config.system = config.system || 'windows';
@@ -2623,6 +5836,7 @@ async function appendSettingIframe() {
             })
 
             tabButton.onclick = () => activateTab(tabId);
+            tab.querySelector('[name="enable"]').onchange = () => refreshDefaultPlayerOptions();
 
             activateTab(tabId);
         }
@@ -2669,7 +5883,14 @@ async function appendSettingIframe() {
                 if (key === 'parser') {
                     continue;
                 }
-                config.global[key] = document.getElementById(key)?.value || defaultConfig.global[key];
+                const input = document.getElementById(key);
+                if (key === 'defaultPlayer' && input?.dataset.dirty !== 'true') {
+                    config.global[key] = input?.dataset.configuredValue || defaultConfig.global[key];
+                } else if (input?.type === 'checkbox') {
+                    config.global[key] = input.checked;
+                } else {
+                    config.global[key] = input?.value || defaultConfig.global[key];
+                }
             }
 
             document.querySelectorAll('.tab').forEach(tab => {
@@ -2705,13 +5926,43 @@ async function appendSettingIframe() {
             document.getElementById('buttonYCoord').value = defaultConfig.global.buttonYCoord;
         }
 
+        function getPlayersFromTabs() {
+            return Array.from(document.querySelectorAll('.tab')).filter(tab => tab.id !== 'global').map(tab => ({
+                name: tab.querySelector('[name="name"]').value || tab.name || 'Player',
+                enable: tab.querySelector('[name="enable"]').checked,
+            }));
+        }
+
+        function refreshDefaultPlayerOptions(players = getPlayersFromTabs(), preferredName) {
+            const defaultPlayer = document.getElementById('defaultPlayer');
+            if (!defaultPlayer) return;
+            const enabledPlayers = players.filter(player => player.enable !== false);
+            if (preferredName !== undefined) {
+                defaultPlayer.dataset.configuredValue = preferredName;
+                defaultPlayer.dataset.dirty = 'false';
+            }
+            const requestedName = defaultPlayer.dataset.dirty === 'true' ? defaultPlayer.value :
+                (defaultPlayer.dataset.configuredValue ?? preferredName ?? defaultPlayer.value);
+            defaultPlayer.replaceChildren(...enabledPlayers.map(player => new Option(player.name, player.name)));
+            defaultPlayer.disabled = enabledPlayers.length === 0;
+            const fallback = enabledPlayers.find(player => player.name === requestedName) ||
+                enabledPlayers.find(player => String(player.name).toUpperCase() === String(requestedName || '').toUpperCase()) ||
+                enabledPlayers.find(player => String(player.name).toUpperCase() === 'MPV') || enabledPlayers[0];
+            defaultPlayer.value = fallback?.name || '';
+        }
+
         function loadConfig(config) {
             // 全局配置
             for (const key in config.global) {
                 if (key === 'parser' || !document.getElementById(key)) {
                     continue;
                 }
-                document.getElementById(key).value = config.global[key];
+                const input = document.getElementById(key);
+                if (input.type === 'checkbox') {
+                    input.checked = config.global[key] === true;
+                } else {
+                    input.value = config.global[key];
+                }
             }
 
             document.getElementById('language').value = config.global.language;
@@ -2750,6 +6001,7 @@ async function appendSettingIframe() {
             // 播放器配置
             removeAllTab();
             config.players.forEach(player => createTab(\`player\${tabCount++}\`, player.name, player));
+            refreshDefaultPlayerOptions(config.players, config.global.defaultPlayer);
 
             // 默认选中全局配置
             activateTab('global');
@@ -2798,6 +6050,9 @@ async function appendSettingIframe() {
 
             document.getElementById('language').addEventListener('change', (e) => {
                 translatePage(e.target.value);
+            });
+            document.getElementById('defaultPlayer').addEventListener('change', event => {
+                event.currentTarget.dataset.dirty = 'true';
             });
             document.getElementById('add-tab-button').onclick = () => createTab(\`tab\${tabCount++}\`);
             document.getElementById('global-button').onclick = () => activateTab('global');
@@ -2885,7 +6140,7 @@ function startFlashing(element) {
 }
 
 function showButtonDiv() {
-    buttonDiv.style.display = 'flex';
+    setHandoffHostDisplay('flex');
     if (!isReloading) {
         for (const player of currentConfig.players) {
             if (player.presetEvent.playAuto === true) {
@@ -2896,6 +6151,9 @@ function showButtonDiv() {
         }
     }
     isReloading = false;
+    // INITIAL_EDGE_HIDE_SCHEDULE_START
+    scheduleHandoffInitialEdgeHide();
+    // INITIAL_EDGE_HIDE_SCHEDULE_END
 }
 
 // ======================================== 开始执行 =======================================
@@ -2909,10 +6167,18 @@ async function appendAll() {
 }
 
 async function initTop() {
-    if (currentParser) {
+    if (currentParser && !isResourceFallbackParser()) {
         await appendAll();
         showButtonDiv();
+        updateHandoffForCurrentParser();
+    } else if (resourceFallbackCanShow()) {
+        await showResourceFallbackControl(resourceSniffer);
     }
+
+    if (topListenersAttached) {
+        return;
+    }
+    topListenersAttached = true;
 
     // 监听子页面事件
     window.addEventListener('message', async function (event) {
@@ -2939,10 +6205,16 @@ async function initTop() {
     });
 
     // 快捷键
-    document.addEventListener('keydown', (event) => {
+    document.addEventListener('keydown', async (event) => {
         // 打开设置：Ctrl + Alt + E
         if (event.ctrlKey && event.altKey && (event.key === 'e' || event.key === 'E')) {
             event.preventDefault();
+            if (!settingButton) {
+                await appendAll();
+            }
+            if (!settingButton) {
+                return;
+            }
             startFlashing(settingButton);
             settingButton.click();
         }
@@ -3007,9 +6279,30 @@ function initIframe() {
 }
 
 async function init(url) {
+    installTelegramPageCapture();
+    resourceSniffer?.stop();
+    resourceSniffer = undefined;
+    resourceFallbackDisplayPromise = undefined;
     currentConfig = loadConfig();
     translation = translations[currentConfig.global.language];
     currentParser = matchParser(currentConfig.global.parser, url) || matchParser(defaultConfig.global.parser, url);
+    if (!currentParser && self === top && currentConfig.global.resourceSniffing !== false) {
+        const minimumPerformanceStartTime = currentUrl ?
+            Math.max(0, performance.now() - REFRESH_INTERVAL * 2) :
+            0;
+        const sniffer = new PassiveResourceSniffer((candidate, hasVideoElement) => {
+            if (sniffer !== resourceSniffer || (!candidate && !hasVideoElement)) {
+                return;
+            }
+            showResourceFallbackControl(sniffer);
+        }, minimumPerformanceStartTime);
+        resourceSniffer = sniffer;
+        currentParser = new PARSER.RESOURCE(sniffer);
+        sniffer.start();
+    }
+    if (buttonDiv) {
+        setHandoffHostDisplay('none');
+    }
     if (self === top) {
         await initTop();
     } else {

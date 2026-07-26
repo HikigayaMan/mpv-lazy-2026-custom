@@ -17,7 +17,7 @@
 | portable_config/ | MPV 便携配置核心：conf、脚本、着色器、VS 滤镜脚本、字体 | 是 | 依赖 mpv.exe、VapourSynth 运行时、模型文件（不在仓库） |
 | docs/ | 文档：研究记录、迁移归档、文章、可视化报告 | 是 | 无 |
 | installer/ | Windows 注册/取消注册、umpv 安装、测试/纯净/跑分模式脚本 | 是 | 依赖完整包根目录中的 mpv.com、mpv.exe、umpv.exe |
-| tools/ | 工具源码：RIFE benchmark、RealESRGAN 导出、Telegram Bridge | 是 | Telegram Bridge 需本机 Python venv |
+| tools/ | 工具源码：RIFE benchmark、RealESRGAN 导出、Browser Media Bridge | 是 | 源码开发需 Python/Node；Release 运行包使用 EXE |
 | tools/release/ | GitHub Release 分类打包脚本与说明 | 是 | 依赖完整发布源目录与 7z.exe |
 | external_player.js | 油猴脚本，网页拉起 MPV 播放 | 是 | 依赖 url-scheme-handler 或 MPV 可执行路径 |
 | .gitignore | 忽略规则 | 是 | 无 |
@@ -53,6 +53,9 @@
 - uosc_danmaku.conf：uosc 弹幕插件配置。
 - rife_runtime_default.json：RIFE 动态菜单的默认参数。
 - rife_runtime.json：RIFE 动态菜单当前选择状态。属于运行态，已纳入 .gitignore，但历史中被 track；后续应 git rm --cached 移除。
+- rife_sr_runtime_default.json：超分补帧自定义组合默认选择。
+- rife_sr_runtime.json：超分补帧当前待应用选择，属于运行态，不上传、不打包。
+- uosc_danmaku_style.json：跨进程弹幕样式与直播帧率偏好，属于运行态。
 
 ### scripts/（已上传）
 
@@ -61,7 +64,9 @@ MPV Lua/JS 脚本，全部已上传：
 - quality-menu.lua：清晰度菜单，支持 yt-dlp 格式和直接 HLS editions。
 - rife_runtime_menu.lua：RIFE 动态参数菜单（模型/Turbo/flow_scale/H_Pre）。
 - ytdl-retry.lua：yt-dlp 403 自动重试（SpankBang 场景）。
-- telegram_web_mpv_bridge.lua：Telegram Bridge MPV 端控制脚本。
+- telegram_web_mpv_bridge.lua：Browser Media Bridge MPV 端控制脚本，优先启动 Release EXE。
+- rife_sr_runtime_menu.lua：2026 超分预设与 2025/2026 RIFE NV 自定义组合菜单。
+- douyu_danmaku.lua：斗鱼实时弹幕到 uosc 的兼容路由。
 - sub-fastwhisper.lua：AI 字幕脚本。
 - recentmenu.lua：最近播放菜单。
 - input_plus.lua / inputevent.lua：输入增强。
@@ -75,7 +80,7 @@ MPV Lua/JS 脚本，全部已上传：
 
 - bilibiliAssert/：B 站弹幕集成（含 main.lua、模块、Danmu2Ass 转换逻辑）。注意：Danmu2Ass.exe 已从仓库移除，本地需自行准备。
 - uosc/：uosc 现代化界面框架。注意：bin/ziggy-windows.exe 已从仓库移除。
-- uosc_danmaku/：uosc 弹幕插件。
+- uosc_danmaku/：uosc 弹幕插件，包含实时 API、跨进程样式和直播帧率。
 - trakt-scrobble/：Trakt 追踪插件（含 main.lua、modules、README）。
 - thumb_engine/：缩略图引擎。
 
@@ -112,7 +117,7 @@ VapourSynth 滤镜脚本，全部 .vpy 文件已上传：
 - rife_benchmark.py：RIFE 性能基准测试脚本。
 - rife_engine_builder.py / rife_engine_monitor.py：TensorRT engine 预构建和监控。
 - export_realesr_general_x4v3_dynamic.py：RealESRGAN 模型动态 ONNX 导出工具。
-- telegram-web-mpv-bridge/：Telegram Web MPV Bridge（bridge.py、userscript、README）。运行需本机 Python venv + websockets 包。
+- telegram-web-mpv-bridge/：Browser Media Bridge 源码与开发回退。正式整合包通过 config 资产补入 `browser-media-bridge.exe` 和 `douyu-danmaku-client.exe`，普通用户不需要 Python/Node。
 - release/package_release.py：从已验证完整包生成 base / ai / config / docs 分类压缩包，并可选择上传到 GitHub Release。
 
 ## 未上传的内容（本地依赖）

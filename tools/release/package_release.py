@@ -114,6 +114,9 @@ CONFIG_EXACT_FILES = {
     "external_player.js",
     "umpv.conf",
     "truehdrtweaks.ini",
+    "tools/telegram-web-mpv-bridge/browser-media-bridge.exe",
+    "tools/telegram-web-mpv-bridge/douyu-danmaku-client.exe",
+    "tools/telegram-web-mpv-bridge/start_browser_relay.ps1",
     "portable_config/fonts.conf",
     "portable_config/input_uosc.conf",
     "portable_config/input_uosc.conf_2025",
@@ -175,6 +178,8 @@ OVERLAY_EXCLUDE_GLOBS = {
     "portable_config/recent.json",
     "portable_config/saved-props.json",
     "portable_config/script-opts/rife_runtime.json",
+    "portable_config/script-opts/rife_sr_runtime.json",
+    "portable_config/script-opts/uosc_danmaku_style.json",
     "portable_config/script-opts/trakt_scrobble.conf",
     "portable_config/trakt_config.json",
     "portable_config/trakt_history.json",
@@ -200,6 +205,8 @@ STAGING_REMOVE_RELS = {
     "portable_config/recent.json",
     "portable_config/saved-props.json",
     "portable_config/script-opts/rife_runtime.json",
+    "portable_config/script-opts/rife_sr_runtime.json",
+    "portable_config/script-opts/uosc_danmaku_style.json",
     "portable_config/script-opts/trakt_scrobble.conf",
     "portable_config/trakt_config.json",
     "portable_config/trakt_history.json",
@@ -223,6 +230,8 @@ FORBIDDEN_RELS = {
     "portable_config/recent.json",
     "portable_config/saved-props.json",
     "portable_config/script-opts/rife_runtime.json",
+    "portable_config/script-opts/rife_sr_runtime.json",
+    "portable_config/script-opts/uosc_danmaku_style.json",
     "portable_config/script-opts/trakt_scrobble.conf",
     "portable_config/trakt_config.json",
     "portable_config/trakt_history.json",
@@ -624,7 +633,7 @@ def build_package_inputs(paths: Paths, packages: list[str], *, direct: bool = Fa
     readmes = {
         "base": "基础可播放包。可直接运行 mpv.exe 播放普通视频；AI 补帧/超分需继续解压 AI 包和 Config 包。\n",
         "ai": "AI/VS 大依赖包。先解压 Base，再解压本包到同一根目录覆盖。\n",
-        "config": "配置更新包。包含菜单、脚本、快捷键、滤镜 vpy；后续小更新通常只需覆盖本包。\n",
+        "config": "配置更新包。包含菜单、脚本、快捷键、滤镜 vpy 与 Browser Media Bridge 运行文件；后续小更新通常只需覆盖本包。\n",
         "docs": "文档包。包含迁移记录、测试报告、RIFE benchmark HTML 和使用说明。\n",
     }
     for package, text in readmes.items():
@@ -843,6 +852,9 @@ def verify_extracted(paths: Paths, version: str, forbidden_texts: list[str], pac
             "portable_config/mpv.conf",
             "portable_config/script_helpers/hdr_luma_heatmap.py",
             "portable_config/scripts/rife_runtime_menu.lua",
+            "tools/telegram-web-mpv-bridge/browser-media-bridge.exe",
+            "tools/telegram-web-mpv-bridge/douyu-danmaku-client.exe",
+            "tools/telegram-web-mpv-bridge/start_browser_relay.ps1",
         })
     if "docs" in verify_packages:
         required_selected.update({"docs"})

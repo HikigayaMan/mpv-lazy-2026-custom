@@ -30,6 +30,18 @@
 
 如果只需要基础播放，可以只下载 `base`；如果已经完整安装，后续菜单、脚本、滤镜配置的小更新通常只需要下载 `config` 覆盖。
 
+## 2026-07-26 Config 更新
+
+本次只需重新下载 `mpv-lazy-2026-custom-config-v2026.06.zip` 覆盖现有完整安装：
+
+- External Player 1.2.14.9：新悬浮 UI、设置入口、贴边隐藏、实时画质、资源嗅探，以及 MissAV、Telegram、斗鱼专用解析。
+- Browser Media Bridge：Telegram 在线拖动播放、斗鱼弹幕进程与 MPV IPC；正式包内置免 Python/Node 的两个 EXE。
+- uosc_danmaku：斗鱼实时弹幕、跨进程样式保存、直播帧率和 RIFE 滤镜冲突保护。
+- 超分补帧自定义组合：15 个 2026 超分预设与 10 个 2025/2026 RIFE NV 模型。
+- Trakt 与浏览器中继的后台弹出通知默认关闭，可从工具菜单开启。
+
+已经完整安装 `base + ai + config` 的用户不需要重复下载 base 和 AI 分卷。
+
 ## 安装配置教程
 
 - 总入口：[工具脚本安装、配置与使用说明](./docs/%E5%B7%A5%E5%85%B7%E8%84%9A%E6%9C%AC%E5%AE%89%E8%A3%85%E9%85%8D%E7%BD%AE%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md)
@@ -37,7 +49,7 @@
 - 弹幕插件：[uosc_danmaku](./docs/scripts/uosc-danmaku.md)
 - AI 字幕：[sub-fastwhisper](./docs/scripts/sub-fastwhisper.md)
 - Trakt 同步：[trakt-scrobble](./docs/scripts/trakt-scrobble.md)
-- Telegram Web 播放桥接：[Telegram Web MPV Bridge](./docs/scripts/telegram-web-mpv-bridge.md)
+- Telegram / 斗鱼本机服务：[Browser Media Bridge](./docs/scripts/telegram-web-mpv-bridge.md)
 
 如果是第一次使用，建议先按 Release 说明完成 `base + ai + config` 解压，再阅读总入口文档；只有需要网页拉起、弹幕、AI 字幕、Trakt 或 Telegram Web 时，再进入对应专题文档配置。
 
@@ -46,12 +58,18 @@
 - **RIFE 补帧**：整理了 4.6、4.7、4.8、4.9、4.15 lite、4.25 lite 等模型与菜单入口。
 - **动态 RIFE 参数菜单**：支持模型、Turbo、flow_scale、H_Pre 等参数组合，并可保存默认配置。
 - **AI 超分**：包含 UAI、AnimeJaNai、RealESRGAN、LiveAction、StarSample 等超分方案。
-- **超分 + 补帧组合**：提供面向 720P/1080P 片源的组合预设。
+- **超分 + 补帧组合**：除固定预设外，提供 15 个 2026 超分预设与 10 个 2025/2026 RIFE NV 模型的运行时自定义组合。
 - **着色器菜单**：整理 780+ GLSL 着色器，并按标准、动漫、真人/通用、组合等场景分类。
-- **网页拉起播放**：包含 `external_player.js`，可配合 `url-scheme-handler` 从浏览器拉起 mpv。
-- **弹幕与 B 站场景**：保留 bilibiliAssert，并接入 uosc_danmaku。
+- **网页拉起播放**：External Player 1.2.14.9 提供新悬浮 UI、默认播放器、画质、贴边隐藏、资源嗅探，以及 MissAV、Telegram 和斗鱼专用链路。
+- **弹幕与直播**：保留 bilibiliAssert，并让斗鱼实时弹幕接入 uosc_danmaku 的样式、菜单和直播帧率控制。
 - **AI 字幕**：集成 sub-fastwhisper 相关配置和模型目录说明。
-- **Trakt / Telegram Bridge**：保留相关脚本和文档，需自行授权或安装依赖。
+- **Trakt / Browser Media Bridge**：后台通知默认关闭；Release 中的 bridge 与斗鱼 helper 已封装为 EXE，普通用户不需要安装 Python 或 Node。
+
+独立源码仓库：
+
+- [luoxue03/external-player](https://github.com/luoxue03/external-player)
+- [luoxue03/telegram-web-mpv-bridge](https://github.com/luoxue03/telegram-web-mpv-bridge)
+- [luoxue03/url-scheme-handler](https://github.com/luoxue03/url-scheme-handler)
 
 ## 仓库内容
 

@@ -27,7 +27,7 @@
 
 - `base`：基础可播放包，包含 `mpv.exe`、基础配置、脚本、着色器、文档、工具；不包含大型 AI/VapourSynth 依赖。
 - `ai`：AI/VS 大包，包含 VapourSynth、TensorRT/CUDA、RIFE、UAI、RealESRGAN、AnimeJaNai、faster-whisper 等依赖；会自动分卷。
-- `config`：小型配置更新包，包含菜单、脚本、快捷键、`.vpy` 滤镜和配置文件；后续只改配置时通常只发这个。
+- `config`：小型配置更新包，包含菜单、脚本、快捷键、`.vpy` 滤镜、配置文件，以及 Browser Media Bridge 的两个免依赖 EXE；后续此类小更新通常只发这个。
 - `docs`：可选文档包，包含迁移记录、测试报告、RIFE benchmark HTML 和使用说明。
 
 ### 默认路径

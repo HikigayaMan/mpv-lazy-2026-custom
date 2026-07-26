@@ -25,6 +25,10 @@ options = {
     vf_fps = false,
     -- 设置要使用的 fps 滤镜参数
     fps = "60/1.001",
+    -- 直播弹幕专用帧率模式：auto/60/80/120/display
+    live_fps_mode = "auto",
+    -- 跨进程样式默认值文件；留空时使用 ~~ /script-opts/uosc_danmaku_style.json
+    style_path = "",
     -- 弹幕渲染方式：overlay 使用 OSD 叠层；ass 生成临时 ASS 字幕轨
     render_mode = "overlay",
     -- 指定合并重复弹幕的时间间隔的容差值，单位为秒。默认值: -1，表示禁用

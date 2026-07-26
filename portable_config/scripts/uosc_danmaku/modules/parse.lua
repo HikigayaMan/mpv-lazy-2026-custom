@@ -782,3 +782,44 @@ function convert_danmaku_to_ass_events(force)
         end
     end
 end
+
+-- Build a transient live stream from already validated input.  It deliberately
+-- shares the static parser's conversion, blacklist, font measurement and lane
+-- selection code, but never touches COMMENTS or DANMAKU.sources.
+function build_live_ass_events(danmakus)
+    local fontsize = tonumber(options.fontsize) or 50
+    local scrolltime = tonumber(options.scrolltime) or 15
+    local res_x, res_y = 1920, 1080
+    local layout_res_y = math.floor(res_y * (tonumber(options.displayarea) or 1.0))
+    layout_res_y = math.max(fontsize, math.min(res_y, layout_res_y))
+    local roll_array = DanmakuArray:new(res_x, layout_res_y, fontsize)
+    local events = {}
+
+    for _, d in ipairs(danmakus or {}) do
+        if type(d.time) == "number" and type(d.text) == "string" and not is_blacklisted(d.text, black_patterns) then
+            local clean_text = ch_convert_cached(decode_html_entities(d.text))
+            local text = ass_escape(clean_text)
+            local color = math.max(0, math.min(d.color or 0xFFFFFF, 0xFFFFFF))
+            local color_hex = string.format("%06X", color)
+            local color_text = string.format("{\\c&H%s%s%s&}", color_hex:sub(5, 6), color_hex:sub(3, 4), color_hex:sub(1, 2))
+            local text_length = get_str_width(text, fontsize)
+            local x1, x2 = res_x + text_length / 2, -text_length / 2
+            local y = get_position_y(fontsize, d.time, text_length, res_x, scrolltime, roll_array)
+            if y then
+                events[#events + 1] = {
+                    orig_time = d.orig_time or d.time,
+                    start_time = d.time,
+                    end_time = d.time + scrolltime,
+                    delay = 0,
+                    style = "R2L",
+                    text = string.format("{\\move(%d,%d,%d,%d)}%s%s", x1, y, x2, y, color_text, text),
+                    clean_text = clean_text,
+                    move = {x1, y, x2, y},
+                    layer = 0,
+                    source = "live",
+                }
+            end
+        end
+    end
+    return events
+end

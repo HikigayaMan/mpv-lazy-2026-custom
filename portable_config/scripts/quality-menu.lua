@@ -81,6 +81,9 @@ local opts = {
     --show the video format menu after opening an url
     start_with_menu = false,
 
+    --percent-encoded JSON list of browser-discovered HLS child playlists
+    hls_variants = '',
+
     --include unknown formats in the list
     --Unfortunately choosing which formats are video or audio is not always perfect.
     --Set to true to make sure you don't miss any formats, but then the list
@@ -506,6 +509,136 @@ local uosc_available = false
 ---@type { [string]: Data }
 local url_data = {}
 
+local HLS_VARIANT_LIMIT = 12
+local HLS_VARIANTS_OPTION_LENGTH_LIMIT = 32768
+local HLS_VARIANTS_JSON_LENGTH_LIMIT = 24576
+local HLS_VARIANT_URL_LENGTH_LIMIT = 4096
+local HLS_DIMENSION_LIMIT = 16384
+local HLS_BANDWIDTH_LIMIT = 1000 * 1000 * 1000
+
+---@param input string
+---@return string | nil, string | nil
+local function percent_decode(input)
+    local output = {}
+    local output_length = 0
+    local index = 1
+
+    while index <= #input do
+        local char = input:sub(index, index)
+        if char == '%' then
+            local encoded = input:sub(index + 1, index + 2)
+            if #encoded ~= 2 or not encoded:match('^%x%x$') then
+                return nil, 'malformed percent encoding'
+            end
+            output[#output + 1] = string.char(tonumber(encoded, 16))
+            index = index + 3
+        else
+            output[#output + 1] = char
+            index = index + 1
+        end
+
+        output_length = output_length + 1
+        if output_length > HLS_VARIANTS_JSON_LENGTH_LIMIT then
+            return nil, 'decoded JSON is too large'
+        end
+    end
+
+    return table.concat(output), nil
+end
+
+---@param value any
+---@param maximum integer
+---@return integer | nil, boolean
+local function optional_positive_integer(value, maximum)
+    if value == nil then return nil, true end
+    if type(value) ~= 'number' or value ~= value or value < 1 or value > maximum or value % 1 ~= 0 then
+        return nil, false
+    end
+    return value, true
+end
+
+---@param url any
+---@return boolean
+local function is_valid_hls_variant_url(url)
+    if type(url) ~= 'string' or #url == 0 or #url > HLS_VARIANT_URL_LENGTH_LIMIT then return false end
+    if url:find('[%c%s]') then return false end
+
+    local scheme, rest = url:match('^(https?)://(.+)$')
+    if not scheme or not rest then return false end
+
+    local authority, path = rest:match('^([^/?#]+)(/[^?#]*)')
+    if not authority or authority == '' or not path then return false end
+    return path:lower():sub(-5) == '.m3u8'
+end
+
+---@param option_value string
+---@return table[] | nil
+local function parse_hls_variants(option_value)
+    if option_value == '' then return nil end
+    if type(option_value) ~= 'string' or #option_value > HLS_VARIANTS_OPTION_LENGTH_LIMIT then
+        msg.warn('ignoring hls_variants option: encoded value is too large')
+        return nil
+    end
+
+    local decoded, decode_error = percent_decode(option_value)
+    if not decoded then
+        msg.warn('ignoring hls_variants option: ' .. decode_error)
+        return nil
+    end
+
+    local parsed, parse_error = utils.parse_json(decoded)
+    if type(parsed) ~= 'table' then
+        msg.warn('ignoring hls_variants option: ' .. (parse_error or 'expected a JSON array'))
+        return nil
+    end
+
+    local item_count = 0
+    for key in pairs(parsed) do
+        if type(key) ~= 'number' or key < 1 or key % 1 ~= 0 then
+            msg.warn('ignoring hls_variants option: expected a JSON array')
+            return nil
+        end
+        item_count = item_count + 1
+    end
+    if item_count == 0 then return nil end
+    if item_count ~= #parsed or item_count > HLS_VARIANT_LIMIT then
+        msg.warn('ignoring hls_variants option: invalid or oversized variant list')
+        return nil
+    end
+
+    local variants = {}
+    local seen_urls = {}
+    for index, item in ipairs(parsed) do
+        if type(item) ~= 'table' or not is_valid_hls_variant_url(item.url) then
+            msg.warn('ignoring hls_variants option: invalid variant URL')
+            return nil
+        end
+
+        local width, width_valid = optional_positive_integer(item.width, HLS_DIMENSION_LIMIT)
+        local height, height_valid = optional_positive_integer(item.height, HLS_DIMENSION_LIMIT)
+        local bandwidth, bandwidth_valid = optional_positive_integer(item.bandwidth, HLS_BANDWIDTH_LIMIT)
+        if not width_valid or not height_valid or not bandwidth_valid then
+            msg.warn('ignoring hls_variants option: invalid variant metadata')
+            return nil
+        end
+
+        if not seen_urls[item.url] then
+            seen_urls[item.url] = true
+            variants[#variants + 1] = {
+                url = item.url,
+                width = width,
+                height = height,
+                bandwidth = bandwidth,
+                source_index = index,
+            }
+        end
+    end
+
+    return #variants > 0 and variants or nil
+end
+
+local hls_variants = parse_hls_variants(opts.hls_variants)
+
 local function is_direct_hls_url(url)
     if not url then return false end
     return url:match('^https?://[^/]+/.+%.m3u8') ~= nil or url:match('^https?://[^/]+/.+%.m3u') ~= nil
@@ -589,6 +722,126 @@ end
 ---@return { [string]: string }
 local function hls_properties(properties)
     return setmetatable(properties, { __index = function() return '' end })
+end
+
+---@param url string | nil
+---@return table | nil
+local function find_hls_variant(url)
+    if not hls_variants or not url then return nil end
+    for _, variant in ipairs(hls_variants) do
+        if variant.url == url then return variant end
+    end
+    return nil
+end
+
+---@param url string | nil
+---@return Data | nil
+local function create_hls_data_from_url_variants(url)
+    if not find_hls_variant(url) then return nil end
+
+    local sorted_variants = {}
+    local label_counts = {}
+    for _, variant in ipairs(hls_variants) do
+        sorted_variants[#sorted_variants + 1] = variant
+
+        local resolution = variant.height and tostring(variant.height) .. 'p'
+            or variant.width and tostring(variant.width) .. 'w'
+            or ''
+        local bitrate_label = hls_bitrate_label(variant.bandwidth)
+        local base_label = resolution
+        if base_label ~= '' and bitrate_label ~= '' then
+            base_label = base_label .. ' (' .. bitrate_label .. ')'
+        elseif base_label == '' then
+            base_label = bitrate_label
+        end
+        if base_label == '' then base_label = 'HLS Variant' end
+        label_counts[base_label] = (label_counts[base_label] or 0) + 1
+    end
+
+    table.sort(sorted_variants, function(a, b)
+        local a_height = a.height or 0
+        local b_height = b.height or 0
+        if a_height ~= b_height then return a_height > b_height end
+
+        local a_width = a.width or 0
+        local b_width = b.width or 0
+        if a_width ~= b_width then return a_width > b_width end
+
+        local a_bandwidth = a.bandwidth or 0
+        local b_bandwidth = b.bandwidth or 0
+        if a_bandwidth ~= b_bandwidth then return a_bandwidth > b_bandwidth end
+
+        return a.source_index < b.source_index
+    end)
+
+    local video_formats = {}
+    for _, variant in ipairs(sorted_variants) do
+        local resolution = variant.height and tostring(variant.height) .. 'p'
+            or variant.width and tostring(variant.width) .. 'w'
+            or ''
+        local resolution_hint = variant.width and variant.height
+            and tostring(variant.width) .. 'x' .. tostring(variant.height)
+            or ''
+        local bitrate_label = hls_bitrate_label(variant.bandwidth)
+        local label = resolution
+        if label ~= '' and bitrate_label ~= '' then
+            label = label .. ' (' .. bitrate_label .. ')'
+        elseif label == '' then
+            label = bitrate_label
+        end
+        if label == '' then label = 'HLS Variant' end
+        if label_counts[label] > 1 then label = label .. ' #' .. tostring(variant.source_index) end
+
+        local hint_parts = { 'HLS URL' }
+        if resolution_hint ~= '' then hint_parts[#hint_parts + 1] = resolution_hint end
+        if bitrate_label ~= '' then hint_parts[#hint_parts + 1] = bitrate_label end
+
+        video_formats[#video_formats + 1] = {
+            id = variant.url,
+            label = label,
+            title = label,
+            hint = table.concat(hint_parts, ', '),
+            properties = hls_properties({
+                resolution = resolution,
+                width = variant.width and tostring(variant.width) or '',
+                height = variant.height and tostring(variant.height) or '',
+                fps = '',
+                dynamic_range = '',
+                tbr = bitrate_label,
+                vbr = bitrate_label,
+                abr = '',
+                asr = '',
+                filesize = '',
+                filesize_approx = '',
+                vcodec = '',
+                acodec = '',
+                ext = 'm3u8',
+                video_ext = 'm3u8',
+                audio_ext = '',
+                language = '',
+                format = 'HLS URL',
+                format_note = 'Browser variant',
+                quality = resolution ~= '' and resolution or label,
+                size = '',
+                frame_rate = '',
+                bitrate_total = bitrate_label,
+                bitrate_video = bitrate_label,
+                bitrate_audio = '',
+                codec_video = '',
+                codec_audio = '',
+                audio_sample_rate = '',
+            }),
+        }
+    end
+
+    return {
+        hls = true,
+        hls_mode = 'url',
+        video_formats = video_formats,
+        audio_formats = {},
+        video_active_id = url,
+        audio_active_id = '',
+    }
 end
 
 ---@return Data | nil
@@ -747,6 +1000,12 @@ end
 local function refresh_hls_data(url)
     if not is_direct_hls_url(url) then return nil end
 
+    local url_variant_data = create_hls_data_from_url_variants(url)
+    if url_variant_data then
+        url_data[url] = url_variant_data
+        return url_variant_data
+    end
+
     local previous = url_data[url]
     local data = create_hls_data_from_edition_list() or create_hls_data_from_track_list()
     if data then
@@ -825,13 +1084,68 @@ local function format_string(video_id, audio_id)
     end
 end
 
+local hls_switch_cleanup = nil
+
+---@param target_url string
+local function load_hls_variant_resume(target_url)
+    local reload_duration = mp.get_property_native('duration')
+    local time_pos = mp.get_property('time-pos')
+
+    if hls_switch_cleanup then hls_switch_cleanup() end
+
+    if reload_duration and reload_duration > 0 and time_pos then
+        local seeker
+        local cleanup_timer
+        local cleaned = false
+        local cleanup
+
+        cleanup = function()
+            if cleaned then return end
+            cleaned = true
+            if seeker then mp.unregister_event(seeker) end
+            if cleanup_timer then cleanup_timer:kill() end
+            if hls_switch_cleanup == cleanup then hls_switch_cleanup = nil end
+        end
+
+        seeker = function()
+            if mp.get_property('path') ~= target_url then return end
+            cleanup()
+            mp.commandv('seek', time_pos, 'absolute+exact')
+        end
+        mp.register_event('file-loaded', seeker)
+        cleanup_timer = mp.add_timeout(15, cleanup)
+        hls_switch_cleanup = cleanup
+    end
+
+    msg.verbose('switching HLS variant URL')
+    mp.commandv('loadfile', target_url, 'replace')
+end
+
 ---@param url string
 ---@param video_format string
 ---@param audio_format string
 local function set_format(url, video_format, audio_format)
-    if (url_data[url].video_active_id ~= video_format or url_data[url].audio_active_id ~= audio_format) then
-        url_data[url].video_active_id = video_format
-        url_data[url].audio_active_id = audio_format
+    local data = url_data[url]
+    if not data then return end
+
+    if data.hls and data.hls_mode == 'url' then
+        if video_format == '' or data.video_active_id == video_format then return end
+
+        local target_data = create_hls_data_from_url_variants(video_format)
+        if not target_data then
+            msg.warn('refusing unknown HLS variant URL')
+            return
+        end
+
+        data.video_active_id = video_format
+        url_data[video_format] = target_data
+        if url == mp.get_property('path') then load_hls_variant_resume(video_format) end
+        return
+    end
+
+    if (data.video_active_id ~= video_format or data.audio_active_id ~= audio_format) then
+        data.video_active_id = video_format
+        data.audio_active_id = audio_format
         if url == mp.get_property('path') then reload_resume() end
     end
 end
@@ -1344,7 +1658,9 @@ mp.add_hook('on_load', 9, function()
     local data = url_data[path]
 
     if data and data.hls then
-        if data.hls_mode == 'edition' then
+        if data.hls_mode == 'url' then
+            return
+        elseif data.hls_mode == 'edition' then
             if data.video_active_id and data.video_active_id ~= '' then
                 msg.verbose('setting edition: ' .. data.video_active_id)
                 mp.set_property('file-local-options/edition', data.video_active_id)

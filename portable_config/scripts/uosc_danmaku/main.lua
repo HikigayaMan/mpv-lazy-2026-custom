@@ -11,8 +11,10 @@ MD5 = require("modules/md5")
 Sha256 = require("modules/hash")
 
 require("modules/options")
+require("modules/style")
 require("modules/utils")
 require("modules/parse")
+require("modules/live")
 require("modules/guess")
 require('modules/render')
 require('modules/menu')
@@ -518,6 +520,10 @@ end
 -- 加载弹幕
 function load_danmaku(from_menu, no_osd)
     if not ENABLED then return end
+    if is_live_danmaku_active and is_live_danmaku_active() then
+        refresh_live_danmaku_style()
+        return
+    end
     convert_danmaku_to_ass_events()
     render_danmaku(from_menu, no_osd)
 end
@@ -634,6 +640,9 @@ function init(path)
 end
 
 mp.register_event("file-loaded", function()
+    if is_live_danmaku_active and is_live_danmaku_active() then
+        return
+    end
     local path = mp.get_property("path")
     local dir = get_parent_directory(path)
     local filename = mp.get_property('filename/no-ext')
@@ -705,6 +714,10 @@ mp.register_script_message("danmaku-delay", function(...)
 end)
 
 mp.register_script_message("show_danmaku_keyboard", function()
+    if is_live_danmaku_active and is_live_danmaku_active() then
+        stop_live_danmaku(nil)
+        return
+    end
     ENABLED = not ENABLED
     if ENABLED then
         toggle_danmaku_switch("on")

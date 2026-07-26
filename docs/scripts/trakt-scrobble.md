@@ -14,6 +14,7 @@
 ```text
 工具 > Trakt > 搜索匹配
 工具 > Trakt > 开关同步
+工具 > Trakt > 自动通知开关（默认关闭）
 工具 > Trakt > 授权登录
 工具 > Trakt > 完成授权
 ```
@@ -36,6 +37,7 @@
 
 ```lua
 enabled = true
+show_notifications = false
 congfig_path = "~~/trakt_config.json"
 history_path = "~~/trakt_history.json"
 max_title_length = 100
@@ -57,6 +59,7 @@ directory_title_blocklist = "movie,movies,film,films,video,videos,download,downl
 关键配置说明：
 
 - `min_auto_confidence=85`：自动匹配置信度达到该值才会自动同步。
+- `show_notifications=false`：自动匹配、开始/停止同步等后台通知默认不弹出；授权、手动操作和错误仍会显示必要反馈。
 - `min_prompt_confidence=60`：低于自动阈值时只提示手动确认，不直接写入 Trakt。
 - `watched_threshold=85`：停止、切换或退出时，播放进度达到 85% 后才允许标记已看。
 - `min_real_play_seconds=120`：至少实际播放 120 秒才允许自动标记已看，避免短时间拖动进度条误记。
@@ -109,6 +112,7 @@ directory_title_blocklist = "movie,movies,film,films,video,videos,download,downl
 |---|---|---|
 | `Alt+d` | `script-message-to trakt_scrobble search-menu` | 打开搜索匹配菜单。 |
 | `Alt+D` | `script-message-to trakt_scrobble toggle-scrobble` | 开关当前同步。 |
+| `工具 > Trakt > 自动通知开关（默认关闭）` | `script-message-to trakt_scrobble toggle-notifications` | 开关并持久化后台自动通知。 |
 | `工具 > Trakt > 授权登录` | `script-message-to trakt_scrobble auth-menu` | 获取 Trakt 设备授权 code。 |
 | `工具 > Trakt > 完成授权` | `script-message-to trakt_scrobble complete-auth` | 浏览器完成授权后回到 mpv 执行。 |
 

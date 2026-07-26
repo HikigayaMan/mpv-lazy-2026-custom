@@ -149,6 +149,49 @@
 2. `RealESRGAN 540P→4K + RIFE 4.7 T2 F1（需超高性能｜线条/平移）`
 3. `RealESRGAN 540P→4K + RIFE 4.9 T2 F1（需超高性能｜风格测试）`
 
+### 自定义组合菜单
+
+2026-07-26 新增：
+
+```text
+VF 滤镜 > 超分补帧 > 自定义组合
+```
+
+它不再为每种组合生成单独 `.vpy`，而是由一个运行时脚本组合当前选择：
+
+- 15 个 2026 超分预设：UAI RTX、AnimeJaNai V3.1、RealESRGAN、LiveAction SPAN、StarSample。
+- 10 个 2025/2026 RIFE NV 模型：4.6、4.15 lite、4.22、4.22 lite、4.25 lite、4.26、4.26 heavy、4.7、4.8、4.9。
+- 固定顺序：先超分，再 RIFE 2x 补帧。
+- 默认组合：`UAI RTX 默认 + RIFE 4.6`。
+
+菜单只提供真正需要选择的两项，不暴露 TensorRT 高级参数。性能参数固定为：
+
+| RIFE | 自动配置 |
+|---|---|
+| 4.6 | `turbo=1`、`flow_scale=0.25`，最高性能取向 |
+| 其他模型 | `turbo=2`、`flow_scale=1.0` |
+
+所有组合固定使用 FP16、GPU 0、`gpu_t=2`、`ws_size=0`、场景切换模式 1。
+
+操作顺序：
+
+1. 选择超分预设。
+2. 选择 RIFE NV 模型。
+3. 点击“应用当前组合”。
+4. 首次使用某个模型/分辨率时等待 TensorRT engine 构建。
+5. 需要退出时点击“关闭组合”。
+
+“保存为默认”只保存超分预设与 RIFE 模型；当前待应用状态写入 `rife_sr_runtime.json`，属于运行态，不进入仓库或配置压缩包。仓库只发布 `rife_sr_runtime_default.json`。
+
+安全限制：
+
+- 已存在其他 VapourSynth 补帧/超分时拒绝叠加，并提示先关闭原滤镜。
+- 已存在带缩放的 `d3d11vpp` 时拒绝应用。
+- 应用组合时移除弹幕平滑滤镜 `@danmaku_smooth`，避免和 RIFE 重复补帧。
+- 关闭组合只移除 `@rife_sr_runtime`，不会清空其他无关 VF。
+
+本机已经用 `LiveAction SPAN + RIFE 4.9` 完成实际 TensorRT 出帧冒烟测试。该测试只证明链路可运行，不保证所有 150 种选择都能实时不丢帧。
+
 ## 使用建议
 
 ### 720P 真人/通用视频

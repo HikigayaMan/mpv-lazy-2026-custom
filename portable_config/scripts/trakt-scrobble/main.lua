@@ -16,6 +16,9 @@ uosc_available = false
 
 o = {
     enabled = true,
+    -- Automatic Trakt OSD notifications are opt-in. Explicit menu actions
+    -- still provide the feedback needed to finish authorization or toggles.
+    show_notifications = false,
     -- Set to '~~/trakt_config.json' for sub path of mpv portable_config directory
     -- OR change to '/:dir%script%/trakt_config.json' for placing it in the same directory of script
     -- OR write any variable using '/:var',
@@ -83,6 +86,30 @@ end
 
 local config_file = expand_path(o.congfig_path)
 local history_path = expand_path(o.history_path)
+local notification_options_path = expand_path("~~/script-opts/trakt_scrobble.conf")
+
+local function persist_notification_option()
+    local lines = {}
+    local input = io.open(notification_options_path, "r")
+    if input then
+        for line in input:lines() do
+            if not line:match("^%s*show_notifications%s*=") then
+                lines[#lines + 1] = line
+            end
+        end
+        input:close()
+    end
+    lines[#lines + 1] = "show_notifications=" .. (o.show_notifications and "yes" or "no")
+
+    local output, err = io.open(notification_options_path, "w")
+    if not output then
+        msg.error("Failed to persist Trakt notification option: " .. tostring(err))
+        return false
+    end
+    output:write(table.concat(lines, "\n"), "\n")
+    output:close()
+    return true
+end
 
 -- Check if the path is a protocol (e.g., http://)
 local function is_protocol(path)
@@ -665,7 +692,10 @@ message_timer = mp.add_timeout(1, function ()
     message_overlay:remove()
 end, true)
 
-function send_message(msg, time, color)
+function send_message(msg, time, color, force)
+    if not o.show_notifications and not force then
+        return
+    end
     local text = color and format_message(msg, color) or msg
     text = text:gsub("\r\n", "\\N"):gsub("\n", "\\N")
     message_timer:kill()
@@ -830,7 +860,7 @@ end
 
 -- Authentication activation
 local function activation()
-    send_message("正在向 Trakt 请求授权码...", 10, "FFFFFF")
+    send_message("正在向 Trakt 请求授权码...", 10, "FFFFFF", true)
     local status, output = device_code()
 
     if status == 0 then
@@ -838,10 +868,10 @@ local function activation()
         if mp.get_property('clipboard-backends') ~= nil or mp.get_property_bool('clipboard-enable') then
             mp.commandv('set', 'clipboard/text', message)
         end
-        send_message("打开 " .. message .. "\n浏览器完成后回到菜单选择：工具 > Trakt > 完成授权", 60, "FF8800")
+        send_message("打开 " .. message .. "\n浏览器完成后回到菜单选择：工具 > Trakt > 完成授权", 60, "FF8800", true)
         msg.info("Open " .. message)
     else
-        send_message("获取 Trakt 授权码失败，请查看控制台", 5, "0000FF")
+        send_message("获取 Trakt 授权码失败，请查看控制台", 5, "0000FF", true)
         msg.error("Failed to generate device code")
     end
 end
@@ -1400,10 +1430,10 @@ end)
 mp.register_script_message("complete-auth", function()
     local status = auth()
     if status == 0 then
-        send_message("Trakt 授权完成", 3, "00FF00")
+        send_message("Trakt 授权完成", 3, "00FF00", true)
         msg.info("Trakt authentication completed")
     else
-        send_message("授权未开始或验证码已过期，请先执行：工具 > Trakt > 授权登录", 5, "FF0000")
+        send_message("授权未开始或验证码已过期，请先执行：工具 > Trakt > 授权登录", 5, "FF0000", true)
         msg.error("Trakt authentication failed")
     end
 end)
@@ -1412,7 +1442,7 @@ mp.register_script_message("search-menu", function()
     if not state then state = {} end
     config = read_config(config_file)
     if not next(config) then
-        send_message("无法读取 Trakt 授权配置，请先完成授权", 3)
+        send_message("无法读取 Trakt 授权配置，请先完成授权", 3, nil, true)
         msg.error("Failed to read config file")
         return
     end
@@ -1436,12 +1466,22 @@ end)
 
 mp.register_script_message("toggle-scrobble", function()
     if scrobble then
-        send_message("已关闭当前 Trakt 同步", 3)
+        send_message("已关闭当前 Trakt 同步", 3, nil, true)
         msg.info("Trakt scrobbling disabled")
         finish_scrobble()
         enabled = false
     else
         enabled = true
+        send_message("已开启当前 Trakt 同步", 3, nil, true)
         trackt_scrobble(enabled)
     end
+end)
+
+mp.register_script_message("toggle-notifications", function()
+    o.show_notifications = not o.show_notifications
+    local status = o.show_notifications and "开启" or "关闭"
+    local persisted = persist_notification_option()
+    message_overlay:remove()
+    mp.osd_message("Trakt 自动通知：" .. status .. (persisted and "" or "（仅本次运行）"), 3)
+    msg.info("Trakt automatic notifications " .. (o.show_notifications and "enabled" or "disabled"))
 end)
