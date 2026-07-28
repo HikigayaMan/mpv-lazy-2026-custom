@@ -47,5 +47,15 @@ class ReleaseAssetDigestTests(unittest.TestCase):
         self.assertEqual(PACKAGE_RELEASE.parse_release_asset_digests(output), {})
 
 
+class ReleaseOverlayTests(unittest.TestCase):
+    def test_excludes_timestamped_development_backups(self) -> None:
+        self.assertFalse(
+            PACKAGE_RELEASE.should_overlay(
+                "portable_config/scripts/douyu_danmaku.lua.bak-20260726-032711",
+                "douyu_danmaku.lua.bak-20260726-032711",
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -170,6 +170,7 @@ OVERLAY_EXCLUDE_REL_DIRS = {
 }
 
 OVERLAY_EXCLUDE_GLOBS = {
+    "*.bak-*",
     "*.lnk",
     "*.log",
     "config.json",
