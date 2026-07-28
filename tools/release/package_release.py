@@ -421,13 +421,20 @@ def suggest_packages(paths: Paths, diff_range: str) -> list[str]:
     return [package for package in PACKAGE_ORDER if package in packages]
 
 
+def matches_exclude_glob(rel: str, filename: str) -> bool:
+    return any(
+        fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(filename, pattern)
+        for pattern in OVERLAY_EXCLUDE_GLOBS
+    )
+
+
 def should_overlay(rel: str, filename: str) -> bool:
     top = rel.split("/")[0]
     if top in OVERLAY_SKIP_TOP:
         return False
     if has_prefix(rel, OVERLAY_EXCLUDE_REL_DIRS):
         return False
-    return not any(fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(filename, pattern) for pattern in OVERLAY_EXCLUDE_GLOBS)
+    return not matches_exclude_glob(rel, filename)
 
 
 def find_7z(source: Path, repo: Path, explicit: Path | None) -> Path:
@@ -570,7 +577,7 @@ def iter_direct_effective_files(paths: Paths, packages: list[str]):
             impacted = package_for_rel(rel)
             if not (impacted & wanted):
                 continue
-            if should_keep_staged(rel):
+            if should_keep_staged(rel) and not matches_exclude_glob(rel, filename):
                 files[rel] = source
 
     copied = 0

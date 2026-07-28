@@ -49,10 +49,14 @@ class ReleaseAssetDigestTests(unittest.TestCase):
 
 class ReleaseOverlayTests(unittest.TestCase):
     def test_excludes_timestamped_development_backups(self) -> None:
+        rel = "portable_config/scripts/douyu_danmaku.lua.bak-20260726-032711"
+        filename = "douyu_danmaku.lua.bak-20260726-032711"
+
+        self.assertTrue(PACKAGE_RELEASE.matches_exclude_glob(rel, filename))
         self.assertFalse(
             PACKAGE_RELEASE.should_overlay(
-                "portable_config/scripts/douyu_danmaku.lua.bak-20260726-032711",
-                "douyu_danmaku.lua.bak-20260726-032711",
+                rel,
+                filename,
             )
         )
 
