@@ -786,15 +786,22 @@ def artifact_names_for_sha(paths: Paths, version: str, packages: list[str], exis
 def write_sha256(paths: Paths, version: str, packages: list[str], existing: dict[str, str] | None = None) -> None:
     existing = existing or {}
     sha_path = paths.artifacts / f"SHA256SUMS-{version}.txt"
+    built_names = {
+        file.name
+        for package in packages
+        for file in concrete_package_asset_files(paths, version, package)
+    }
     with sha_path.open("w", encoding="utf-8", newline="\n") as handle:
         for name in artifact_names_for_sha(paths, version, packages, existing):
             if name == sha_path.name:
                 continue
             path = paths.artifacts / name
-            if path.exists():
+            if name in built_names:
                 digest = sha256_file(path)
             else:
                 digest = existing.get(name)
+                if not digest and path.exists():
+                    digest = sha256_file(path)
             if not digest:
                 raise FileNotFoundError(f"No SHA256 source for {name}; build the package or use --reuse-existing-assets")
             handle.write(f"{digest}  {name}\n")

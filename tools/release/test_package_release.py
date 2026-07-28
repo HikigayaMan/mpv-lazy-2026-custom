@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,6 +46,44 @@ class ReleaseAssetDigestTests(unittest.TestCase):
         )
 
         self.assertEqual(PACKAGE_RELEASE.parse_release_asset_digests(output), {})
+
+    def test_selected_build_prefers_remote_digest_for_unbuilt_local_asset(self) -> None:
+        version = "vtest"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            paths = PACKAGE_RELEASE.Paths(
+                repo=root,
+                source=root,
+                work=root / "work",
+                artifacts=artifacts,
+                staging=root / "staging",
+                package_inputs=root / "packages",
+                verify=root / "verify",
+                seven_zip=root / "7z.exe",
+            )
+            base = artifacts / f"mpv-lazy-2026-custom-base-{version}.zip"
+            config = artifacts / f"mpv-lazy-2026-custom-config-{version}.zip"
+            base.write_bytes(b"stale local base")
+            config.write_bytes(b"new config")
+            remote_base_digest = "a" * 64
+
+            PACKAGE_RELEASE.write_sha256(
+                paths,
+                version,
+                ["config"],
+                {base.name: remote_base_digest},
+            )
+
+            checksums = PACKAGE_RELEASE.read_sha256_file(
+                artifacts / f"SHA256SUMS-{version}.txt"
+            )
+            self.assertEqual(checksums[base.name], remote_base_digest)
+            self.assertEqual(
+                checksums[config.name],
+                PACKAGE_RELEASE.sha256_file(config),
+            )
 
 
 class ReleaseOverlayTests(unittest.TestCase):
