@@ -25,6 +25,9 @@ local sr_presets = {
     { id = 'starsample_2x_540', label = 'StarSample 2x 540P', hint = '540P 到 1080P' },
     { id = 'starsample_2x_720', label = 'StarSample 2x 720P', hint = '720P 到 1440P' },
     { id = 'starsample_2x_1080', label = 'StarSample 2x 1080P', hint = '1080P 到 4K' },
+    { id = 'dml_animejanai_720', label = 'AnimeJaNai 通用 720P', hint = 'DX12：720P 到 1440P', backend = 'dml' },
+    { id = 'dml_starsample_540', label = 'StarSample Lite 540P', hint = 'DX12：540P 到 1080P', backend = 'dml' },
+    { id = 'dml_starsample_720', label = 'StarSample Lite 720P', hint = 'DX12：720P 到 1440P', backend = 'dml' },
 }
 local rife_models = {
     { id = 46, label = '4.6', hint = '性能组合' },
@@ -38,19 +41,34 @@ local rife_models = {
     { id = 48, label = '4.8', hint = '2026' },
     { id = 49, label = '4.9', hint = '2026' },
 }
+local dml_rife_models = {
+    { id = 46, label = '4.6', hint = '稳定通用；默认' },
+    { id = 4151, label = '4.15 lite', hint = '轻量通用；性能优先' },
+    { id = 4251, label = '4.25 lite', hint = '轻量模型' },
+    { id = 426, label = '4.26', hint = '质量取向；负载较高' },
+    { id = 4262, label = '4.26 heavy', hint = '重型模型；负载极高' },
+}
 
-local valid_sr, valid_models, sr_labels, model_labels = {}, {}, {}, {}
+local valid_sr, valid_models, valid_dml_models, sr_labels, model_labels, sr_backends = {}, {}, {}, {}, {}, {}
 for _, preset in ipairs(sr_presets) do
     valid_sr[preset.id] = true
     sr_labels[preset.id] = preset.label
+    sr_backends[preset.id] = preset.backend or 'nv'
 end
 for _, model in ipairs(rife_models) do
     valid_models[model.id] = true
     model_labels[model.id] = model.label
 end
+for _, model in ipairs(dml_rife_models) do
+    valid_dml_models[model.id] = true
+end
 
 local function copy_default()
     return { sr_preset = default_config.sr_preset, rife_model = default_config.rife_model }
+end
+
+local function is_dml_preset(id)
+    return sr_backends[id] == 'dml'
 end
 
 local function normalize_config(value)
@@ -62,7 +80,11 @@ local function normalize_config(value)
     if type(value.sr_preset) ~= 'string' or not valid_sr[value.sr_preset] then return copy_default() end
     if type(value.rife_model) ~= 'number' or value.rife_model ~= math.floor(value.rife_model) then return copy_default() end
     if not valid_models[value.rife_model] then return copy_default() end
-    return { sr_preset = value.sr_preset, rife_model = value.rife_model }
+    local rife_model = value.rife_model
+    if is_dml_preset(value.sr_preset) and not valid_dml_models[rife_model] then
+        rife_model = 46
+    end
+    return { sr_preset = value.sr_preset, rife_model = rife_model }
 end
 
 local function read_config(path)
@@ -153,12 +175,27 @@ local function write_config(path, value)
 end
 
 local function describe(config)
+    if is_dml_preset(config.sr_preset) then
+        return string.format('%s + RIFE DML %s', sr_labels[config.sr_preset], model_labels[config.rife_model])
+    end
     return string.format('%s + RIFE %s', sr_labels[config.sr_preset], model_labels[config.rife_model])
 end
 
 local function update_pending(field, value)
     local config = read_config(current_config_path)
     config[field] = value
+    if write_config(current_config_path, config) then
+        mp.osd_message('待应用：' .. describe(config), 3)
+    end
+end
+
+local function select_sr(id)
+    if not valid_sr[id] then return end
+    local config = read_config(current_config_path)
+    config.sr_preset = id
+    if is_dml_preset(id) and not valid_dml_models[config.rife_model] then
+        config.rife_model = 46
+    end
     if write_config(current_config_path, config) then
         mp.osd_message('待应用：' .. describe(config), 3)
     end
@@ -225,12 +262,14 @@ end
 
 local function open_menu()
     local current = read_config(current_config_path)
-    local sr_items, rife_items = {}, {}
+    local nv_sr_items, dml_sr_items, rife_items, dml_rife_items = {}, {}, {}, {}
     for _, preset in ipairs(sr_presets) do
-        sr_items[#sr_items + 1] = {
+        local item = {
             title = preset.label, hint = preset.hint, active = current.sr_preset == preset.id,
             value = { 'script-message-to', script_name, 'select-sr', preset.id },
         }
+        local target = preset.backend == 'dml' and dml_sr_items or nv_sr_items
+        target[#target + 1] = item
     end
     for _, model in ipairs(rife_models) do
         rife_items[#rife_items + 1] = {
@@ -238,13 +277,33 @@ local function open_menu()
             value = { 'script-message-to', script_name, 'select-rife', tostring(model.id) },
         }
     end
+    for _, model in ipairs(dml_rife_models) do
+        dml_rife_items[#dml_rife_items + 1] = {
+            title = 'RIFE ' .. model.label, hint = model.hint, active = current.rife_model == model.id,
+            value = { 'script-message-to', script_name, 'select-rife', tostring(model.id) },
+        }
+    end
+    local sr_items = {
+        { title = 'NVIDIA TensorRT', hint = 'UAI_NV_TRT + RIFE_NV', items = nv_sr_items },
+        { title = 'DX12 DirectML', hint = 'AMD / Intel / 通用：UAI_DML + RIFE_DML', items = dml_sr_items },
+    }
+    local rife_item
+    if is_dml_preset(current.sr_preset) then
+        rife_item = {
+            title = '选择 RIFE DirectML 模型',
+            hint = 'RIFE DML ' .. model_labels[current.rife_model],
+            items = dml_rife_items,
+        }
+    else
+        rife_item = { title = '选择 RIFE NV 模型', hint = 'RIFE ' .. model_labels[current.rife_model], items = rife_items }
+    end
     local menu = {
         type = 'rife-sr-runtime-menu', title = '超分补帧：自定义组合',
         search_style = 'disabled', search_submenus = true,
         items = {
             { title = '应用当前组合', hint = describe(current), value = { 'script-message-to', script_name, 'apply-current' } },
             { title = '选择超分预设', hint = sr_labels[current.sr_preset], items = sr_items },
-            { title = '选择 RIFE NV 模型', hint = 'RIFE ' .. model_labels[current.rife_model], items = rife_items },
+            rife_item,
             { title = '保存为默认', hint = '保存当前待应用组合', value = { 'script-message-to', script_name, 'save-default' } },
             { title = '恢复默认', hint = '恢复到待应用，不立即重建', value = { 'script-message-to', script_name, 'restore-default' } },
             { title = '关闭组合', hint = '移除本组合滤镜', value = { 'script-message-to', script_name, 'disable' } },
@@ -255,12 +314,15 @@ end
 
 mp.register_script_message('open-menu', open_menu)
 mp.register_script_message('apply-current', apply_current)
-mp.register_script_message('select-sr', function(id)
-    if valid_sr[id] then update_pending('sr_preset', id) end
-end)
+mp.register_script_message('select-sr', select_sr)
 mp.register_script_message('select-rife', function(id)
     local model = tonumber(id)
-    if model and valid_models[model] then update_pending('rife_model', model) end
+    local config = read_config(current_config_path)
+    if is_dml_preset(config.sr_preset) then
+        if model and valid_dml_models[model] then update_pending('rife_model', model) end
+    elseif model and valid_models[model] then
+        update_pending('rife_model', model)
+    end
 end)
 mp.register_script_message('save-default', save_default)
 mp.register_script_message('restore-default', restore_default)

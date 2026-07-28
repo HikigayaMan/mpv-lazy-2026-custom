@@ -1,4 +1,4 @@
-### 2026 super-resolution + 2025/2026 RIFE NV runtime combination.
+### 2026 super-resolution + RIFE runtime combination for NVIDIA TensorRT or DX12 DirectML.
 ### State is intentionally independent from MEMC_RIFE_NV_runtime.vpy.
 
 import json
@@ -11,10 +11,12 @@ import k7sfunc as k7f
 
 DEFAULT_CONFIG = {"sr_preset": "uai_rtx_default", "rife_model": 46}
 RIFE_MODELS = {46, 4151, 422, 4221, 4251, 426, 4262, 47, 48, 49}
+DML_RIFE_MODELS = {46, 4151, 4251, 426, 4262}
 
 
 def make_preset(model, h_pre, rife_h_pre, res_opt, h_max=2160, st_eng=True, opt_lv=5, cuda_opt=None):
     return {
+        "backend": "nv",
         "model": model,
         "h_pre": h_pre,
         "fp16_qnt": True,
@@ -28,6 +30,20 @@ def make_preset(model, h_pre, rife_h_pre, res_opt, h_max=2160, st_eng=True, opt_
         "lk_fmt": False,
         "opt_lv": opt_lv,
         "cuda_opt": [1, 0, 0] if cuda_opt is None else cuda_opt,
+        "rife_h_pre": rife_h_pre,
+    }
+
+
+def make_dml_preset(model, h_pre, rife_h_pre, h_max):
+    return {
+        "backend": "dml",
+        "model": model,
+        "h_pre": h_pre,
+        "fp16_qnt": True,
+        "gpu": 0,
+        "gpu_t": 2,
+        "h_max": h_max,
+        "lk_fmt": False,
         "rife_h_pre": rife_h_pre,
     }
 
@@ -58,6 +74,17 @@ SR_PRESETS = {
         "2x_AnimeJaNai_HD_V3.1Sharp1_Performance_SPANF3_b5f48_unshuffle_fp16.onnx", 1080, 2160, [1920, 1080]
     ),
     "starsample_1x": make_preset("1x_StarSample_V2.0_Lite_NS_fp16.onnx", 1080, 1080, [1920, 1080]),
+    # DirectML presets intentionally stop at 1080p/1440p. They use the models
+    # already shipped for MIX_UAI_DML and keep AMD/Intel load predictable.
+    "dml_animejanai_720": make_dml_preset(
+        "the_database_AnimeJaNaiV2L1_x2_fp16_op17.onnx", 720, 1440, 1440
+    ),
+    "dml_starsample_540": make_dml_preset(
+        "2x_StarSample_V2.0_Lite_fp16.onnx", 540, 1080, 1080
+    ),
+    "dml_starsample_720": make_dml_preset(
+        "2x_StarSample_V2.0_Lite_fp16.onnx", 720, 1440, 1440
+    ),
 }
 
 for _height, _width, _rife_height in ((540, 960, 2160), (720, 1280, 2160), (1080, 1920, 2160)):
@@ -94,6 +121,8 @@ def normalize_config(data):
         or rife_model not in RIFE_MODELS
     ):
         return dict(DEFAULT_CONFIG)
+    if SR_PRESETS[sr_preset]["backend"] == "dml" and rife_model not in DML_RIFE_MODELS:
+        rife_model = 46
     return {"sr_preset": sr_preset, "rife_model": rife_model}
 
 
@@ -108,7 +137,6 @@ def load_config():
 config = load_config()
 preset = SR_PRESETS[config["sr_preset"]]
 rife_model = config["rife_model"]
-turbo, flow_scale = (1, 0.25) if rife_model == 46 else (2, 1.0)
 
 core.num_threads = k7f.vs_t_dft
 clip = video_in
@@ -116,37 +144,61 @@ clip = video_in
 # Super-resolution is complete before FPS conversion and RIFE interpolation.
 ret = k7f.FMT_CTRL(clip, h_max=1200, h_ret=True)
 clip = k7f.FMT_CTRL(clip, h_max=preset["h_pre"], fmt_pix=1 if preset["lk_fmt"] else 0)
-clip = k7f.UAI_NV_TRT(
-    clip,
-    crc=False,
-    model_pth=preset["model"],
-    opt_lv=preset["opt_lv"],
-    cuda_opt=preset["cuda_opt"],
-    int8_qnt=False,
-    fp16_qnt=preset["fp16_qnt"],
-    gpu=preset["gpu"],
-    gpu_t=preset["gpu_t"],
-    st_eng=preset["st_eng"],
-    res_opt=preset["res_opt"],
-    res_max=preset["res_max"],
-    ws_size=preset["ws_size"],
-)
+if preset["backend"] == "dml":
+    clip = k7f.UAI_DML(
+        clip,
+        crc=False,
+        model_pth=preset["model"],
+        fp16_qnt=preset["fp16_qnt"],
+        gpu=preset["gpu"],
+        gpu_t=preset["gpu_t"],
+    )
+else:
+    clip = k7f.UAI_NV_TRT(
+        clip,
+        crc=False,
+        model_pth=preset["model"],
+        opt_lv=preset["opt_lv"],
+        cuda_opt=preset["cuda_opt"],
+        int8_qnt=False,
+        fp16_qnt=preset["fp16_qnt"],
+        gpu=preset["gpu"],
+        gpu_t=preset["gpu_t"],
+        st_eng=preset["st_eng"],
+        res_opt=preset["res_opt"],
+        res_max=preset["res_max"],
+        ws_size=preset["ws_size"],
+    )
 clip = k7f.FMT_CTRL(clip, h_max=preset["h_max"], fmt_pix=1 if preset["lk_fmt"] else 0)
 
 ret = k7f.FPS_CTRL(clip, fps_in=container_fps, fps_ret=True)
 clip = k7f.FMT_CTRL(clip, h_max=preset["rife_h_pre"], fmt_pix=0)
-clip = k7f.RIFE_NV(
-    clip,
-    model=rife_model,
-    int8_qnt=False,
-    turbo=turbo,
-    fps_in=container_fps,
-    fps_num=2,
-    fps_den=1,
-    sc_mode=1,
-    gpu=0,
-    gpu_t=2,
-    ws_size=0,
-    flow_scale=flow_scale,
-)
+if preset["backend"] == "dml":
+    clip = k7f.RIFE_DML(
+        clip,
+        model=rife_model,
+        turbo=True,
+        fps_in=container_fps,
+        fps_num=2,
+        fps_den=1,
+        sc_mode=1,
+        gpu=preset["gpu"],
+        gpu_t=preset["gpu_t"],
+    )
+else:
+    turbo, flow_scale = (1, 0.25) if rife_model == 46 else (2, 1.0)
+    clip = k7f.RIFE_NV(
+        clip,
+        model=rife_model,
+        int8_qnt=False,
+        turbo=turbo,
+        fps_in=container_fps,
+        fps_num=2,
+        fps_den=1,
+        sc_mode=1,
+        gpu=0,
+        gpu_t=2,
+        ws_size=0,
+        flow_scale=flow_scale,
+    )
 clip.set_output()

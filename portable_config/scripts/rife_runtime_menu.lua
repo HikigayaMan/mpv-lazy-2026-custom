@@ -42,12 +42,20 @@ local h_pre_options = {
     { value = 1440, label = '1440', ratio = '约44%', hint = '2K处理高度;画质⬆负载⬆' },
 }
 
+local fps_options = {
+    { value = 0, label = '2 倍', hint = '默认；按片源帧率倍帧' },
+    { value = 60, label = '目标 60 FPS', hint = '按当前片源帧率动态换算倍率' },
+    { value = 90, label = '目标 90 FPS', hint = '按当前片源帧率动态换算倍率' },
+    { value = 120, label = '目标 120 FPS', hint = '按当前片源帧率动态换算倍率' },
+}
+
 local fallback_config = {
     model = 46,
     model_label = '4.6',
     turbo = 2,
     flow_scale = 1.0,
     h_pre = 2160,
+    target_fps = 0,
     fps_num = 2,
     fps_den = 1,
     sc_mode = 1,
@@ -75,6 +83,8 @@ local function normalize_config(config)
     if not model.flow_scale and flow_scale ~= 1.0 then flow_scale = 1.0 end
     local h_pre = tonumber(config.h_pre or fallback_config.h_pre) or fallback_config.h_pre
     if h_pre ~= 2160 and h_pre ~= 1920 and h_pre ~= 1608 and h_pre ~= 1440 then h_pre = fallback_config.h_pre end
+    local target_fps = tonumber(config.target_fps or fallback_config.target_fps) or fallback_config.target_fps
+    if target_fps ~= 0 and target_fps ~= 60 and target_fps ~= 90 and target_fps ~= 120 then target_fps = fallback_config.target_fps end
 
     return {
         model = model.id,
@@ -82,6 +92,7 @@ local function normalize_config(config)
         turbo = turbo,
         flow_scale = flow_scale,
         h_pre = h_pre,
+        target_fps = target_fps,
         fps_num = tonumber(config.fps_num or fallback_config.fps_num) or fallback_config.fps_num,
         fps_den = tonumber(config.fps_den or fallback_config.fps_den) or fallback_config.fps_den,
         sc_mode = tonumber(config.sc_mode or fallback_config.sc_mode) or fallback_config.sc_mode,
@@ -120,12 +131,24 @@ local function write_config(path, config)
     return true
 end
 
+local function fps_option_by_value(value)
+    value = tonumber(value)
+    for _, option in ipairs(fps_options) do
+        if option.value == value then return option end
+    end
+    return fps_options[1]
+end
+
+local function fps_summary(value)
+    return fps_option_by_value(value).label
+end
+
 local function describe(config)
-    return string.format('RIFE %s｜turbo=%d｜flow_scale=%.2g｜H=%d', config.model_label, config.turbo, config.flow_scale, config.h_pre)
+    return string.format('RIFE %s｜%s｜turbo=%d｜flow_scale=%.2g｜H=%d', config.model_label, fps_summary(config.target_fps), config.turbo, config.flow_scale, config.h_pre)
 end
 
 local function describe_short(config)
-    return string.format('%s / T%d / F%.2g / H%d', config.model_label, config.turbo, config.flow_scale, config.h_pre)
+    return string.format('%s / %s / T%d / F%.2g / H%d', config.model_label, fps_summary(config.target_fps), config.turbo, config.flow_scale, config.h_pre)
 end
 
 local function h_pre_option_by_value(value)
@@ -201,6 +224,12 @@ local function set_h_pre(h_pre_value, model_id, turbo_value, flow_value)
     if model_id then config.model = tonumber(model_id) end
     if turbo_value then config.turbo = tonumber(turbo_value) end
     if flow_value then config.flow_scale = tonumber(flow_value) end
+    apply_config(config)
+end
+
+local function set_target_fps(target_fps)
+    local config = read_config(current_config_path)
+    config.target_fps = tonumber(target_fps)
     apply_config(config)
 end
 
@@ -295,6 +324,15 @@ local function open_menu()
     for _, option in ipairs(h_pre_options) do
         h_pre_items[#h_pre_items + 1] = h_pre_item(option, current)
     end
+    local fps_items = {}
+    for _, option in ipairs(fps_options) do
+        fps_items[#fps_items + 1] = {
+            title = option.label,
+            hint = option.hint,
+            active = current.target_fps == option.value,
+            value = { 'script-message-to', script_name, 'set-target-fps', tostring(option.value) },
+        }
+    end
 
     local menu = {
         type = 'rife-runtime-menu',
@@ -322,6 +360,11 @@ local function open_menu()
                 hint = h_pre_explain(current.h_pre) .. ';模型下也可单独选择',
                 items = h_pre_items,
             },
+            {
+                title = '输出帧率',
+                hint = fps_summary(current.target_fps),
+                items = fps_items,
+            },
         },
     }
 
@@ -333,6 +376,7 @@ mp.register_script_message('apply-default', apply_default)
 mp.register_script_message('save-default', save_default)
 mp.register_script_message('select', select_config)
 mp.register_script_message('set-h-pre', set_h_pre)
+mp.register_script_message('set-target-fps', set_target_fps)
 mp.add_key_binding(nil, 'open-menu', open_menu)
 mp.add_key_binding(nil, 'apply-default', apply_default)
 mp.add_forced_key_binding('Ctrl+Alt+f', 'apply-default-shortcut', apply_default)

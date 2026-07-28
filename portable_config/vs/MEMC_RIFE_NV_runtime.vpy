@@ -3,6 +3,7 @@
 
 import json
 import os
+from fractions import Fraction
 
 import vapoursynth as vs
 from vapoursynth import core
@@ -29,6 +30,7 @@ DEFAULT_CONFIG = {
     "turbo": 2,
     "flow_scale": 1.0,
     "h_pre": 2160,
+    "target_fps": 0,
     "fps_num": 2,
     "fps_den": 1,
     "sc_mode": 1,
@@ -71,6 +73,7 @@ def normalize_config(config: dict) -> dict:
         turbo = int(config["turbo"])
         flow_scale = float(config["flow_scale"])
         h_pre = int(config.get("h_pre", DEFAULT_CONFIG["h_pre"]))
+        target_fps = int(config.get("target_fps", DEFAULT_CONFIG["target_fps"]))
         fps_num = int(config.get("fps_num", DEFAULT_CONFIG["fps_num"]))
         fps_den = int(config.get("fps_den", DEFAULT_CONFIG["fps_den"]))
         sc_mode = int(config.get("sc_mode", DEFAULT_CONFIG["sc_mode"]))
@@ -87,6 +90,8 @@ def normalize_config(config: dict) -> dict:
         raise vs.Error(f"RIFE runtime: unsupported turbo {turbo}")
     if flow_scale not in VALID_FLOW_SCALE:
         raise vs.Error(f"RIFE runtime: unsupported flow_scale {flow_scale}")
+    if target_fps not in {0, 60, 90, 120}:
+        raise vs.Error(f"RIFE runtime: unsupported target_fps {target_fps}")
     if not MODEL_INFO[model]["supports_flow_scale"] and flow_scale != 1.0:
         label = MODEL_INFO[model]["label"]
         raise vs.Error(f"RIFE runtime: model {label} only supports flow_scale=1.0 in current vs-mlrt")
@@ -97,6 +102,7 @@ def normalize_config(config: dict) -> dict:
         "turbo": turbo,
         "flow_scale": flow_scale,
         "h_pre": h_pre,
+        "target_fps": target_fps,
         "fps_num": fps_num,
         "fps_den": fps_den,
         "sc_mode": sc_mode,
@@ -107,22 +113,54 @@ def normalize_config(config: dict) -> dict:
     }
 
 
+def source_fps_fraction(*clips, fallback_fps) -> Fraction:
+    for source in clips:
+        fps_num = getattr(source, "fps_num", 0)
+        fps_den = getattr(source, "fps_den", 0)
+        if fps_num and fps_den:
+            return Fraction(fps_num, fps_den)
+
+    try:
+        return Fraction(str(fallback_fps)).limit_denominator(100000)
+    except (TypeError, ValueError, ZeroDivisionError) as exc:
+        raise vs.Error(f"RIFE runtime: invalid source FPS {fallback_fps!r}: {exc}")
+
+
+def target_fps_ratio(target_fps: int, source_rate: Fraction) -> tuple[int, int] | None:
+    if target_fps == 0:
+        return None
+
+    if source_rate <= 0:
+        raise vs.Error(f"RIFE runtime: invalid source FPS {source_rate!r}")
+    target_rate = Fraction(target_fps, 1)
+    if target_rate <= source_rate:
+        return None
+
+    multiplier = target_rate / source_rate
+    return multiplier.numerator, multiplier.denominator
+
+
 config = load_config()
-ret = k7f.FPS_CTRL(clip, fps_in=container_fps, fps_ret=True)
 clip = k7f.FMT_CTRL(clip, h_max=config["h_pre"], fmt_pix=1 if config["lk_fmt"] else 0)
-clip = k7f.RIFE_NV(
-    clip,
-    model=config["model"],
-    int8_qnt=False,
-    turbo=config["turbo"],
-    fps_in=container_fps,
-    fps_num=config["fps_num"],
-    fps_den=config["fps_den"],
-    sc_mode=config["sc_mode"],
-    gpu=config["gpu"],
-    gpu_t=config["gpu_t"],
-    ws_size=config["ws_size"],
-    flow_scale=config["flow_scale"],
-)
+source_fps = source_fps_fraction(video_in, clip, fallback_fps=container_fps)
+ratio = target_fps_ratio(config["target_fps"], source_fps)
+if config["target_fps"] == 0:
+    ratio = config["fps_num"], config["fps_den"]
+
+if ratio is not None:
+    clip = k7f.RIFE_NV(
+        clip,
+        model=config["model"],
+        int8_qnt=False,
+        turbo=config["turbo"],
+        fps_in=float(source_fps) if config["target_fps"] else container_fps,
+        fps_num=ratio[0],
+        fps_den=ratio[1],
+        sc_mode=config["sc_mode"],
+        gpu=config["gpu"],
+        gpu_t=config["gpu_t"],
+        ws_size=config["ws_size"],
+        flow_scale=config["flow_scale"],
+    )
 
 clip.set_output()
