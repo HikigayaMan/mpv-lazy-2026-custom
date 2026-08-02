@@ -639,7 +639,11 @@ end
 local function parse_title(path)
     local dir = get_parent_dir(path)
     local filename = mp.get_property_native("filename/no-ext")
-    local title = mp.get_property_native("media-title"):gsub("%.[^%.]+$", "")
+    local media_title = mp.get_property_native("media-title")
+    if type(filename) ~= "string" then filename = "" end
+    local title = type(media_title) == "string"
+        and media_title:gsub("%.[^%.]+$", "")
+        or filename
     local thin_space = string.char(0xE2, 0x80, 0x89)
     local fname = filename
 
@@ -1448,6 +1452,10 @@ mp.register_script_message("search-menu", function()
     end
 
     local path = mp.get_property_native("path")
+    if type(path) ~= "string" or path == "" then
+        send_message("当前没有正在播放的媒体", 3, nil, true)
+        return
+    end
     if not state.dir or not state.fname or not state.filename then
         local dir, fname, title  = parse_title(path)
         state.dir = dir
