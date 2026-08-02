@@ -785,15 +785,19 @@ end
 
 -- 异步执行命令
 -- 同时返回 abort 函数，用于取消异步命令
-function call_cmd_async(args, callback)
+function call_cmd_async(args, callback, playback_only)
     -- 标记异步开始
     mark_async_start()
+
+    if playback_only == nil then
+        playback_only = true
+    end
 
     local abort_signal = mp.command_native_async({
         name = 'subprocess',
         capture_stderr = true,
         capture_stdout = true,
-        playback_only = true,
+        playback_only = playback_only,
         args = args,
     }, function(success, result, error)
         -- 标记异步结束
@@ -844,7 +848,7 @@ local function make_safe_resume(co, timer_ref)
     end
 end
 
-function await_call_cmd(args, timeout, on_start)
+function await_call_cmd(args, timeout, on_start, playback_only)
     local co = coroutine.running()
 
     local timer_ref = { timer = nil }
@@ -852,7 +856,7 @@ function await_call_cmd(args, timeout, on_start)
 
     local abort_fn = call_cmd_async(args, function(err, out)
         safe_resume(err, out)
-    end)
+    end, playback_only)
 
     if on_start and type(on_start) == 'function' then
         pcall(on_start, abort_fn)
@@ -873,7 +877,7 @@ end
 -- build_args_fn(server) -> args
 -- per_response_cb(server, err, stdout)
 -- final_cb() 可选
--- opts: { concurrency=3, per_request_timeout=10 }
+-- opts: { concurrency=3, per_request_timeout=10, playback_only=true }
 function parallel_requests(servers, build_args_fn, per_response_cb, final_cb, opts)
     if type(final_cb) == 'table' and opts == nil then
         opts = final_cb
@@ -883,6 +887,7 @@ function parallel_requests(servers, build_args_fn, per_response_cb, final_cb, op
     opts = opts or {}
     local concurrency = opts.concurrency or 3
     local timeout = opts.per_request_timeout or 10
+    local playback_only = opts.playback_only
 
     local in_flight_abort = {}
     local in_flight_count = 0
@@ -913,7 +918,7 @@ function parallel_requests(servers, build_args_fn, per_response_cb, final_cb, op
                     return await_call_cmd(args, timeout, function(ab)
                         in_flight_abort[i] = ab
                         in_flight_count = in_flight_count + 1
-                    end)
+                    end, playback_only)
                 end)
 
                 -- 请求结束

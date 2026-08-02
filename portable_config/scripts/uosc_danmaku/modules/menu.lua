@@ -259,7 +259,7 @@ function get_animes(query)
                 end)
             end
         end
-    end, { concurrency = 5, per_request_timeout = 30 })
+    end, { concurrency = 5, per_request_timeout = 30, playback_only = false })
     active_request_cancel = cancel_fn
     active_request_type = menu_type
 end
@@ -346,7 +346,7 @@ function get_episodes(animeTitle, bangumiId, api_server)
                 open_menu_select(items)
             end)
         end
-    end)
+    end, false)
     active_request_type = menu_type
 end
 
