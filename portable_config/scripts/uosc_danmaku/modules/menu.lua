@@ -901,13 +901,18 @@ function open_style_menu_uosc(actived, status)
         table.insert(items, item_config)
     end
     table.insert(items, {
-        title = "跨进程默认样式",
-        hint = "保存或清除独立 JSON 默认值",
-        selectable = false,
-        actions = {
-            { icon = "save", name = "save-style-default", label = "保存当前样式为跨进程默认" },
-            { icon = "delete", name = "clear-style-default", label = "清除保存样式" },
-        },
+        title = "保存当前样式",
+        hint = "设为跨进程默认",
+        icon = "save",
+        keep_open = true,
+        selectable = true,
+    })
+    table.insert(items, {
+        title = "清除已保存样式",
+        hint = "恢复脚本默认值",
+        icon = "delete",
+        keep_open = true,
+        selectable = true,
     })
 
     local menu_props = {
@@ -1463,13 +1468,13 @@ mp.register_script_message("setup-danmaku-style", function(query, text)
     if event ~= nil then
         -- item点击 或 图标点击
         if event.type == "activate" then
-            if event.action == "save-style-default" then
+            if event.action == "save-style-default" or (not event.action and event.index == #ordered_keys + 1) then
                 if save_danmaku_style_defaults() then
                     show_message("已保存当前样式为跨进程默认", 2)
                 end
                 open_style_menu()
                 return
-            elseif event.action == "clear-style-default" then
+            elseif event.action == "clear-style-default" or (not event.action and event.index == #ordered_keys + 2) then
                 if clear_danmaku_style_defaults() then
                     show_message("已清除保存样式", 2)
                 end
