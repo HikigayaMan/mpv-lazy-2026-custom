@@ -112,7 +112,7 @@ function sync_smooth_fps_filter(skip_history_lookup)
     if skip_history_lookup or (live_state and live_state.stopping) then
         visible = false
     elseif is_live_danmaku_active and is_live_danmaku_active() then
-        visible = true
+        visible = ENABLED == true
     else
         visible = get_danmaku_visibility()
     end
@@ -243,15 +243,11 @@ local function write_ass_file(path, events)
 end
 
 local function load_ass_subtitle(path, signature)
+    local primary_sid = mp.get_property_native("sid")
     local old_id = ass_sub_id or (ass_sub_path and find_sub_track_id_by_path(ass_sub_path))
-    if old_id and ass_loaded_path == path then
-        local ok = pcall(mp.commandv, "sub-reload", old_id)
-        if ok then
-            ass_sub_id = old_id
-            ass_loaded_signature = signature
-            return
-        end
-    end
+    -- sub-reload promotes its new track to primary even for a secondary track,
+    -- leaving the selection option out of sync. Remove/add with "auto" avoids
+    -- that promotion and keeps the user's primary subtitle selected.
     ass_reload_pending = true
     if old_id then
         mp.commandv("sub-remove", old_id)
@@ -267,6 +263,7 @@ local function load_ass_subtitle(path, signature)
     mp.commandv("sub-add", path, "auto", "uosc_danmaku")
     ass_sub_id = find_sub_track_id_by_path(path)
     if ass_sub_id then
+        mp.set_property_native("sid", primary_sid)
         mp.set_property_native("secondary-sub-ass-override", "yes")
         mp.set_property_native("secondary-sid", ass_sub_id)
         mp.set_property_native("secondary-sub-visibility", true)
@@ -323,6 +320,7 @@ local function realtime_position_text(event, pos, displayarea)
 end
 
 function render(pos_arg)
+    if not ENABLED then return end
     local events = active_events()
     if events == nil then return end
 

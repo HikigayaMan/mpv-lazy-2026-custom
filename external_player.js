@@ -3,7 +3,7 @@
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.14.9
+// @version                 1.2.14.10
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -39,7 +39,7 @@ const VIDEO_URL_REGEX_EXACT = /^https?:\/\/((?![^"^']*http)[^"^']+(\.|%2e)(mp4|m
 
 const defaultConfig = {
     global: {
-        version: '1.2.14.9',
+        version: '1.2.14.10',
         language: (navigator.language || navigator.userLanguage) === 'zh-CN' ? 'zh' : 'en',
         buttonXCoord: '0',
         buttonYCoord: '0',
@@ -320,6 +320,8 @@ const BROWSER_RELAY_BOOTSTRAP_TIMEOUT = 8000;
 const BROWSER_RELAY_RETRY_INTERVAL = 400;
 const DOUYU_DANMAKU_PIPE_PREFIX = 'mpv-lazy-douyu-';
 const DOUYU_DANMAKU_TOKEN_MAX_LENGTH = 64;
+const BILIBILI_DANMAKU_PIPE_PREFIX = 'mpv-lazy-bilibili-';
+const BILIBILI_DANMAKU_WS_URL = 'ws://127.0.0.1:9001/ws';
 const TELEGRAM_CAPTURE_KEY = '__externalPlayerTelegramCaptureV2';
 const TELEGRAM_FETCH_EVENT = 'external-player-telegram-fetch-v2';
 const TELEGRAM_RESPONSE_EVENT = 'external-player-telegram-response-v2';
@@ -432,12 +434,155 @@ async function prepareDouyuDanmakuLaunch(media, parserKey, player, roomId, bridg
 }
 // DOUYU_DANMAKU_HELPERS_END
 
+// BILIBILI_LIVE_DANMAKU_HELPERS_START
+var bilibiliDanmakuSessionSequence = 0;
+const BILIBILI_WBI_MIXIN_KEY_INDEXES = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+    37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52
+];
+
+function createBilibiliDanmakuSessionId() {
+    bilibiliDanmakuSessionSequence = (bilibiliDanmakuSessionSequence % 0xffffff) + 1;
+    const suffix = bilibiliDanmakuSessionSequence.toString(36);
+    const token = String(createBridgeRequestId()).replace(/[^a-z0-9-]/gi, '')
+        .replace(/^-+|-+$/g, '') || Date.now().toString(36);
+    return `bilibili-${token.slice(0, 64 - 'bilibili--'.length - suffix.length)}-${suffix}`;
+}
+
+function createBilibiliDanmakuPipeName(sessionId) {
+    if (!isSafeDouyuDanmakuToken(sessionId) || !String(sessionId).startsWith('bilibili-')) {
+        throw new Error('Invalid Bilibili danmaku session id');
+    }
+    return BILIBILI_DANMAKU_PIPE_PREFIX +
+        String(sessionId).slice('bilibili-'.length).slice(-(64 - BILIBILI_DANMAKU_PIPE_PREFIX.length));
+}
+
+function buildBilibiliWbiQuery(params, imgKey, subKey, timestamp = Math.floor(Date.now() / 1000)) {
+    if (!/^[a-f0-9]{32}$/i.test(String(imgKey)) || !/^[a-f0-9]{32}$/i.test(String(subKey))) {
+        throw new Error('Bilibili WBI keys unavailable');
+    }
+    const keys = imgKey + subKey;
+    const mixinKey = BILIBILI_WBI_MIXIN_KEY_INDEXES.map(index => keys[index]).join('').slice(0, 32);
+    const signedParams = { ...params, wts: timestamp };
+    const query = Object.keys(signedParams).sort().map(key =>
+        `${encodeURIComponent(key)}=${encodeURIComponent(String(signedParams[key]).replace(/[!'()*]/g, ''))}`
+    ).join('&');
+    return `${query}&w_rid=${douyuMd5(query + mixinKey)}`;
+}
+
+function readBilibiliBuvid(cookieText) {
+    const match = String(cookieText || '').match(/(?:^|;\s*)buvid3=([^;]*)/);
+    if (!match) return '';
+    try { return decodeURIComponent(match[1]); } catch (error) { return match[1]; }
+}
+
+async function fetchBilibiliLiveJson(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    try {
+        const response = await fetch(url, { credentials: 'include', signal: controller.signal });
+        if (!response.ok) throw new Error(`Bilibili live request failed (${response.status})`);
+        return await response.json();
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function resolveBilibiliLiveDanmakuAuth(roomId) {
+    if (!/^[1-9]\d*$/.test(String(roomId || ''))) throw new Error('Invalid Bilibili live room id');
+    const [room, nav] = await Promise.all([
+        fetchBilibiliLiveJson(`https://api.live.bilibili.com/room/v1/Room/room_init?id=${roomId}`),
+        fetchBilibiliLiveJson('https://api.bilibili.com/x/web-interface/nav')
+    ]);
+    const canonicalRoomId = String(room?.data?.room_id || '');
+    if (Number(room?.code) !== 0 || !/^[1-9]\d*$/.test(canonicalRoomId)) {
+        throw new Error('Bilibili live room resolution failed');
+    }
+    // Guest nav responses use code -101 and still contain the WBI keys.
+    const imgKey = String(nav?.data?.wbi_img?.img_url || '').split('/').pop().split('.')[0];
+    const subKey = String(nav?.data?.wbi_img?.sub_url || '').split('/').pop().split('.')[0];
+    const query = buildBilibiliWbiQuery({ id: canonicalRoomId, type: 0 }, imgKey, subKey);
+    const info = await fetchBilibiliLiveJson(
+        `https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?${query}`
+    );
+    if (Number(info?.code) !== 0 || typeof info?.data?.token !== 'string' || !info.data.token) {
+        throw new Error('Bilibili live danmaku authentication unavailable');
+    }
+    const uid = Number(nav?.data?.isLogin ? nav.data.mid : 0);
+    const buvid = readBilibiliBuvid(document.cookie);
+    const hostList = (Array.isArray(info.data.host_list) ? info.data.host_list : [])
+        .filter(item => /^[a-z0-9.-]+\.chat\.bilibili\.com$/i.test(String(item?.host || '')) &&
+            Number.isInteger(Number(item?.wss_port)) && Number(item.wss_port) > 0 && Number(item.wss_port) <= 65535)
+        .map(item => ({ host: String(item.host), wss_port: Number(item.wss_port) }));
+    if (!Number.isSafeInteger(uid) || uid < 0 || !buvid || !hostList.length) {
+        throw new Error('Bilibili live danmaku browser credentials unavailable');
+    }
+    // Only the short-lived danmaku token and buvid are sent locally. SESSDATA stays in the browser.
+    return { roomId: canonicalRoomId, auth: {
+        uid, token: info.data.token, buvid, hostList, userAgent: navigator.userAgent
+    } };
+}
+
+function buildBilibiliDanmakuStartRequest({ requestId, roomId, sessionId, pipeName, auth }) {
+    if (!/^[1-9]\d*$/.test(String(roomId || '')) || !isSafeDouyuDanmakuToken(sessionId) ||
+        !String(sessionId).startsWith('bilibili-') || !isSafeDouyuDanmakuToken(pipeName) ||
+        !String(pipeName).startsWith(BILIBILI_DANMAKU_PIPE_PREFIX)) {
+        throw new Error('Invalid Bilibili danmaku session');
+    }
+    return {
+        type: 'startDanmaku', provider: 'bilibili', requestId: String(requestId),
+        roomId: String(roomId), sessionId: String(sessionId), pipeName: String(pipeName),
+        auth: { uid: auth.uid, token: auth.token, buvid: auth.buvid, hostList: auth.hostList,
+            userAgent: auth.userAgent }
+    };
+}
+
+function isBilibiliDanmakuStarted(message, sessionId) {
+    return message?.type === 'danmakuStarted' && message.provider === 'bilibili' &&
+        message.sessionId === sessionId && Number(message.apiVersion) >= 2;
+}
+
+async function prepareBilibiliLiveDanmakuLaunch(media, parserKey, player, roomId, bridge,
+    resolveAuth = resolveBilibiliLiveDanmakuAuth) {
+    const launchMedia = { ...media, mpvOptions: [...(media?.mpvOptions || [])] };
+    if (parserKey !== 'bilibiliLive' || !isMpvDanmakuPlayer(player)) {
+        return { media: launchMedia, started: false };
+    }
+    let sessionId;
+    let pipeName;
+    try {
+        const resolved = await resolveAuth(roomId);
+        sessionId = createBilibiliDanmakuSessionId();
+        pipeName = createBilibiliDanmakuPipeName(sessionId);
+        const acknowledgement = await bridge.startDanmaku({
+            provider: 'bilibili', roomId: resolved.roomId, sessionId, pipeName, auth: resolved.auth
+        });
+        if (!isBilibiliDanmakuStarted(acknowledgement, sessionId)) {
+            throw new Error('Bilibili danmaku bridge returned an invalid acknowledgement');
+        }
+        const ipcOption = buildDouyuDanmakuMpvOption(pipeName);
+        if (!launchMedia.mpvOptions.includes(ipcOption)) launchMedia.mpvOptions.push(ipcOption);
+        return { media: launchMedia, started: true, sessionId, pipeName };
+    } catch (error) {
+        if (sessionId) {
+            try { bridge.stopDanmaku(sessionId); } catch (stopError) { /* Best-effort startup cleanup. */ }
+        }
+        return { media: launchMedia, started: false, error };
+    }
+}
+// BILIBILI_LIVE_DANMAKU_HELPERS_END
+
 class BrowserMediaBridge {
-    constructor() {
+    constructor({ wsUrl = BROWSER_RELAY_WS_URL, bootstrapCommand = BROWSER_RELAY_BOOTSTRAP_COMMAND } = {}) {
+        this.wsUrl = wsUrl;
+        this.bootstrapCommand = bootstrapCommand;
         this.socket = undefined;
         this.connecting = undefined;
         this.pendingRegistrations = new Map();
         this.pendingDanmakuStarts = new Map();
+        this.activeDanmakuSessions = new Map();
         this.inflightFetches = new Map();
         this.clientId = createBridgeRequestId();
         this.telegramResponses = new Map();
@@ -452,7 +597,7 @@ class BrowserMediaBridge {
             return this.connecting;
         }
         this.connecting = new Promise((resolve, reject) => {
-            const socket = new WebSocket(BROWSER_RELAY_WS_URL);
+            const socket = new WebSocket(this.wsUrl);
             socket.binaryType = 'arraybuffer';
             const timeout = setTimeout(() => reject(new Error('local relay connection timed out')), 1800);
             socket.addEventListener('open', () => {
@@ -479,6 +624,7 @@ class BrowserMediaBridge {
                     pending.reject(new Error('local bridge disconnected'));
                 }
                 this.pendingDanmakuStarts.clear();
+                this.activeDanmakuSessions.clear();
             });
         }).finally(() => {
             this.connecting = undefined;
@@ -517,7 +663,7 @@ class BrowserMediaBridge {
         }
         this.bootstrapPromise = (async () => {
             updateHandoffStatus('relay-starting');
-            window.open(`ush://${BROWSER_RELAY_BOOTSTRAP_APP}?${compress(BROWSER_RELAY_BOOTSTRAP_COMMAND)}`, '_self');
+            window.open(`ush://${BROWSER_RELAY_BOOTSTRAP_APP}?${compress(this.bootstrapCommand)}`, '_self');
             const deadline = Date.now() + BROWSER_RELAY_BOOTSTRAP_TIMEOUT;
             while (Date.now() < deadline) {
                 try {
@@ -538,29 +684,61 @@ class BrowserMediaBridge {
     async bootstrapTelegramRelay() {
         return this.bootstrapLocalBridge();
     }
-    async startDanmaku({ roomId, sessionId, pipeName }) {
+    async startDanmaku({ provider, roomId, sessionId, pipeName, auth }) {
         await this.ensureLocalBridge();
-        const request = buildDouyuDanmakuStartRequest({
-            requestId: createBridgeRequestId(), roomId, sessionId, pipeName
-        });
+        const requestDetails = { requestId: createBridgeRequestId(), roomId, sessionId, pipeName, auth };
+        const request = provider === 'bilibili' ? buildBilibiliDanmakuStartRequest(requestDetails) :
+            buildDouyuDanmakuStartRequest(requestDetails);
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 this.pendingDanmakuStarts.delete(request.requestId);
-                reject(new Error('Douyu danmaku bridge timed out'));
-            }, 5000);
+                this.stopDanmaku(request.sessionId);
+                reject(new Error('Live danmaku bridge timed out'));
+            }, provider === 'bilibili' ? 10000 : 5000);
             this.pendingDanmakuStarts.set(request.requestId, {
                 sessionId: request.sessionId,
-                resolve: result => { clearTimeout(timeout); resolve(result); },
+                provider,
+                resolve: result => {
+                    clearTimeout(timeout);
+                    if (provider === 'bilibili') this.activeDanmakuSessions.set(sessionId, { roomId: String(roomId) });
+                    resolve(result);
+                },
                 reject: error => { clearTimeout(timeout); reject(error); }
             });
-            this.socket.send(JSON.stringify(request));
+            try {
+                this.socket.send(JSON.stringify(request));
+            } catch (error) {
+                this.pendingDanmakuStarts.delete(request.requestId);
+                clearTimeout(timeout);
+                reject(error);
+            }
         });
     }
     stopDanmaku(sessionId) {
         if (!isSafeDouyuDanmakuToken(sessionId)) {
             return;
         }
-        this.sendJson({ type: 'stopDanmaku', requestId: createBridgeRequestId(), sessionId });
+        this.activeDanmakuSessions.delete(sessionId);
+        try {
+            this.sendJson({ type: 'stopDanmaku', requestId: createBridgeRequestId(), sessionId });
+        } catch (error) {
+            console.warn('Could not stop the live danmaku session after bridge disconnect');
+        }
+    }
+    async refreshDanmakuAuth(message) {
+        const session = this.activeDanmakuSessions.get(message.sessionId);
+        if (message.provider !== 'bilibili' || !session || String(message.roomId) !== session.roomId ||
+            !isSafeDouyuDanmakuToken(message.requestId)) return;
+        try {
+            const resolved = await resolveBilibiliLiveDanmakuAuth(session.roomId);
+            if (this.activeDanmakuSessions.get(message.sessionId) !== session || resolved.roomId !== session.roomId) return;
+            this.sendJson({ type: 'updateDanmakuAuth', provider: 'bilibili', sessionId: message.sessionId,
+                requestId: message.requestId, auth: resolved.auth });
+        } catch (error) {
+            if (this.activeDanmakuSessions.get(message.sessionId) !== session) return;
+            this.sendJson({ type: 'danmakuAuthError', provider: 'bilibili', sessionId: message.sessionId,
+                requestId: message.requestId, message: 'Bilibili danmaku credentials refresh failed' });
+        }
     }
     handleMessage(event) {
         if (typeof event.data !== 'string') {
@@ -576,10 +754,15 @@ class BrowserMediaBridge {
             }
         } else if (message.type === 'danmakuStarted') {
             const pending = this.pendingDanmakuStarts.get(message.requestId);
-            if (pending && isDouyuDanmakuStarted(message, pending.sessionId)) {
+            if (pending && (pending.provider === 'bilibili' ?
+                isBilibiliDanmakuStarted(message, pending.sessionId) : isDouyuDanmakuStarted(message, pending.sessionId))) {
                 this.pendingDanmakuStarts.delete(message.requestId);
                 pending.resolve(message);
             }
+        } else if (message.type === 'refreshDanmakuAuth') {
+            this.refreshDanmakuAuth(message);
+        } else if (message.type === 'danmakuStopped') {
+            this.activeDanmakuSessions.delete(message.sessionId);
         } else if (message.type === 'error') {
             const requestId = message.requestId || message.id;
             const pending = this.pendingRegistrations.get(requestId);
@@ -590,7 +773,7 @@ class BrowserMediaBridge {
             const danmakuPending = this.pendingDanmakuStarts.get(requestId);
             if (danmakuPending) {
                 this.pendingDanmakuStarts.delete(requestId);
-                danmakuPending.reject(new Error(message.message || 'Douyu danmaku bridge failed'));
+                danmakuPending.reject(new Error(message.message || 'Live danmaku bridge failed'));
             }
         } else if (message.type === 'fetchResource') {
             this.fetchResource(message);
@@ -707,6 +890,10 @@ class BrowserMediaBridge {
 }
 
 const browserMediaBridge = new BrowserMediaBridge();
+const bilibiliMediaBridge = new BrowserMediaBridge({
+    wsUrl: BILIBILI_DANMAKU_WS_URL,
+    bootstrapCommand: `${BROWSER_RELAY_BOOTSTRAP_COMMAND} -Bilibili`
+});
 
 function isTelegramUrl(url = location.href) {
     return /^https:\/\/web(?:k|z)?\.telegram\.org\//i.test(url || '');
@@ -1258,8 +1445,9 @@ class BaseParser {
             updateHandoffStatus('resolving');
             const relayMode = currentConfig.global.browserRelayMode || 'auto';
             const telegramRelayLaunch = isTelegramUrl() && isRelayPlayer(player) && relayMode !== 'off';
-            const douyuDanmakuLaunch = currentParser?.parserKey === 'douyu' && isMpvDanmakuPlayer(player);
-            showLoading(telegramRelayLaunch || douyuDanmakuLaunch ? BROWSER_RELAY_BOOTSTRAP_TIMEOUT + 8000 : 6000);
+            const liveDanmakuLaunch = ['douyu', 'bilibiliLive'].includes(currentParser?.parserKey) && isMpvDanmakuPlayer(player);
+            showLoading(liveDanmakuLaunch && currentParser?.parserKey === 'bilibiliLive' ? 32000 :
+                telegramRelayLaunch || liveDanmakuLaunch ? BROWSER_RELAY_BOOTSTRAP_TIMEOUT + 8000 : 6000);
 
             // 别名，方便播放事件使用
             currentPlayer = player;
@@ -2364,6 +2552,18 @@ const PARSER = {
             await this.parseTitle();
             await this.parseReferer();
         }
+        async prepareLaunchMedia(player) {
+            const media = await super.prepareLaunchMedia(player);
+            const result = await prepareBilibiliLiveDanmakuLaunch(
+                media, this.parserKey, player, this.roomId, bilibiliMediaBridge
+            );
+            if (result.error) {
+                console.warn(`Bilibili live danmaku unavailable; starting video without danmaku: ${result.error.message}`);
+                updateHandoffStatus('danmaku-unavailable');
+                showToast(translation.handoffDanmakuUnavailable);
+            }
+            return result.media;
+        }
         async parseVideo() {
             const roomids = currentUrl.match(
                 /.*(roomid=|blanc\/|live.bilibili.com\/)(\d+).*/
@@ -2373,6 +2573,7 @@ const PARSER = {
             if (!roomid) {
                 throw new Error('can not find roomid');
             }
+            this.roomId = roomid;
 
             const quality = currentConfig.global.parser.bilibiliLive.preferredQuality;
             const url = `https://api.live.bilibili.com/room/v1/Room/playUrl?quality=${quality}&cid=${roomid}`;

@@ -1,6 +1,14 @@
 # Telegram Web MPV Bridge
 
-Local proof-of-concept bridge for streaming the currently open Telegram Web video in MPV without a Telegram API ID/hash.
+Local bridge for the legacy Telegram Web range userscript and Bilibili live danmaku in MPV.
+
+## Bilibili Live Danmaku
+
+Use this checkout's `external_player.js`, updated `uosc_danmaku` configuration, and this bridge together. The browser resolves the canonical live room and passes short-lived chat authentication to the loopback bridge; `bilibili_danmaku.py` connects to Bilibili and forwards bounded text batches to a per-launch MPV Windows IPC pipe. Gift/system messages are omitted, pause drops queued messages, and player exit or file change stops the session. Keeping the page open permits authentication refresh on reconnect.
+
+Install `requirements.txt` in `.venv` and run `start_browser_relay.ps1 -Bilibili -Source`, or build `bilibili-live-bridge.exe` with `build_windows.ps1 -InstallDependencies`. The dedicated Bilibili sidecar uses WebSocket 9001 and HTTP 9002 and runs alongside the existing `browser-media-bridge.exe` on 8999/9000. It includes the Bilibili client and requires no Node installation. See [the complete Chinese installation guide](../../docs/scripts/bilibili-live-danmaku.md).
+
+This checkout's Python source also retains the legacy Telegram `/stream/current` implementation; the separate upstream media/HLS/Douyu EXE remains in place for those workflows.
 
 ## What It Does
 

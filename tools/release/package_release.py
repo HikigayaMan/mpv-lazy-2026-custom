@@ -115,8 +115,14 @@ CONFIG_EXACT_FILES = {
     "umpv.conf",
     "truehdrtweaks.ini",
     "tools/telegram-web-mpv-bridge/browser-media-bridge.exe",
+    "tools/telegram-web-mpv-bridge/bilibili-live-bridge.exe",
     "tools/telegram-web-mpv-bridge/douyu-danmaku-client.exe",
     "tools/telegram-web-mpv-bridge/start_browser_relay.ps1",
+    "tools/telegram-web-mpv-bridge/bridge.py",
+    "tools/telegram-web-mpv-bridge/bilibili_danmaku.py",
+    "tools/telegram-web-mpv-bridge/requirements.txt",
+    "tools/telegram-web-mpv-bridge/requirements-build.txt",
+    "tools/telegram-web-mpv-bridge/build_windows.ps1",
     "portable_config/fonts.conf",
     "portable_config/input_uosc.conf",
     "portable_config/input_uosc.conf_2025",
@@ -167,6 +173,7 @@ OVERLAY_EXCLUDE_REL_DIRS = {
     "portable_config/_cache",
     "tools/telegram-web-mpv-bridge/.venv",
     "tools/telegram-web-mpv-bridge/__pycache__",
+    "tools/telegram-web-mpv-bridge/build",
 }
 
 OVERLAY_EXCLUDE_GLOBS = {
@@ -912,6 +919,7 @@ def verify_extracted(paths: Paths, version: str, forbidden_texts: list[str], pac
             "portable_config/script_helpers/hdr_luma_heatmap.py",
             "portable_config/scripts/rife_runtime_menu.lua",
             "tools/telegram-web-mpv-bridge/browser-media-bridge.exe",
+            "tools/telegram-web-mpv-bridge/bilibili-live-bridge.exe",
             "tools/telegram-web-mpv-bridge/douyu-danmaku-client.exe",
             "tools/telegram-web-mpv-bridge/start_browser_relay.ps1",
         })

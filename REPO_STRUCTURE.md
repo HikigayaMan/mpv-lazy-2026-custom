@@ -117,7 +117,7 @@ VapourSynth 滤镜脚本，全部 .vpy 文件已上传：
 - rife_benchmark.py：RIFE 性能基准测试脚本。
 - rife_engine_builder.py / rife_engine_monitor.py：TensorRT engine 预构建和监控。
 - export_realesr_general_x4v3_dynamic.py：RealESRGAN 模型动态 ONNX 导出工具。
-- telegram-web-mpv-bridge/：Browser Media Bridge 源码与开发回退。正式整合包通过 config 资产补入 `browser-media-bridge.exe` 和 `douyu-danmaku-client.exe`，普通用户不需要 Python/Node。
+- telegram-web-mpv-bridge/：Browser Media Bridge 源码与开发回退。已有整合包使用 `browser-media-bridge.exe` 和 `douyu-danmaku-client.exe`；本次新增独立 `bilibili-live-bridge.exe`，从 PC 网页交接 B 站直播实时弹幕。专用服务使用 `9001/9002`，构建后普通用户不需要 Python/Node。
 - release/package_release.py：从已验证完整包生成 base / ai / config / docs 分类压缩包，并可选择上传到 GitHub Release。
 
 ## 未上传的内容（本地依赖）

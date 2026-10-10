@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,6 +25,8 @@ from urllib.parse import parse_qs, urlparse
 
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
+
+from bilibili_danmaku import BilibiliDanmakuManager
 
 
 LOG = logging.getLogger("telegram-web-mpv-bridge")
@@ -63,6 +66,7 @@ class BridgeState:
         self.ws = None
         self.pending: dict[str, PendingRequest] = {}
         self.lock = asyncio.Lock()
+        self.danmaku = BilibiliDanmakuManager()
 
     @property
     def connected(self) -> bool:
@@ -120,7 +124,7 @@ class BridgeState:
         finally:
             self.pending.pop(request_id, None)
 
-    async def handle_ws_message(self, raw: str | bytes) -> None:
+    async def handle_ws_message(self, raw: str | bytes, websocket=None) -> None:
         if isinstance(raw, bytes):
             if len(raw) < 4:
                 LOG.warning("ignoring short binary frame")
@@ -139,11 +143,29 @@ class BridgeState:
             return
 
         payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("WebSocket payload must be an object")
         msg_type = payload.get("type")
         if msg_type == "hello":
             LOG.info("userscript connected: %s", payload.get("userAgent", "unknown"))
         elif msg_type == "registerVideo":
+            if websocket is not None:
+                await self.set_ws(websocket)
             await self.register_video(payload)
+        elif msg_type == "startDanmaku":
+            if payload.get("provider") != "bilibili":
+                raise ValueError("this bridge supports live danmaku provider bilibili")
+            if websocket is None:
+                raise ValueError("danmaku start requires a browser connection")
+            # ws_handler dispatches this call concurrently so stop/refresh can
+            # arrive while remote authentication is still in progress.
+            reply = await self.danmaku.start(payload, websocket)
+            await websocket.send(json.dumps(reply))
+        elif msg_type == "stopDanmaku":
+            await self.danmaku.stop(str(payload.get("sessionId") or ""), websocket)
+        elif msg_type in ("updateDanmakuAuth", "danmakuAuthError"):
+            if payload.get("provider") == "bilibili":
+                self.danmaku.update_auth(payload, websocket)
         elif msg_type == "error":
             request_id = str(payload.get("id") or "")
             pending = self.pending.get(request_id)
@@ -239,11 +261,13 @@ async def handle_http_client(reader: asyncio.StreamReader, writer: asyncio.Strea
 
         parsed = urlparse(target)
         if parsed.path == "/health":
-            body = json.dumps({"ok": True, "connected": state.connected}).encode("utf-8")
+            body = json.dumps({"ok": True, "connected": state.connected, "protocol": 2,
+                               "danmakuApiVersion": 2, "danmakuProviders": ["bilibili"]}).encode("utf-8")
             writer.write(http_response(200, "OK", {"Content-Type": "application/json"}, body))
             return
         if parsed.path == "/status":
-            body = json.dumps({"connected": state.connected, "video": state.video.__dict__}, ensure_ascii=False).encode("utf-8")
+            body = json.dumps({"connected": state.connected, "video": state.video.__dict__,
+                               "danmaku": state.danmaku.snapshots()}, ensure_ascii=False).encode("utf-8")
             writer.write(http_response(200, "OK", {"Content-Type": "application/json; charset=utf-8"}, body))
             return
         if parsed.path == "/play/current":
@@ -303,13 +327,45 @@ async def handle_http_client(reader: asyncio.StreamReader, writer: asyncio.Strea
 
 
 async def ws_handler(websocket, state: BridgeState) -> None:
-    await state.set_ws(websocket)
+    tasks: set[asyncio.Task] = set()
+    async def handle_message(message) -> None:
+        try:
+            await state.handle_ws_message(message, websocket)
+        except Exception as exc:
+            # Metadata validation exceptions contain only fixed diagnostic
+            # strings; auth and connection exceptions are intentionally generic.
+            payload = {}
+            if isinstance(message, str):
+                with contextlib.suppress(ValueError):
+                    decoded = json.loads(message)
+                    if isinstance(decoded, dict):
+                        payload = decoded
+            error = str(exc) if isinstance(exc, ValueError) else "local bridge request failed"
+            with contextlib.suppress(ConnectionClosed):
+                await websocket.send(json.dumps({"type": "error", "requestId": payload.get("requestId"),
+                                                  "id": payload.get("id"), "message": error}))
     try:
         async for message in websocket:
-            await state.handle_ws_message(message)
+            payload = None
+            if isinstance(message, str):
+                with contextlib.suppress(ValueError):
+                    payload = json.loads(message)
+            if isinstance(payload, dict) and payload.get("type") == "startDanmaku":
+                if len(tasks) >= 8:
+                    await websocket.send(json.dumps({"type": "error", "requestId": payload.get("requestId"),
+                                                      "message": "too many pending danmaku requests"}))
+                    continue
+                task = asyncio.create_task(handle_message(message))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+            else:
+                await handle_message(message)
     except ConnectionClosed:
         pass
     finally:
+        for task in list(tasks):
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await state.clear_ws(websocket)
         LOG.info("userscript disconnected")
 
@@ -339,15 +395,18 @@ async def main_async(args: argparse.Namespace) -> None:
             loop.add_signal_handler(sig, stop.set)
         except NotImplementedError:
             pass
-    await stop.wait()
-    http_server.close()
-    ws_server.close()
-    await http_server.wait_closed()
-    await ws_server.wait_closed()
+    try:
+        await stop.wait()
+    finally:
+        await state.danmaku.close()
+        http_server.close()
+        ws_server.close()
+        await http_server.wait_closed()
+        await ws_server.wait_closed()
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Bridge Telegram Web video streams to MPV over local HTTP Range")
+    parser = argparse.ArgumentParser(description="Bridge Telegram Web video and Bilibili live danmaku to local MPV")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT)
     parser.add_argument("--ws-port", type=int, default=DEFAULT_WS_PORT)
@@ -365,6 +424,8 @@ def main() -> None:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    # websockets DEBUG dumps frames, including the ephemeral auth metadata.
+    logging.getLogger("websockets").setLevel(logging.WARNING)
     asyncio.run(main_async(args))
 
 

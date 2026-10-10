@@ -87,6 +87,15 @@ class ReleaseAssetDigestTests(unittest.TestCase):
 
 
 class ReleaseOverlayTests(unittest.TestCase):
+    def test_bilibili_runtime_is_included_in_config_updates(self) -> None:
+        for name in (
+            "bridge.py", "bilibili_danmaku.py", "requirements.txt",
+            "requirements-build.txt", "build_windows.ps1", "start_browser_relay.ps1",
+        ):
+            rel = f"tools/telegram-web-mpv-bridge/{name}"
+            self.assertTrue(PACKAGE_RELEASE.is_config(rel), rel)
+            self.assertIn("config", PACKAGE_RELEASE.package_for_rel(rel))
+
     def test_excludes_timestamped_development_backups(self) -> None:
         rel = "portable_config/scripts/douyu_danmaku.lua.bak-20260726-032711"
         filename = "douyu_danmaku.lua.bak-20260726-032711"

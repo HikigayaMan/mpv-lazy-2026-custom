@@ -32,6 +32,22 @@ local function current_time()
     return mp.get_property_number("time-pos", 0) or 0
 end
 
+-- Lua slices bytes, so retain whole UTF-8 characters at the input limit.
+local function bounded_text(value, limit)
+    local text = value:gsub("[%z\r\n]", " ")
+    if #text <= limit then return text end
+    local finish = limit
+    while finish > 0 do
+        local byte = text:byte(finish)
+        if byte < 0x80 or byte >= 0xC0 then break end
+        finish = finish - 1
+    end
+    local lead = text:byte(finish)
+    local size = lead and (lead >= 0xF0 and 4 or lead >= 0xE0 and 3 or lead >= 0xC0 and 2 or 1) or 1
+    if finish + size - 1 > limit then finish = finish - 1 else finish = limit end
+    return text:sub(1, finish)
+end
+
 local function clear_live_items()
     LIVE_DANMAKU.items = {}
     LIVE_DANMAKU.events = {}
@@ -72,15 +88,14 @@ function refresh_live_danmaku_now()
     if not LIVE_DANMAKU.active then return end
     prune_live_items(current_time())
     LIVE_DANMAKU.events = build_live_ass_events(LIVE_DANMAKU.items)
-    if render then
+    if ENABLED and render then
         render()
     end
 end
 
 function schedule_live_danmaku_refresh()
-    if refresh_timer then
-        refresh_timer:kill()
-    end
+    -- A busy room must still render while more batches are arriving.
+    if refresh_timer then return end
     refresh_timer = mp.add_timeout(LIVE_REFRESH_DELAY, function()
         refresh_timer = nil
         refresh_live_danmaku_now()
@@ -101,7 +116,8 @@ local function live_start(session_id)
         return
     end
 
-    if LIVE_DANMAKU.active and LIVE_DANMAKU.session_id ~= session_id then
+    if LIVE_DANMAKU.active and LIVE_DANMAKU.session_id == session_id then return end
+    if LIVE_DANMAKU.active then
         clear_live_items()
     end
     LIVE_DANMAKU.active = true
@@ -113,6 +129,24 @@ local function live_start(session_id)
     msg.info("live danmaku started: " .. session_id)
 end
 
+function toggle_live_danmaku()
+    if not LIVE_DANMAKU.active then return false end
+    ENABLED = not ENABLED
+    if ENABLED then
+        toggle_danmaku_switch("on")
+        show_danmaku_func(true)
+    else
+        clear_live_items()
+        if refresh_timer then
+            refresh_timer:kill()
+            refresh_timer = nil
+        end
+        toggle_danmaku_switch("off")
+        hide_danmaku_func(true)
+    end
+    return true
+end
+
 local function live_batch(session_id, json)
     if not LIVE_DANMAKU.active or session_id ~= LIVE_DANMAKU.session_id then
         msg.warn("live-batch rejected: inactive or mismatched session")
@@ -122,6 +156,7 @@ local function live_batch(session_id, json)
         msg.warn("live-batch rejected: invalid payload")
         return
     end
+    if not ENABLED then return end
     if mp.get_property_bool("pause", false) then
         LIVE_DANMAKU.dropped_while_paused = LIVE_DANMAKU.dropped_while_paused + 1
         return
@@ -138,13 +173,12 @@ local function live_batch(session_id, json)
     for _, item in ipairs(batch) do
         if accepted >= LIVE_BATCH_LIMIT then break end
         if type(item) == "table" and type(item.text) == "string" then
-            local text = item.text:sub(1, LIVE_TEXT_LIMIT)
-            text = text:gsub("[%z\r\n]", " ")
+            local text = bounded_text(item.text, LIVE_TEXT_LIMIT)
             if text:match("%S") then
-                local nick = type(item.nick) == "string" and item.nick:sub(1, LIVE_NICK_LIMIT) or ""
-                nick = nick:gsub("[%z\r\n]", " ")
+                local nick = type(item.nick) == "string" and bounded_text(item.nick, LIVE_NICK_LIMIT) or ""
                 local display = nick ~= "" and (nick .. ": " .. text) or text
                 local color = tonumber(item.color) or 0xFFFFFF
+                if color ~= color or color == math.huge or color == -math.huge then color = 0xFFFFFF end
                 color = math.max(0, math.min(math.floor(color), 0xFFFFFF))
                 local event_time = math.max(now + 0.10, LIVE_DANMAKU.last_time + 0.005)
                 LIVE_DANMAKU.items[#LIVE_DANMAKU.items + 1] = {

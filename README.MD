@@ -2,6 +2,8 @@
 
 这是基于 [hooke007/mpv_PlayKit](https://github.com/hooke007/mpv_PlayKit) 的 Windows 版 mpv-lazy 自定义整合包。
 
+本仓库在 [luoxue03/mpv-lazy-2026-custom](https://github.com/luoxue03/mpv-lazy-2026-custom) 的基础上新增 **Bilibili 直播实时弹幕交接到本地 MPV**。安装和构建方法见 [Bilibili 直播弹幕说明](./docs/scripts/bilibili-live-danmaku.md)。下文的 Releases 下载链接指向原项目，原项目发布包尚不包含本次扩展；使用时需要按说明更新浏览器脚本、中继和播放器配置。
+
 本仓库主要保存配置、脚本、菜单、VapourSynth 滤镜脚本、着色器和文档；完整可运行包请到 [Releases](https://github.com/luoxue03/mpv-lazy-2026-custom/releases) 下载。
 
 ## 项目定位
@@ -47,6 +49,7 @@
 - 总入口：[工具脚本安装、配置与使用说明](./docs/%E5%B7%A5%E5%85%B7%E8%84%9A%E6%9C%AC%E5%AE%89%E8%A3%85%E9%85%8D%E7%BD%AE%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md)
 - 浏览器拉起播放：[external_player](./docs/scripts/external-player.md)
 - 弹幕插件：[uosc_danmaku](./docs/scripts/uosc-danmaku.md)
+- B 站直播弹幕：[安装与交接说明](./docs/scripts/bilibili-live-danmaku.md)（需同步更新本仓库浏览器脚本和中继）。
 - AI 字幕：[sub-fastwhisper](./docs/scripts/sub-fastwhisper.md)
 - Trakt 同步：[trakt-scrobble](./docs/scripts/trakt-scrobble.md)
 - Telegram / 斗鱼本机服务：[Browser Media Bridge](./docs/scripts/telegram-web-mpv-bridge.md)
@@ -61,7 +64,7 @@
 - **超分 + 补帧组合**：除固定预设外，提供 15 个 2026 超分预设与 10 个 2025/2026 RIFE NV 模型的运行时自定义组合。
 - **着色器菜单**：整理 780+ GLSL 着色器，并按标准、动漫、真人/通用、组合等场景分类。
 - **网页拉起播放**：External Player 1.2.14.9 提供新悬浮 UI、默认播放器、画质、贴边隐藏、资源嗅探，以及 MissAV、Telegram 和斗鱼专用链路。
-- **弹幕与直播**：保留 bilibiliAssert，并让斗鱼实时弹幕接入 uosc_danmaku 的样式、菜单和直播帧率控制。
+- **弹幕与直播**：保留 bilibiliAssert 和斗鱼弹幕；新增 B 站直播弹幕交接，使用 uosc_danmaku 的样式、菜单和直播帧率控制。
 - **AI 字幕**：集成 sub-fastwhisper 相关配置和模型目录说明。
 - **Trakt / Browser Media Bridge**：后台通知默认关闭；Release 中的 bridge 与斗鱼 helper 已封装为 EXE，普通用户不需要安装 Python 或 Node。
 

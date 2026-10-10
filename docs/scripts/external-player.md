@@ -122,6 +122,12 @@ External Player 会把以下启动参数交给它：
 | YouTube 等 yt-dlp 站点 | 交给 mpv/yt-dlp | 使用全局首选画质和代理设置。 |
 | 未适配网页 | 资源嗅探兜底 | 只在发现可信媒体后显示；DRM、私有 MSE 和未知 `blob:` 不保证可用。 |
 
+### Bilibili 直播弹幕
+
+本仓库用户脚本为 `live.bilibili.com` 的 MPV 播放增加实时弹幕交接。视频仍使用直链；中继只负责弹幕，失败时仍启动视频。每次播放器使用独立 IPC pipe，避免混入其他房间的弹幕。
+
+需要安装本仓库修改后的 `external_player.js`，并同步更新中继 EXE 和 uosc 配置；上面的独立仓库安装链接及旧 Release 可能尚未包含此功能。详见 [安装与交接说明](./bilibili-live-danmaku.md)。
+
 ### MissAV
 
 脚本会优先取得 HLS 播放地址，并尽量预读变体清单，把清晰度信息传给 `quality-menu.lua`。正常情况下保持浏览器中继为“自动”即可。

@@ -90,6 +90,12 @@ history_path=~~/_cache/danmaku-history.json
 2. 对支持 URL 自动识别的站点，插件会尝试自动加载弹幕。
 3. 如果自动加载失败，手动进入 `搜索弹幕`。
 
+### Bilibili 直播弹幕
+
+PC 浏览器的 External Player 可将 B 站直播的实时文字弹幕交给本机中继，再通过每次播放独立的 IPC pipe 接入本插件。使用同一套字体、透明度、显示区域、速度和直播帧率设置，`j` 可反复隐藏／显示，暂停时不积压消息。
+
+本功能需要同步更新本仓库用户脚本和 Bilibili 专用中继（`bilibili-live-bridge.exe`，或本机源码环境）。完整步骤见 [Bilibili 直播弹幕安装与交接说明](./bilibili-live-danmaku.md)。
+
 ### 斗鱼直播弹幕
 
 斗鱼直播由 External Player 与 Browser Media Bridge 建立每次播放专用的 MPV IPC pipe。`douyu_danmaku.lua` 会先等待 `uosc_danmaku` 实时 API：

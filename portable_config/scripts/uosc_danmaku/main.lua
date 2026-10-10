@@ -715,7 +715,7 @@ end)
 
 mp.register_script_message("show_danmaku_keyboard", function()
     if is_live_danmaku_active and is_live_danmaku_active() then
-        stop_live_danmaku(nil)
+        toggle_live_danmaku()
         return
     end
     ENABLED = not ENABLED

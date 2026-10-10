@@ -1,0 +1,355 @@
+"""Offline protocol and session tests; no Bilibili account/network required."""
+
+import asyncio
+from collections import deque
+import json
+import os
+import struct
+import threading
+import time
+import unittest
+import uuid
+from unittest.mock import patch
+import zlib
+
+import brotli
+
+from bilibili_danmaku import (
+    AuthRejected, BilibiliDanmakuManager, BilibiliSession, HEADER, MAX_PENDING,
+    MpvPipe, decode_packets, make_packet, normalize_danmaku, validate_auth, validate_start,
+)
+from bridge import BridgeState, ws_handler
+
+
+def auth():
+    return {"uid": 0, "token": "temporary-test-token", "buvid": "temporary-test-client", "userAgent": "Mozilla/5.0 offline-fixture",
+            "hostList": [{"host": "broadcastlv.chat.bilibili.com", "wss_port": 443}]}
+
+
+def start_request():
+    return {"type": "startDanmaku", "provider": "bilibili", "requestId": "test-1", "roomId": "545068",
+            "sessionId": "bilibili-test-1", "pipeName": "mpv-lazy-bilibili-test-1", "auth": auth()}
+
+
+def event(text="你好，直播", cmd="DANMU_MSG"):
+    return {"cmd": cmd, "info": [[0, 1, 25, 0x12AB34], text, [123, "测试观众"]]}
+
+
+def json_packet(operation, payload, version=0):
+    return make_packet(operation, json.dumps(payload, ensure_ascii=False).encode(), version)
+
+
+class ProtocolTests(unittest.TestCase):
+    def test_auth_and_heartbeat_wire_header(self):
+        packet = json_packet(7, {"roomid": 545068}, 1)
+        self.assertEqual(HEADER.unpack_from(packet), (len(packet), 16, 1, 7, 1))
+        self.assertEqual(HEADER.unpack_from(make_packet(2))[3], 2)
+
+    def test_plain_concatenated_zlib_brotli_and_nested_packets(self):
+        inner = json_packet(5, event()) + json_packet(5, event("第二条", "DANMU_MSG:4:0:2:2:2:0"))
+        compressed = make_packet(5, zlib.compress(inner), 2)
+        brotli_packet = make_packet(5, brotli.compress(compressed), 3)
+        packets = decode_packets(json_packet(8, {"code": 0}, 1) + brotli_packet + make_packet(3, struct.pack(">I", 234)))
+        self.assertEqual([op for op, _ in packets], [8, 5, 5, 3])
+        self.assertEqual(packets[-1], (3, 234))
+        self.assertEqual(normalize_danmaku(packets[2][1])["text"], "第二条")
+
+    def test_malformed_packets_and_decompression_bomb_rejected(self):
+        for data in (b"short", HEADER.pack(0, 16, 0, 5, 1), HEADER.pack(17, 15, 0, 5, 1) + b"x",
+                     HEADER.pack(100, 16, 0, 5, 1), json_packet(5, []), make_packet(5, b"invalid", 2)):
+            with self.subTest(data=data[:16]), self.assertRaises((ValueError, zlib.error)):
+                decode_packets(data)
+        with self.assertRaises(ValueError):
+            decode_packets(make_packet(5, zlib.compress(b"a" * (2 * 1024 * 1024 + 1)), 2))
+        with self.assertRaises(ValueError):
+            decode_packets(make_packet(5, brotli.compress(b"a" * (2 * 1024 * 1024 + 1)), 3))
+
+    def test_normalize_filters_gifts_invalid_fields_and_control_characters(self):
+        self.assertIsNone(normalize_danmaku({"cmd": "SEND_GIFT", "data": {}}))
+        self.assertIsNone(normalize_danmaku({"cmd": "DANMU_MSG", "info": []}))
+        self.assertIsNone(normalize_danmaku(event("\r\n\x00")))
+        item = event("你好\n世界\x00")
+        self.assertEqual(normalize_danmaku(item), {"text": "你好 世界 ", "nick": "测试观众", "color": 0x12AB34})
+        item["info"][0][3] = "{\\pos(0,0)}"
+        self.assertEqual(normalize_danmaku(item)["color"], 0xFFFFFF)
+
+    def test_metadata_is_restricted_to_bilibili_and_expected_pipe(self):
+        result = validate_start(start_request())
+        self.assertEqual(result[3]["urls"], ["wss://broadcastlv.chat.bilibili.com:443/sub"])
+        for bad_host in ("localhost", "chat.bilibili.com.attacker.example", "127.0.0.1", "broadcastlv.chat.bilibili.com/path"):
+            invalid = auth()
+            invalid["hostList"][0]["host"] = bad_host
+            with self.subTest(host=bad_host), self.assertRaises(ValueError):
+                validate_auth(invalid)
+        for field, value in (("pipeName", "other-player-pipe"), ("pipeName", "mpv-lazy-bilibili-../../x"),
+                             ("sessionId", "douyu-test"), ("roomId", "0"), ("roomId", "545068?other")):
+            invalid = start_request()
+            invalid[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                validate_start(invalid)
+        with self.assertRaises(ValueError):
+            validate_auth({**auth(), "userAgent": "Mozilla/5.0\r\nCookie: injected"})
+
+
+class FakeOwner:
+    def __init__(self):
+        self.messages = []
+
+    async def send(self, raw):
+        self.messages.append(json.loads(raw))
+
+
+class FakeRemote:
+    def __init__(self, code=0, messages=None):
+        self.code = code
+        self.messages = messages or []
+        self.queue = asyncio.Queue()
+        self.sent = []
+        self.closed = False
+
+    async def send(self, raw):
+        self.sent.append(raw)
+        if HEADER.unpack_from(raw)[3] == 7:
+            await self.queue.put(json_packet(8, {"code": self.code}, 1))
+            for message in self.messages:
+                await self.queue.put(message)
+
+    async def recv(self):
+        item = await self.queue.get()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        self.closed = True
+
+
+class FakeConnector:
+    def __init__(self, *remotes):
+        self.remotes = deque(remotes)
+        self.calls = []
+
+    def __call__(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        if self.remotes:
+            return self.remotes.popleft()
+        raise OSError("offline fixture exhausted")
+
+
+class FakeIpc:
+    def __init__(self):
+        self.commands = []
+        self.active = False
+        self.paused = False
+        self.path = "https://fixture.bilivideo.com/live.flv"
+        self.ready = True
+
+    async def command(self, command):
+        self.commands.append(command)
+        if not self.ready:
+            raise FileNotFoundError("fixture player has not launched")
+        if command[0] == "get_property":
+            return {"user-data/uosc_danmaku/live-api-version": 1,
+                    "user-data/uosc_danmaku/live-active": self.active,
+                    "idle-active": False, "path": self.path, "pause": self.paused}[command[1]]
+        if command[2] == "live-start":
+            self.active = True
+        elif command[2] == "live-stop":
+            self.active = False
+
+
+async def eventually(predicate, timeout=2):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition not reached")
+        await asyncio.sleep(0.01)
+
+
+class SessionTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows named-pipe transport")
+    async def test_real_windows_pipe_ignores_events_and_matches_response(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+        kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+        kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        kernel.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+        kernel.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+        kernel.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+        kernel.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        ipc = MpvPipe("mpv-lazy-bilibili-test-" + uuid.uuid4().hex)
+        ready = threading.Event()
+        requests, errors = [], []
+
+        def server():
+            handle = kernel.CreateNamedPipeW(ipc.path, 3, 0, 1, 65536, 65536, 0, None)
+            try:
+                if handle == wintypes.HANDLE(-1).value:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                ready.set()
+                if not kernel.ConnectNamedPipe(handle, None) and ctypes.get_last_error() != 535:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                data = ctypes.create_string_buffer(65536)
+                size = wintypes.DWORD()
+                if not kernel.ReadFile(handle, data, len(data), ctypes.byref(size), None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                requests.append(json.loads(data.raw[:size.value]))
+                response = b'{"event":"start-file"}\n{"request_id":99,"error":"success","data":false}\n{"request_id":1,"error":"success","data":true}\n'
+                if not kernel.WriteFile(handle, response, len(response), ctypes.byref(size), None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                kernel.FlushFileBuffers(handle)
+            except Exception as exc:
+                errors.append(exc)
+                ready.set()
+            finally:
+                kernel.DisconnectNamedPipe(handle)
+                kernel.CloseHandle(handle)
+        thread = threading.Thread(target=server, daemon=True)
+        thread.start()
+        self.assertTrue(await asyncio.to_thread(ready.wait, 2))
+        self.assertTrue(await ipc.command(["get_property", "pause"]))
+        await asyncio.to_thread(thread.join, 2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(requests[0]["command"], ["get_property", "pause"])
+
+    async def test_ack_before_player_launch_then_live_ipc_and_eof_cleanup(self):
+        owner, ipc = FakeOwner(), FakeIpc()
+        ipc.ready = False
+        remote = FakeRemote(messages=[json_packet(5, event())])
+        connector = FakeConnector(remote)
+        session = BilibiliSession("545068", "bilibili-test-1", "mpv-lazy-bilibili-test-1", validate_auth(auth()),
+                                  owner, connector=connector, ipc=ipc)
+        await session.start()
+        self.assertFalse(session.player_attached)
+        self.assertEqual(len(session.pending), 1)
+        ipc.ready = True
+        await eventually(lambda: session.sent == 1)
+        live = next(cmd for cmd in ipc.commands if len(cmd) > 2 and cmd[2] == "live-batch")
+        self.assertEqual(live[:4], ["script-message-to", "uosc_danmaku", "live-batch", "bilibili-test-1"])
+        self.assertEqual(json.loads(live[4])[0]["text"], "你好，直播")
+        auth_sent = json.loads(remote.sent[0][HEADER.size:])
+        self.assertEqual(auth_sent["protover"], 3)
+        self.assertEqual(auth_sent["key"], "temporary-test-token")
+        self.assertEqual(connector.calls[0][1]["user_agent_header"], auth()["userAgent"])
+        ipc.active = False  # uosc end-file handler clears live-active.
+        await asyncio.wait_for(session.task, 2)
+        self.assertTrue(remote.closed)
+        self.assertEqual(session.auth, {})
+        self.assertEqual(owner.messages[-1]["type"], "danmakuStopped")
+
+    async def test_auth_rejected_fails_before_handoff_and_closes(self):
+        remote = FakeRemote(code=-101)
+        session = BilibiliSession("545068", "bilibili-test-1", "mpv-lazy-bilibili-test-1", validate_auth(auth()),
+                                  FakeOwner(), connector=FakeConnector(remote), ipc=FakeIpc())
+        with self.assertRaises(RuntimeError):
+            await asyncio.wait_for(session.start(), 1)
+        self.assertTrue(remote.closed)
+        self.assertTrue(session.task.done())
+
+    async def test_bounded_queue_age_pause_unicode_and_batch_bytes(self):
+        session = BilibiliSession("545068", "bilibili-test-1", "mpv-lazy-bilibili-test-1", validate_auth(auth()), FakeOwner(), ipc=FakeIpc())
+        session.pending.append((time.monotonic() - 10, {"text": "old"}))
+        self.assertEqual(session.take_batch(), [])
+        self.assertEqual(session.dropped, 1)
+        for i in range(MAX_PENDING + 50):
+            session.enqueue({"text": "🙂" * 160, "nick": "观" * 48, "color": 0xFFFFFF})
+        self.assertEqual(len(session.pending), MAX_PENDING)
+        self.assertEqual(session.dropped, 51)
+        batch = session.take_batch()
+        self.assertLess(len(json.dumps(batch, ensure_ascii=False, separators=(",", ":")).encode()), 60000)
+        self.assertLessEqual(len(batch), 120)
+        self.assertEqual(session.take_batch(paused=True), [])
+        self.assertEqual(len(session.pending), 0)
+
+    async def test_disconnect_reconnect_and_cancel_stops_heartbeat(self):
+        first, second = FakeRemote(), FakeRemote(messages=[json_packet(5, event("重连后"))])
+        connector = FakeConnector(first, second)
+        session = BilibiliSession("545068", "bilibili-test-1", "mpv-lazy-bilibili-test-1", validate_auth(auth()), FakeOwner(), connector=connector, ipc=FakeIpc())
+        await session.start()
+        await first.queue.put(OSError("fixture disconnected"))
+        await eventually(lambda: session.sent == 1)
+        self.assertGreaterEqual(session.reconnects, 1)
+        self.assertEqual(len(connector.calls), 2)
+        self.assertTrue(first.closed)
+        await session.stop()
+        self.assertTrue(second.closed)
+        self.assertEqual(len(session.pending), 0)
+
+    async def test_auth_refresh_requires_owner_matching_request(self):
+        owner = FakeOwner()
+        session = BilibiliSession("545068", "bilibili-test-1", "mpv-lazy-bilibili-test-1", validate_auth(auth()), owner, ipc=FakeIpc())
+        manager = BilibiliDanmakuManager()
+        manager.sessions[session.session_id] = session
+        task = asyncio.create_task(session.refresh_auth())
+        await eventually(lambda: bool(owner.messages))
+        request = owner.messages[0]
+        reply = {"type": "updateDanmakuAuth", "provider": "bilibili", "sessionId": session.session_id,
+                 "requestId": request["requestId"], "auth": auth()}
+        manager.update_auth(reply, FakeOwner())
+        self.assertFalse(task.done())
+        manager.update_auth({**reply, "requestId": "stale"}, owner)
+        self.assertFalse(task.done())
+        manager.update_auth(reply, owner)
+        await task
+        self.assertEqual(request["provider"], "bilibili")
+        self.assertIsNone(session.auth_refresh)
+
+    async def test_manager_isolates_players_and_owners_and_omits_secrets(self):
+        created = []
+        def factory(*args):
+            session = BilibiliSession(*args, connector=FakeConnector(FakeRemote()), ipc=FakeIpc())
+            created.append(session)
+            return session
+        manager = BilibiliDanmakuManager(session_factory=factory)
+        owner = FakeOwner()
+        ack = await manager.start(start_request(), owner)
+        self.assertEqual((ack["provider"], ack["apiVersion"]), ("bilibili", 2))
+        with self.assertRaises(ValueError):
+            await manager.start(start_request(), owner)
+        snapshot = json.dumps(manager.snapshots())
+        self.assertNotIn("temporary-test-token", snapshot)
+        self.assertNotIn("temporary-test-client", snapshot)
+        await manager.stop("bilibili-test-1", FakeOwner())
+        self.assertEqual(len(manager.sessions), 1)
+        await manager.close()
+        self.assertTrue(created[0].task.done())
+
+    async def test_bridge_bilibili_hello_does_not_replace_telegram_range_owner(self):
+        state = BridgeState(1, 1024, "mpv.exe", "127.0.0.1", 8999)
+        telegram, bili = FakeOwner(), FakeOwner()
+        await state.set_ws(telegram)
+        await state.handle_ws_message(json.dumps({"type": "hello", "protocol": 2}), bili)
+        self.assertIs(state.ws, telegram)
+        await state.handle_ws_message(json.dumps({"type": "registerVideo", "url": "https://web.telegram.org/stream/1"}), telegram)
+        self.assertIs(state.ws, telegram)
+        self.assertEqual(state.video.url, "https://web.telegram.org/stream/1")
+
+    async def test_stop_arrives_during_authentication_without_orphan(self):
+        class SlowRemote(FakeRemote):
+            async def send(self, raw):
+                self.sent.append(raw)  # Authentication remains unanswered.
+        remote = SlowRemote()
+        owner = FakeOwner()
+        def factory(*args):
+            return BilibiliSession(*args, connector=FakeConnector(remote), ipc=FakeIpc())
+        manager = BilibiliDanmakuManager(session_factory=factory)
+        startup = asyncio.create_task(manager.start(start_request(), owner))
+        await eventually(lambda: "bilibili-test-1" in manager.sessions)
+        session = manager.sessions["bilibili-test-1"]
+        await manager.stop(session.session_id, owner)
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(startup, 1)
+        self.assertEqual(manager.sessions, {})
+        self.assertTrue(session.task.done())
+
+
+if __name__ == "__main__":
+    unittest.main()

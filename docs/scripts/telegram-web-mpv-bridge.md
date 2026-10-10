@@ -6,6 +6,8 @@
 
 当前发布版本：`v0.2.0`。
 
+本仓库新增 Bilibili 直播弹幕客户端，内置于专用 `bilibili-live-bridge.exe`，使用独立的 `9001/9002` 端口，与原 `8999/9000` 中继并存，安装步骤见 [Bilibili 直播弹幕交接说明](./bilibili-live-danmaku.md)。以下 `v0.2.0` 的 Telegram HLS、斗鱼 Node helper 和双 EXE 说明对应独立上游发布包；本仓库新增源码构建仅输出 Bilibili 专用 EXE。
+
 ## 这个工具是做什么的
 
 它解决两类浏览器到 mpv 的交接问题：
