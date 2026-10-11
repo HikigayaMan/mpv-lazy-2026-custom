@@ -23,9 +23,9 @@ options = {
     cookie_file = "",
     -- 使用 fps 视频滤镜，大幅提升弹幕平滑度。默认禁用
     vf_fps = false,
-    -- 设置要使用的 fps 滤镜参数
+    -- 保留旧 fps 配置兼容读取；视频与直播的滤镜目标统一由菜单 live_fps_mode 决定
     fps = "60/1.001",
-    -- 直播弹幕专用帧率模式：auto/60/80/120/display
+    -- 视频与直播弹幕共用帧率模式：auto/60/80/120/display（保留原键名）
     live_fps_mode = "auto",
     -- 跨进程样式默认值文件；留空时使用 ~~ /script-opts/uosc_danmaku_style.json
     style_path = "",

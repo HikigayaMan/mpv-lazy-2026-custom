@@ -204,13 +204,17 @@ function set_danmaku_style_value(key, value)
         return false
     end
     options[key] = value
-    return true, save_danmaku_style_defaults()
+    local saved = save_danmaku_style_defaults()
+    if refresh_danmaku_style then
+        refresh_danmaku_style(key)
+    end
+    return true, saved
 end
 
 function set_live_fps_mode(mode)
     local changed, saved = set_danmaku_style_value("live_fps_mode", tostring(mode or ""))
     if not changed then return false end
-    if refresh_live_danmaku_style then
+    if not refresh_danmaku_style and refresh_live_danmaku_style then
         refresh_live_danmaku_style()
     end
     if sync_smooth_fps_filter then
@@ -236,7 +240,7 @@ end)
 mp.register_script_message("set-live-fps-mode", function(mode)
     local changed, saved = set_live_fps_mode(mode)
     if changed and not saved and show_message then
-        show_message("直播帧率已更改，自动保存失败；请检查配置目录是否可写", 3)
+        show_message("弹幕帧率已更改，自动保存失败；请检查配置目录是否可写", 3)
     end
 end)
 

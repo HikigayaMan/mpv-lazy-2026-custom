@@ -81,18 +81,15 @@ local function has_smooth_fps_filter()
 end
 
 local function smooth_fps_value()
-    if is_live_danmaku_active and is_live_danmaku_active() then
-        local mode = tostring(options.live_fps_mode or "auto")
-        local display_fps = mp.get_property_number("display-fps", 0) or 0
-        if mode == "display" then
-            return tostring(math.max(60, math.floor(display_fps + 0.5)))
-        end
-        if mode == "60" or mode == "80" or mode == "120" then
-            return mode
-        end
-        return tostring(math.max(60, math.min(120, math.floor(display_fps + 0.5))))
+    -- Keep the established option/API name, but apply the user's choice equally
+    -- to static video and live comments in both rendering modes.
+    local mode = tostring(options.live_fps_mode or "auto")
+    local display_fps = mp.get_property_number("display-fps", 0) or 0
+    if mode == "display" then
+        return tostring(math.max(60, math.floor(display_fps + 0.5)))
     end
-    return tostring(options.fps)
+    if mode == "60" or mode == "80" or mode == "120" then return mode end
+    return tostring(math.max(60, math.min(120, math.floor(display_fps + 0.5))))
 end
 
 local function current_smooth_fps_value()
@@ -116,13 +113,10 @@ function sync_smooth_fps_filter(skip_history_lookup)
     else
         visible = get_danmaku_visibility()
     end
-    local should_enable = is_ass_render_mode() and options.vf_fps and visible
+    local should_enable = options.vf_fps and visible
     if should_enable then
-        local display_fps = mp.get_property_number('display-fps')
         local suspended = mp.get_property_bool(SMOOTH_FPS_SUSPEND, false)
-        local live = is_live_danmaku_active and is_live_danmaku_active()
         should_enable = not suspended and not has_non_smooth_video_filter()
-            and (live or not (display_fps and display_fps < 58))
     end
 
     if should_enable then
@@ -143,6 +137,8 @@ function sync_smooth_fps_filter(skip_history_lookup)
         syncing_smooth_fps = true
         mp.commandv("vf", "remove", "@danmaku_smooth")
         syncing_smooth_fps = false
+    end
+    if not should_enable then
         mp.set_property_native("user-data/uosc_danmaku/live-fps-target", "")
     end
 end
@@ -287,6 +283,26 @@ local function render_ass_danmaku()
         load_ass_subtitle(path, signature)
         sync_smooth_fps_filter()
     end
+end
+
+-- Both renderers consume the same cached sources. A style edit must rebuild
+-- static timing and lanes before repainting, including while playback is paused.
+-- This refresh never changes the user's visibility preference or fetches a source.
+function refresh_danmaku_style(key)
+    if key == "live_fps_mode" then
+        sync_smooth_fps_filter()
+        return true
+    end
+    if is_live_danmaku_active and is_live_danmaku_active() then
+        return refresh_live_danmaku_style()
+    end
+    if COMMENTS == nil then return false end
+    if DANMAKU and DANMAKU.sources and convert_danmaku_to_ass_events then
+        convert_danmaku_to_ass_events(true)
+    end
+    ass_loaded_signature = nil
+    if ENABLED then render() end
+    return true
 end
 
 local function realtime_position_text(event, pos, displayarea)
@@ -476,16 +492,7 @@ function show_danmaku_func(live)
     if not pause then
         start_time_observer()
     end
-    if options.vf_fps then
-        local display_fps = mp.get_property_number('display-fps')
-        local video_fps = mp.get_property_number('estimated-vf-fps')
-        if (display_fps and display_fps < 58) or (video_fps and video_fps > 58) then
-            return
-        end
-        if not filter_state("danmaku", "fps") then
-            mp.commandv("vf", "append", string.format("@danmaku:fps=fps=%s", options.fps))
-        end
-    end
+    sync_smooth_fps_filter()
 end
 
 function hide_danmaku_func(live)

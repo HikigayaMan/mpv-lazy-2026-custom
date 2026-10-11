@@ -735,8 +735,9 @@ local menu_items_config = {
         scope = { min = 0, max = 1 }, footnote = "输入范围：0（完全透明）到1（不透明）", },
     displayarea = { title = "弹幕显示范围", hint = options.displayarea, original = options.displayarea,
         scope = { min = 0.0, max = 1.0 }, footnote = "显示范围(0.0-1.0)", },
-    live_fps_mode = { title = "直播帧率", hint = options.live_fps_mode, original = options.live_fps_mode,
-        choices = {"auto", "60", "80", "120", "display"}, footnote = "auto / 60 / 80 / 120 / display", },
+    live_fps_mode = { title = "弹幕帧率", hint = options.live_fps_mode, original = options.live_fps_mode,
+        choices = {"auto", "60", "80", "120", "display"},
+        footnote = "视频与直播共用：auto / 60 / 80 / 120 / display；其他视频滤镜启用时不叠加", },
 }
 -- 创建一个包含键顺序的表，这是样式菜单的排布顺序
 local ordered_keys = {"bold", "fontsize", "outline", "shadow", "scrolltime", "opacity", "displayarea", "live_fps_mode"}
@@ -1495,11 +1496,6 @@ local function apply_menu_style_value(key, value, status)
     open_style_menu(key, saved and status or "save-error")
     if not saved then
         show_message("本次样式更改已生效，自动保存失败；请检查配置目录是否可写", 3)
-    end
-    if key ~= "live_fps_mode" then
-        if not refresh_live_danmaku_style() and (key == "fontsize" or key == "scrolltime") then
-            load_danmaku(true, true)
-        end
     end
     return true
 end

@@ -679,7 +679,12 @@ function convert_danmaku_to_ass_events(force)
 
     local res_x = 1920
     local res_y = 1080
-    local layout_res_y = math.floor(res_y * (tonumber(options.displayarea) or 1.0))
+    local displayarea = tonumber(options.displayarea) or 1.0
+    if displayarea <= 0 then
+        COMMENTS = {}
+        return
+    end
+    local layout_res_y = math.floor(res_y * displayarea)
     layout_res_y = math.max(fontsize, math.min(res_y, layout_res_y))
 
     local roll_array = DanmakuArray:new(res_x, layout_res_y, fontsize)
@@ -716,7 +721,6 @@ function convert_danmaku_to_ass_events(force)
         local danmaku_type = d.type
         local clean_text = ch_convert_cached(decode_html_entities(d.text))
         local text = ass_escape(clean_text)
-                    :gsub("x(%d+)$", "{\\b1\\i1}x%1")
 
         -- 颜色从十进制转为 BGR Hex
         local color = math.max(0, math.min(d.color or 0xFFFFFF, 0xFFFFFF))
@@ -778,9 +782,9 @@ function convert_danmaku_to_ass_events(force)
                 source = d.source,
             }
             table.insert(ass_events, event)
-            COMMENTS = ass_events
         end
     end
+    COMMENTS = ass_events
 end
 
 -- Build a transient live stream from already validated input.  It deliberately
@@ -790,7 +794,9 @@ function build_live_ass_events(danmakus)
     local fontsize = tonumber(options.fontsize) or 50
     local scrolltime = tonumber(options.scrolltime) or 15
     local res_x, res_y = 1920, 1080
-    local layout_res_y = math.floor(res_y * (tonumber(options.displayarea) or 1.0))
+    local displayarea = tonumber(options.displayarea) or 1.0
+    if displayarea <= 0 then return {} end
+    local layout_res_y = math.floor(res_y * displayarea)
     layout_res_y = math.max(fontsize, math.min(res_y, layout_res_y))
     local roll_array = DanmakuArray:new(res_x, layout_res_y, fontsize)
     local events = {}

@@ -7,6 +7,7 @@
 - `smoke_test_bilibili_live.py`：通过真实 Windows IPC 和 Lua 渲染验证模拟直播弹幕。
 - `smoke_test_stream_quality.py`：通过真实 MPV 验证品质列表、连续切流、独立音轨和弹幕会话保留；使用本地 HTTP 源，运行方式见 [流品质说明](../../docs/scripts/stream-quality.md)。
 - `smoke_test_settings_persistence.py`：使用隔离配置验证右键设置自动保存和重启恢复，运行方式见 [设置保存说明](../../docs/scripts/settings-persistence.md)。
+- `smoke_test_static_danmaku_settings.py`：在真实普通视频中检验弹幕样式修改、暂停刷新、切换视频及重启恢复，同时核对不同码率的自动画面预设。
 
 打包脚本负责结构验证，播放验证脚本负责行为验证。
 

@@ -22,7 +22,7 @@
 | `portable_config/scripts/uosc_danmaku/sites/` | 站点适配，例如 Bilibili、巴哈姆特、爱奇艺、芒果、腾讯、优酷。 |
 | `portable_config/scripts/uosc_danmaku/modules/` | 菜单、渲染、解析、哈希、压缩、工具函数等内部模块。 |
 | `portable_config/scripts/uosc_danmaku/modules/live.lua` | 接收有界实时消息批次，并生成动态 ASS 弹幕。 |
-| `portable_config/scripts/uosc_danmaku/modules/style.lua` | 保存/加载跨进程样式和直播帧率偏好。 |
+| `portable_config/scripts/uosc_danmaku/modules/style.lua` | 保存/加载跨进程样式和视频、直播共用的弹幕帧率偏好。 |
 | `portable_config/scripts/douyu_danmaku.lua` | 斗鱼弹幕兼容路由器；优先接入 uosc，必要时才使用轻量 ASS 兜底。 |
 | `portable_config/scripts/uosc_danmaku/dicts/` | 简繁转换字典。 |
 | `portable_config/scripts/uosc_danmaku/README.md` | 插件上游说明。 |
@@ -92,7 +92,7 @@ history_path=~~/_cache/danmaku-history.json
 
 ### Bilibili 直播弹幕
 
-PC 浏览器的 External Player 可将 B 站直播的实时文字弹幕交给本机中继，再通过每次播放独立的 IPC pipe 接入本插件。使用同一套字体、透明度、显示区域、速度和直播帧率设置，`j` 可反复隐藏／显示，暂停时不积压消息。
+PC 浏览器的 External Player 可将 B 站直播的实时文字弹幕交给本机中继，再通过每次播放独立的 IPC pipe 接入本插件。与普通视频使用同一套字体、透明度、显示区域、速度和弹幕帧率设置，`j` 可反复隐藏／显示，暂停时不积压消息。
 
 本功能需要同步更新本仓库用户脚本和 Bilibili 专用中继（`bilibili-live-bridge.exe`，或本机源码环境）。完整步骤见 [Bilibili 直播弹幕安装与交接说明](./bilibili-live-danmaku.md)。
 
@@ -106,11 +106,13 @@ PC 浏览器的 External Player 可将 B 站直播的实时文字弹幕交给本
 
 进入 `工具 > 弹幕 > 弹幕设置` 后，可以实时调整：
 
-- 字体、字号、粗体、描边和阴影
+- 字号、粗体、描边和阴影
 - 不透明度
 - 弹幕速度
 - 显示区域
-- 直播帧率：`auto / 60 / 80 / 120 / display`
+- 弹幕帧率：`auto / 60 / 80 / 120 / display`，普通视频和直播共用
+
+普通视频修改任意样式后，会从已加载的弹幕重新生成排布并立即刷新字幕，暂停时也会更新。粗体关闭同样作用于合并重复弹幕，显示区域和滚动速度的更改不会继续沿用旧排布。字体名称可通过配置文件设置。
 
 合法样式修改现在会自动保存，新拉起的 mpv 也会读取同一套设置。“立即保存当前样式”可用于手动重试。保存文件为：
 
@@ -120,9 +122,9 @@ portable_config/script-opts/uosc_danmaku_style.json
 
 它是本机运行时偏好，不进入 Git 和配置发布包。
 
-### 直播帧率与 RIFE
+### 弹幕帧率与 RIFE
 
-弹幕看起来是否流畅，不只取决于视频本身是不是 60 fps，还取决于 ASS 位置更新和 mpv 渲染节奏。直播模式会在没有冲突时使用独立的 `@danmaku_smooth` 帧率滤镜。
+弹幕看起来是否流畅，不只取决于视频本身是不是 60 fps，还取决于 ASS 位置更新和 mpv 渲染节奏。普通视频和直播的 ASS 模式会在没有冲突时使用独立的 `@danmaku_smooth` 帧率滤镜。保留原有 `live_fps_mode` 配置键，以兼容已有偏好文件。
 
 - `auto`：按显示器/视频状态选择安全值，推荐日常使用。
 - `60 / 80 / 120`：手动指定弹幕平滑目标。
