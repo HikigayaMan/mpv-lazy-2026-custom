@@ -4,11 +4,23 @@ Local bridge for the legacy Telegram Web range userscript and Bilibili live danm
 
 ## Bilibili Live Danmaku
 
-Use this checkout's `external_player.js`, updated `uosc_danmaku` configuration, and this bridge together. The browser resolves the canonical live room and passes short-lived chat authentication to the loopback bridge; `bilibili_danmaku.py` connects to Bilibili and forwards bounded text batches to a per-launch MPV Windows IPC pipe. Gift/system messages are omitted, pause drops queued messages, and player exit or file change stops the session. Keeping the page open permits authentication refresh on reconnect.
+Use this checkout's `external_player.js` (version `1.2.14.12`), updated `uosc_danmaku` and `quality-menu.lua`, and this bridge together. The browser resolves the canonical live room and passes short-lived chat authentication to the loopback bridge; `bilibili_danmaku.py` connects to Bilibili and forwards bounded text batches to a per-launch MPV Windows IPC pipe. Gift/system messages are omitted, pause drops queued messages, and player exit or an unrelated file change stops the session. Keeping the page open permits authentication refresh on reconnect.
+
+The browser also hands account-available stream qualities to MPV. A same-room quality switch keeps the danmaku session and visibility choice, drops messages received during loading, and clears the old playback timeline. The quality menu waits for the bridge to acknowledge the new stream before permitting another switch. Invalid, failed, or expired transitions still stop the session; the authorization is limited to one transition and 15 seconds. Signed stream URLs remain in memory and are not included in session diagnostics.
 
 Install `requirements.txt` in `.venv` and run `start_browser_relay.ps1 -Bilibili -Source`, or build `bilibili-live-bridge.exe` with `build_windows.ps1 -InstallDependencies`. The dedicated Bilibili sidecar uses WebSocket 9001 and HTTP 9002 and runs alongside the existing `browser-media-bridge.exe` on 8999/9000. It includes the Bilibili client and requires no Node installation. See [the complete Chinese installation guide](../../docs/scripts/bilibili-live-danmaku.md).
 
 This checkout's Python source also retains the legacy Telegram `/stream/current` implementation; the separate upstream media/HLS/Douyu EXE remains in place for those workflows.
+
+Offline quality and danmaku checks, from the repository root:
+
+```powershell
+node --test tools/telegram-web-mpv-bridge/test_bilibili_live_handoff.mjs tools/telegram-web-mpv-bridge/test_bilibili_stream_quality.mjs
+.\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe -m unittest discover -s tools\telegram-web-mpv-bridge -p "test_*.py"
+.\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe -m unittest discover -s tools\release -p "test_quality_menu_lua.py"
+```
+
+Lua behavior checks require the development dependency `lupa`.
 
 ## What It Does
 

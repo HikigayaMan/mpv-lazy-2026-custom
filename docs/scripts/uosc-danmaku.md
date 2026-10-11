@@ -112,7 +112,7 @@ PC 浏览器的 External Player 可将 B 站直播的实时文字弹幕交给本
 - 显示区域
 - 直播帧率：`auto / 60 / 80 / 120 / display`
 
-选择“保存当前样式为跨进程默认”后，新拉起的 mpv 也会读取同一套设置。保存文件为：
+合法样式修改现在会自动保存，新拉起的 mpv 也会读取同一套设置。“立即保存当前样式”可用于手动重试。保存文件为：
 
 ```text
 portable_config/script-opts/uosc_danmaku_style.json
@@ -151,7 +151,7 @@ portable_config/script-opts/uosc_danmaku_style.json
 1. 先在弹幕设置中选择 `auto` 或 `display`。
 2. 查看统计信息里是否存在 `@danmaku_smooth`，或当前是否已经由 RIFE 输出高帧率。
 3. 若 GPU/渲染队列已满，提高弹幕帧率只会增加压力，应降低到 `60`。
-4. 样式修改后保存为跨进程默认，再重新从网页拉起一次直播。
+4. 样式修改后确认没有自动保存失败提示，再重新从网页拉起一次直播。
 
 ### 斗鱼只有视频、没有弹幕
 

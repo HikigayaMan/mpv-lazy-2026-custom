@@ -34,6 +34,7 @@ TEST = {
     build_count = 0, visibility_writes = 0, saved_visibility = true,
     props = {
         ["time-pos"] = 100, pause = false,
+        path = "https://fixture.bilivideo.com/old.flv",
         ["osd-width"] = 1920, ["osd-height"] = 1080,
         ["display-fps"] = 60, ["estimated-vf-fps"] = 60,
         vf = {}, ["track-list"] = {},
@@ -41,6 +42,8 @@ TEST = {
 }
 
 mp = {}
+function mp.get_time() return TEST.clock end
+os.time = function() return 1800000000 + math.floor(TEST.clock) end
 function mp.get_property_native(name, fallback)
     local value = TEST.props[name]
     if value == nil then return fallback end
@@ -133,8 +136,8 @@ function TEST.fire_property(name, value)
     end
     for _, callback in ipairs(snapshot) do callback(name, value) end
 end
-function TEST.fire_event(name)
-    for _, callback in ipairs(TEST.events[name] or {}) do callback({}) end
+function TEST.fire_event(name, event)
+    for _, callback in ipairs(TEST.events[name] or {}) do callback(event or {}) end
 end
 function TEST.pending_timers()
     local count = 0
@@ -234,9 +237,12 @@ class LiveDanmakuLuaTests(unittest.TestCase):
         self.message("live-batch", session, json.dumps(items, ensure_ascii=False))
 
     def test_start_batch_render_stop_preserves_static_sources(self) -> None:
+        self.test_state.props["user-data/uosc_danmaku/live-switch-ack"] = self.lua.table_from({"sessionId": "old-session", "generation": 7})
         self.start()
         self.assertTrue(self.state.active)
         self.assertEqual(self.state.session_id, SESSION)
+        self.assertEqual(self.test_state.props["user-data/uosc_danmaku/live-session"], SESSION)
+        self.assertIsNone(self.test_state.props["user-data/uosc_danmaku/live-switch-ack"])
         self.assertTrue(self.globals.ENABLED)
         self.assertEqual(self.test_state.props["user-data/uosc_danmaku/live-api-version"], 1)
         self.batch([{"text": "你好弹幕", "nick": "观众", "color": 0x112233}])
@@ -249,8 +255,11 @@ class LiveDanmakuLuaTests(unittest.TestCase):
         self.assertTrue(self.lua.eval("rawequal(COMMENTS, STATIC_COMMENTS)"))
         self.assertTrue(self.lua.eval("rawequal(DANMAKU.sources, STATIC_SOURCES)"))
         self.assertEqual(self.test_state.visibility_writes, 0)
+        self.test_state.props["user-data/uosc_danmaku/live-switch-ack"] = self.lua.table_from({"sessionId": SESSION, "generation": 1})
         self.message("live-stop", SESSION)
         self.assertFalse(self.state.active)
+        self.assertEqual(self.test_state.props["user-data/uosc_danmaku/live-session"], "")
+        self.assertIsNone(self.test_state.props["user-data/uosc_danmaku/live-switch-ack"])
         self.assertFalse(self.globals.ENABLED)
         self.assertEqual(len(self.state["items"]), 0)
         self.assertEqual(len(self.state.events), 0)
@@ -507,6 +516,127 @@ class LiveDanmakuLuaTests(unittest.TestCase):
         self.assertEqual(len(self.state["items"]), 0)
         self.assertFalse(self.test_state.overlay_visible())
         self.assertFalse(self.globals.toggle_live_danmaku())
+
+    def switch_marker(self, **overrides):
+        marker = {"generation": 1, "provider": "bilibili", "sessionId": SESSION,
+                  "from": "https://fixture.bilivideo.com/old.flv", "to": "https://fixture.bilivideo.com/new.flv",
+                  "startedAt": self.test_state.clock, "expiresAt": self.lua.eval("os.time()") + 15,
+                  "stage": "loading"}
+        marker.update(overrides)
+        result = self.lua.table_from(marker, recursive=True)
+        self.test_state.props["user-data/quality-menu/stream-switch"] = result
+        return result
+
+    def test_authorized_quality_switch_clears_old_events_and_accepts_new_stream(self) -> None:
+        self.start()
+        self.batch([{"text": "old timeline"}])
+        self.test_state.advance(0.3)
+        marker = self.switch_marker()
+        self.test_state.fire_event("end-file", self.lua.table_from({"reason": "stop"}))
+        self.assertTrue(self.state.active)
+        self.assertTrue(self.globals.ENABLED)
+        self.assertEqual(len(self.state["items"]), 0)
+        self.assertFalse(self.test_state.overlay_visible())
+        self.batch([{"text": "loading discarded"}])
+        self.assertEqual(len(self.state["items"]), 0)
+        self.test_state.props.path = marker.to
+        self.test_state.props["time-pos"] = 0
+        marker.stage = "loaded"
+        self.test_state.fire_event("file-loaded")
+        self.assertTrue(self.state.active)
+        self.assertEqual(self.state.session_id, SESSION)
+        self.batch([{"text": "new timeline"}])
+        self.test_state.advance(0.3)
+        self.assertEqual(self.state.events[1].clean_text, "new timeline")
+        self.assertLess(self.state["items"][1].time, 1)
+        self.assertTrue(self.test_state.overlay_visible())
+        # A consumed generation cannot authorize another ordinary stop.
+        self.test_state.fire_event("end-file", self.lua.table_from({"reason": "stop"}))
+        self.assertFalse(self.state.active)
+
+    def test_same_path_reload_preserves_hidden_choice(self) -> None:
+        self.start()
+        self.globals.toggle_live_danmaku()
+        marker = self.switch_marker(to=self.test_state.props.path)
+        self.test_state.fire_event("end-file", self.lua.table_from({"reason": "restart"}))
+        marker.stage = "loaded"
+        self.test_state.fire_event("file-loaded")
+        self.assertTrue(self.state.active)
+        self.assertFalse(self.globals.ENABLED)
+        self.batch([{"text": "hidden remains hidden"}])
+        self.assertEqual(len(self.state["items"]), 0)
+
+    def test_authorized_switch_survives_temporarily_missing_path_during_unload(self) -> None:
+        for missing_path in (None, ""):
+            for reason in ("stop", "restart"):
+                with self.subTest(path=missing_path, reason=reason):
+                    self.setUp()
+                    self.start()
+                    self.batch([{"text": "old timeline"}])
+                    self.test_state.advance(0.3)
+                    marker = self.switch_marker()
+                    self.test_state.advance(0.038)
+                    self.test_state.props.path = missing_path
+                    self.test_state.fire_event("end-file", self.lua.table_from({"reason": reason}))
+                    self.assertTrue(self.state.active)
+                    self.assertEqual(self.state.session_id, SESSION)
+                    self.assertEqual(len(self.state["items"]), 0)
+                    self.batch([{"text": "discard while loading"}])
+                    self.assertEqual(len(self.state["items"]), 0)
+                    self.test_state.advance(2.384)
+                    self.test_state.props.path = marker.to
+                    self.test_state.props["time-pos"] = 0
+                    # Cross-script ordering can leave stage at loading when
+                    # this module handles file-loaded, as seen in the trace.
+                    self.test_state.fire_event("file-loaded")
+                    self.assertTrue(self.state.active)
+                    self.assertTrue(self.globals.ENABLED)
+                    self.batch([{"text": "new timeline after empty path"}])
+                    self.test_state.advance(0.3)
+                    self.assertEqual(self.state.events[1].clean_text, "new timeline after empty path")
+                    self.assertLess(self.state["items"][1].time, 1)
+
+    def test_invalid_expired_or_unrelated_switch_does_not_keep_session(self) -> None:
+        cases = [("stop", {"sessionId": "bilibili-other"}), ("stop", {"provider": "other"}),
+                 ("stop", {"from": "https://fixture.bilivideo.com/unrelated.flv"}),
+                 ("stop", {"expiresAt": 1800000000}), ("stop", {"expiresAt": 1800000100}),
+                 ("stop", {"startedAt": 5}), ("stop", {"generation": float("inf")}),
+                 ("stop", {"to": "C:/local-other-video.mkv"}),
+                 ("stop", {"stage": "failed"}), ("error", {}), ("eof", {})]
+        for reason, overrides in cases:
+            for path in ("https://fixture.bilivideo.com/old.flv", None, ""):
+                with self.subTest(reason=reason, overrides=overrides, path=path):
+                    self.setUp()
+                    self.start()
+                    self.switch_marker(**overrides)
+                    self.test_state.props.path = path
+                    self.test_state.fire_event("end-file", self.lua.table_from({"reason": reason}))
+                    self.assertFalse(self.state.active)
+                    self.assertEqual(self.test_state.props["user-data/uosc_danmaku/live-session"], "")
+
+    def test_authorized_marker_does_not_allow_a_third_path_during_unload(self) -> None:
+        self.start()
+        self.switch_marker()
+        self.test_state.props.path = "https://fixture.bilivideo.com/different-room.flv"
+        self.test_state.fire_event("end-file", self.lua.table_from({"reason": "stop"}))
+        self.assertFalse(self.state.active)
+        self.assertEqual(self.test_state.props["user-data/uosc_danmaku/live-session"], "")
+
+    def test_pending_switch_timeout_and_wrong_loaded_path_stop_session(self) -> None:
+        self.start()
+        self.switch_marker()
+        self.test_state.fire_event("end-file", self.lua.table_from({"reason": "stop"}))
+        self.test_state.advance(15.1)
+        self.assertFalse(self.state.active)
+        for wrong_path in ("https://fixture.bilivideo.com/different-room.flv", None, ""):
+            with self.subTest(loaded_path=wrong_path):
+                self.setUp()
+                self.start()
+                self.switch_marker()
+                self.test_state.fire_event("end-file", self.lua.table_from({"reason": "stop"}))
+                self.test_state.props.path = wrong_path
+                self.test_state.fire_event("file-loaded")
+                self.assertFalse(self.state.active)
 
 
 if __name__ == "__main__":

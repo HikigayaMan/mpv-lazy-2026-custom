@@ -1,11 +1,14 @@
 # 发布打包与播放验证脚本
 
-本目录包含两个独立脚本：
+本目录包含发布工具和播放验证脚本：
 
 - `package_release.py`：生成 GitHub Release 用的分类压缩包。
 - `smoke_test_mpv.py`：启动发布包里的 `mpv.exe` 播放视频，做真实播放冒烟验证。
+- `smoke_test_bilibili_live.py`：通过真实 Windows IPC 和 Lua 渲染验证模拟直播弹幕。
+- `smoke_test_stream_quality.py`：通过真实 MPV 验证品质列表、连续切流、独立音轨和弹幕会话保留；使用本地 HTTP 源，运行方式见 [流品质说明](../../docs/scripts/stream-quality.md)。
+- `smoke_test_settings_persistence.py`：使用隔离配置验证右键设置自动保存和重启恢复，运行方式见 [设置保存说明](../../docs/scripts/settings-persistence.md)。
 
-两者职责不同：打包脚本负责“结构验证”，播放验证脚本负责“行为验证”。
+打包脚本负责结构验证，播放验证脚本负责行为验证。
 
 ## `package_release.py`：分类打包脚本
 

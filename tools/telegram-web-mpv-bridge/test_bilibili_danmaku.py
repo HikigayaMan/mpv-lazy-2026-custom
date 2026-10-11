@@ -193,6 +193,10 @@ class FakeIpc:
         self.paused = False
         self.path = "https://fixture.bilivideo.com/live.flv"
         self.ready = True
+        self.idle = False
+        self.session_id = ""
+        self.switch_marker = None
+        self.switch_ack = None
 
     async def command(self, command):
         self.commands.append(command)
@@ -201,11 +205,19 @@ class FakeIpc:
         if command[0] == "get_property":
             return {"user-data/uosc_danmaku/live-api-version": 1,
                     "user-data/uosc_danmaku/live-active": self.active,
-                    "idle-active": False, "path": self.path, "pause": self.paused}[command[1]]
+                    "user-data/uosc_danmaku/live-session": self.session_id,
+                    "user-data/quality-menu/stream-switch": self.switch_marker,
+                    "user-data/uosc_danmaku/live-switch-ack": self.switch_ack,
+                    "idle-active": self.idle, "path": self.path, "pause": self.paused}[command[1]]
+        if command[0] == "set_property" and command[1] == "user-data/uosc_danmaku/live-switch-ack":
+            self.switch_ack = command[2]
+            return
         if command[2] == "live-start":
             self.active = True
+            self.session_id = command[3]
         elif command[2] == "live-stop":
             self.active = False
+            self.session_id = ""
 
 
 async def eventually(predicate, timeout=2):
@@ -353,6 +365,161 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(session.start(), 1)
         self.assertTrue(remote.closed)
         self.assertTrue(session.task.done())
+
+    async def running_player_session(self):
+        ipc, remote = FakeIpc(), FakeRemote()
+        session = BilibiliSession("545068", "bilibili-test-1", "mpv-lazy-bilibili-test-1", validate_auth(auth()),
+                                  FakeOwner(), connector=FakeConnector(remote), ipc=ipc)
+        await session.start()
+        await eventually(lambda: any(cmd == ["get_property", "user-data/quality-menu/stream-switch"] for cmd in ipc.commands))
+        self.addAsyncCleanup(session.stop)
+        return session, ipc, remote
+
+    def player_switch_marker(self, session, ipc, **overrides):
+        marker = {"generation": 1, "provider": "bilibili", "sessionId": session.session_id,
+                  "from": ipc.path, "to": "https://fixture.bilivideo.com/new-quality.flv",
+                  "startedAt": 1.0, "expiresAt": int(time.time()) + 15, "stage": "loading"}
+        marker.update(overrides)
+        ipc.switch_marker = marker
+        return marker
+
+    async def test_authorized_switch_survives_idle_and_forwards_only_new_messages(self):
+        session, ipc, remote = await self.running_player_session()
+        marker = self.player_switch_marker(session, ipc)
+        ipc.path = marker["to"]
+        ipc.idle = True
+        await remote.queue.put(json_packet(5, event("old stream during reload")))
+        await eventually(lambda: session.received == 1 and session.dropped == 1)
+        self.assertFalse(session.task.done())
+        self.assertEqual(session.sent, 0)
+        ipc.idle = False
+        marker["stage"] = "loaded"
+        # Wait for the loaded transition to flush old timestamps before sending.
+        await asyncio.sleep(0.3)
+        await remote.queue.put(json_packet(5, event("new quality live message")))
+        await eventually(lambda: session.sent == 1)
+        batches = [json.loads(cmd[4]) for cmd in ipc.commands if len(cmd) > 2 and cmd[2] == "live-batch"]
+        self.assertEqual(batches, [[{"text": "new quality live message", "nick": "测试观众", "color": 0x12AB34}]])
+        # Leaving the room is not allowed by the old switch marker.
+        ipc.path = "https://fixture.bilivideo.com/unrelated.flv"
+        await asyncio.wait_for(session.task, 2)
+        self.assertEqual(session.ended_reason, "mpv_file_changed")
+
+    async def test_invalid_expired_and_normal_file_changes_stop_session(self):
+        cases = [None, {"sessionId": "bilibili-other"}, {"provider": "other"},
+                 {"expiresAt": time.time() - 1}, {"expiresAt": time.time() + 100},
+                 {"from": "https://fixture.bilivideo.com/wrong-old.flv"}, {"stage": "failed"},
+                 {"to": "C:/local-other-video.mkv"}, {"generation": float("inf")}, {"generation": True}]
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                session, ipc, _ = await self.running_player_session()
+                if overrides is not None:
+                    self.player_switch_marker(session, ipc, **overrides)
+                ipc.path = "https://fixture.bilivideo.com/new-quality.flv"
+                await asyncio.wait_for(session.task, 2)
+                self.assertEqual(session.ended_reason, "mpv_file_changed")
+                self.assertFalse(ipc.active)
+
+    async def test_loaded_marker_racing_with_old_path_read_refreshes_player_state(self):
+        session, ipc, remote = await self.running_player_session()
+        marker = self.player_switch_marker(session, ipc)
+        original_command = ipc.command
+        armed = True
+        refreshed_reads = 0
+
+        async def racing_command(command):
+            nonlocal armed, refreshed_reads
+            if command == ["get_property", "path"]:
+                if armed:
+                    old_path = await original_command(command)
+                    ipc.path = marker["to"]
+                    marker["stage"] = "loaded"
+                    ipc.idle = False
+                    armed = False
+                    return old_path
+                refreshed_reads += 1
+            return await original_command(command)
+
+        ipc.command = racing_command
+        await eventually(lambda: not armed and refreshed_reads > 0)
+        self.assertFalse(session.task.done())
+        await remote.queue.put(json_packet(5, event("message after raced switch")))
+        await eventually(lambda: session.sent == 1)
+        self.assertFalse(session.task.done())
+        self.assertIsNone(session.error)
+        ipc.path = "https://fixture.bilivideo.com/third-file.flv"
+        await asyncio.wait_for(session.task, 2)
+        self.assertEqual(session.ended_reason, "mpv_file_changed")
+
+    async def test_loaded_marker_tolerates_transient_idle_and_rechecks_session(self):
+        session, ipc, remote = await self.running_player_session()
+        marker = self.player_switch_marker(session, ipc, stage="loaded")
+        ipc.idle = True
+        await remote.queue.put(json_packet(5, event("transient reload")))
+        await eventually(lambda: session.dropped == 1)
+        self.assertFalse(session.task.done())
+        ipc.path = marker["to"]
+        ipc.idle = False
+        await asyncio.sleep(0.3)
+        await remote.queue.put(json_packet(5, event("loaded and playing")))
+        await eventually(lambda: session.sent == 1)
+        ipc.session_id = "bilibili-other-player-session"
+        await asyncio.wait_for(session.task, 2)
+        self.assertEqual(session.ended_reason, "mpv_live_session_changed")
+
+    async def test_two_consecutive_quality_switches_acknowledge_each_bound_target(self):
+        session, ipc, remote = await self.running_player_session()
+        for generation in (1, 2):
+            marker = self.player_switch_marker(session, ipc, generation=generation,
+                                               to=f"https://fixture.bilivideo.com/quality-{generation}.flv")
+            ipc.idle = True
+            await remote.queue.put(json_packet(5, event(f"discard loading generation {generation}")))
+            await eventually(lambda: session.dropped == generation)
+            self.assertNotEqual(ipc.switch_ack, {"sessionId": session.session_id, "generation": generation})
+            ipc.path = marker["to"]
+            ipc.idle = False
+            marker["stage"] = "loaded"
+            await eventually(lambda: ipc.switch_ack == {"sessionId": session.session_id, "generation": generation})
+            await remote.queue.put(json_packet(5, event(f"new stream generation {generation}")))
+            await eventually(lambda: session.sent == generation)
+            self.assertFalse(session.task.done())
+        acknowledgements = [cmd[2] for cmd in ipc.commands if cmd[:2] == ["set_property", "user-data/uosc_danmaku/live-switch-ack"]]
+        self.assertEqual(acknowledgements, [{"sessionId": session.session_id, "generation": 1},
+                                            {"sessionId": session.session_id, "generation": 2}])
+        self.assertEqual(session.received, 4)
+        self.assertEqual(session.dropped, 2)
+        self.assertEqual(session.sent, 2)
+
+    async def test_switch_expiry_and_marker_mutation_stop_pending_transition(self):
+        for mutation in ("expired", "new-target"):
+            with self.subTest(mutation=mutation):
+                session, ipc, remote = await self.running_player_session()
+                marker = self.player_switch_marker(session, ipc)
+                ipc.idle = True
+                await remote.queue.put(json_packet(5, event("switching")))
+                await eventually(lambda: session.dropped == 1)
+                if mutation == "expired":
+                    marker["expiresAt"] = time.time() - 1
+                else:
+                    marker["to"] = "https://fixture.bilivideo.com/unauthorized.flv"
+                await asyncio.wait_for(session.task, 2)
+                self.assertEqual(session.ended_reason, "mpv_stream_switch_invalid")
+
+    async def test_same_path_reload_and_consumed_generation_cannot_allow_replay(self):
+        session, ipc, remote = await self.running_player_session()
+        marker = self.player_switch_marker(session, ipc, to=ipc.path, generation=1.0)
+        ipc.idle = True
+        await remote.queue.put(json_packet(5, event("loading")))
+        await eventually(lambda: session.dropped == 1)
+        marker["stage"] = "loaded"
+        ipc.idle = False
+        await asyncio.sleep(0.3)
+        await remote.queue.put(json_packet(5, event("continued")))
+        await eventually(lambda: session.sent == 1)
+        marker["to"] = "https://fixture.bilivideo.com/replayed.flv"
+        ipc.path = marker["to"]
+        await asyncio.wait_for(session.task, 2)
+        self.assertEqual(session.ended_reason, "mpv_file_changed")
 
     async def test_bounded_queue_age_pause_unicode_and_batch_bytes(self):
         session = BilibiliSession("545068", "bilibili-test-1", "mpv-lazy-bilibili-test-1", validate_auth(auth()), FakeOwner(), ipc=FakeIpc())

@@ -229,6 +229,7 @@ local function apply_current()
     mp.commandv('vf', 'remove', '@danmaku_smooth')
     mp.commandv('vf', 'remove', '@rife_sr_runtime')
     mp.commandv('vf', 'append', '@rife_sr_runtime:vapoursynth=' .. runtime_vpy)
+    mp.commandv('script-message-to', 'save_global_props', 'remember', 'vf')
     if first_apply then
         mp.osd_message('正在构建超分补帧组合：' .. describe(config), 4)
         first_apply = false
@@ -257,6 +258,7 @@ end
 local function disable_combo()
     mp.set_property_bool(smooth_fps_suspend, false)
     mp.commandv('vf', 'remove', '@rife_sr_runtime')
+    mp.commandv('script-message-to', 'save_global_props', 'remember', 'vf')
     mp.osd_message('已关闭超分补帧组合', 3)
 end
 

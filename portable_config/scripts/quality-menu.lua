@@ -58,6 +58,9 @@ local opts = {
     --use youtube-dl to fetch a list of available formats (overrides quality_strings)
     fetch_formats = true,
 
+    -- Stop waiting for a yt-dlp result that never arrives.
+    fetch_timeout = 20,
+
     --list of ytdl-format strings to choose from
     quality_strings_video = [[
     [
@@ -83,6 +86,9 @@ local opts = {
 
     --percent-encoded JSON list of browser-discovered HLS child playlists
     hls_variants = '',
+
+    -- Percent-encoded JSON of browser-resolved video qualities (FLV, DASH, HLS).
+    stream_variants = '',
 
     --include unknown formats in the list
     --Unfortunately choosing which formats are video or audio is not always perfect.
@@ -232,11 +238,36 @@ do
     opts.columns_audio = parse_columns(opts.columns_audio)
 end
 
+local begin_stream_switch
+local pending_browser_switch = nil
+
+local function stream_switch_in_progress()
+    if pending_browser_switch then return true end
+    local marker = mp.get_property_native('user-data/quality-menu/stream-switch')
+    if not marker or type(marker.expiresAt) ~= 'number' or marker.expiresAt < os.time() then return false end
+    if marker.stage == 'loading' then return true end
+    if marker.stage == 'loaded' and marker.provider == 'bilibili'
+        and mp.get_property_bool('user-data/uosc_danmaku/live-active', false)
+        and marker.sessionId == mp.get_property_native('user-data/uosc_danmaku/live-session') then
+        -- Playback can finish loading before the bridge's next poll. Preserve
+        -- this generation until it has adopted the path, so a fast second
+        -- click cannot replace the evidence authorizing the first change.
+        local ack = mp.get_property_native('user-data/uosc_danmaku/live-switch-ack')
+        return not (ack and ack.sessionId == marker.sessionId and ack.generation == marker.generation)
+    end
+    return false
+end
+
 -- special thanks to reload.lua (https://github.com/4e6/mpv-reload/)
 local function reload_resume()
+    if stream_switch_in_progress() then
+        mp.commandv('show-text', '正在切换清晰度，请稍候', 3000)
+        return
+    end
     local reload_duration = mp.get_property_native('duration')
     local time_pos = mp.get_property('time-pos')
 
+    if begin_stream_switch then begin_stream_switch(mp.get_property('path')) end
     mp.command('playlist-play-index current')
 
     -- Tries to determine live stream vs. pre-recorded VOD. VOD has non-zero
@@ -244,7 +275,8 @@ local function reload_resume()
     -- we should provide offset from the start. Stream doesn't have fixed start.
     -- Decent choice would be to reload stream from it's current 'live' position.
     -- That's the reason we don't pass the offset when reloading streams.
-    if reload_duration and reload_duration > 0 then
+    if not mp.get_property_bool('user-data/uosc_danmaku/live-active', false)
+        and reload_duration and reload_duration > 0 then
         local function seeker()
             mp.commandv('seek', time_pos, 'absolute+exact')
             mp.unregister_event(seeker)
@@ -278,8 +310,10 @@ states.audio_fetching.to_other_type = states.video_fetching
 local open_menu_state = nil
 ---@type string | nil
 local current_url = nil
+local loaded_url = nil
 ---@type function | nil
 local destructor = nil
+local fetching_timer = nil
 
 local menu_open
 local menu_close
@@ -515,10 +549,27 @@ local HLS_VARIANTS_JSON_LENGTH_LIMIT = 24576
 local HLS_VARIANT_URL_LENGTH_LIMIT = 4096
 local HLS_DIMENSION_LIMIT = 16384
 local HLS_BANDWIDTH_LIMIT = 1000 * 1000 * 1000
+local OPTION_LENGTH_PREFIX_LIMIT = 32
 
 ---@param input string
 ---@return string | nil, string | nil
-local function percent_decode(input)
+local function percent_decode(input, encoded_limit)
+    encoded_limit = encoded_limit or HLS_VARIANTS_OPTION_LENGTH_LIMIT
+    -- --script-opts consumes mpv's fixed-length syntax, while
+    -- --script-opts-append can preserve it as part of the native option value.
+    -- Accept one exact byte-length wrapper without treating its leading % as
+    -- URL encoding. The payload retains the original encoded/decoded limits.
+    local declared_length, payload = input:match('^%%(%d+)%%(.*)$')
+    if declared_length then
+        if tonumber(declared_length) ~= #payload then
+            return nil, 'invalid fixed-length option prefix'
+        end
+        if payload:match('^%%%d+%%') then
+            return nil, 'nested fixed-length option prefix'
+        end
+        input = payload
+    end
+    if #input > encoded_limit then return nil, 'encoded value is too large' end
     local output = {}
     local output_length = 0
     local index = 1
@@ -575,7 +626,7 @@ end
 ---@return table[] | nil
 local function parse_hls_variants(option_value)
     if option_value == '' then return nil end
-    if type(option_value) ~= 'string' or #option_value > HLS_VARIANTS_OPTION_LENGTH_LIMIT then
+    if type(option_value) ~= 'string' or #option_value > HLS_VARIANTS_OPTION_LENGTH_LIMIT + OPTION_LENGTH_PREFIX_LIMIT then
         msg.warn('ignoring hls_variants option: encoded value is too large')
         return nil
     end
@@ -639,13 +690,75 @@ end
 
 local hls_variants = parse_hls_variants(opts.hls_variants)
 
+local function is_valid_stream_url(url)
+    return type(url) == 'string' and #url > 0 and #url <= HLS_VARIANT_URL_LENGTH_LIMIT
+        and not url:find('[%c%s]') and url:match('^https?://[^/?#]+/.+') ~= nil
+end
+
+local function parse_stream_variants(value)
+    if value == '' then return nil end
+    if type(value) ~= 'string' or #value > 24576 + OPTION_LENGTH_PREFIX_LIMIT then
+        msg.warn('ignoring stream_variants: encoded list is too large')
+        return nil
+    end
+    local decoded = percent_decode(value, 24576)
+    local parsed = decoded and utils.parse_json(decoded)
+    if type(parsed) ~= 'table' or #parsed < 1 or #parsed > 16 then
+        msg.warn('ignoring stream_variants: invalid variant list')
+        return nil
+    end
+    local count = 0
+    for key in pairs(parsed) do
+        if type(key) ~= 'number' or key < 1 or key % 1 ~= 0 then return nil end
+        count = count + 1
+    end
+    if count ~= #parsed then return nil end
+
+    local variants, seen = {}, {}
+    for index, item in ipairs(parsed) do
+        if type(item) ~= 'table' or not is_valid_stream_url(item.url)
+            or (item.audio_url ~= nil and not is_valid_stream_url(item.audio_url)) then
+            msg.warn('ignoring stream_variants: invalid media URL')
+            return nil
+        end
+        local width, width_valid = optional_positive_integer(item.width, HLS_DIMENSION_LIMIT)
+        local height, height_valid = optional_positive_integer(item.height, HLS_DIMENSION_LIMIT)
+        local bandwidth, bandwidth_valid = optional_positive_integer(item.bandwidth, HLS_BANDWIDTH_LIMIT)
+        local fps_valid = item.fps == nil or (type(item.fps) == 'number' and item.fps > 0 and item.fps <= 240)
+        local function valid_label(label, maximum)
+            return label == nil or (type(label) == 'string' and #label <= maximum and not label:find('%c'))
+        end
+        if not width_valid or not height_valid or not bandwidth_valid or not fps_valid
+            or not valid_label(item.title, 360) or not valid_label(item.codec, 64) then
+            msg.warn('ignoring stream_variants: invalid metadata')
+            return nil
+        end
+        if not seen[item.url] then
+            seen[item.url] = true
+            variants[#variants + 1] = {
+                url = item.url, audio_url = item.audio_url, title = item.title,
+                width = width, height = height, bandwidth = bandwidth,
+                fps = item.fps, codec = item.codec, source_index = index,
+            }
+        end
+    end
+    return variants
+end
+
+local stream_variants = parse_stream_variants(opts.stream_variants)
+
 local function is_direct_hls_url(url)
     if not url then return false end
-    return url:match('^https?://[^/]+/.+%.m3u8') ~= nil or url:match('^https?://[^/]+/.+%.m3u') ~= nil
+    local path = url:match('^https?://[^/]+/([^?#]+)')
+    return path ~= nil and (path:lower():match('%.m3u8$') ~= nil or path:lower():match('%.m3u$') ~= nil)
 end
 
 local function should_skip_fetch_formats(url)
-    return is_direct_hls_url(url)
+    if is_direct_hls_url(url) or mp.get_property_bool('ytdl', true) == false then return true end
+    local path = url and url:match('^https?://[^/]+/([^?#]+)')
+    return path ~= nil and (path:lower():match('%.flv$') ~= nil
+        or path:lower():match('%.mp4$') ~= nil or path:lower():match('%.m4s$') ~= nil
+        or path:lower():match('%.webm$') ~= nil or path:lower():match('%.mpd$') ~= nil)
 end
 
 ---@param bitrate integer | number | nil
@@ -726,9 +839,10 @@ end
 
 ---@param url string | nil
 ---@return table | nil
-local function find_hls_variant(url)
-    if not hls_variants or not url then return nil end
-    for _, variant in ipairs(hls_variants) do
+local function find_hls_variant(url, variants)
+    variants = variants or hls_variants
+    if not variants or not url then return nil end
+    for _, variant in ipairs(variants) do
         if variant.url == url then return variant end
     end
     return nil
@@ -736,12 +850,13 @@ end
 
 ---@param url string | nil
 ---@return Data | nil
-local function create_hls_data_from_url_variants(url)
-    if not find_hls_variant(url) then return nil end
+local function create_hls_data_from_url_variants(url, variants, browser_stream)
+    variants = variants or hls_variants
+    if not find_hls_variant(url, variants) then return nil end
 
     local sorted_variants = {}
     local label_counts = {}
-    for _, variant in ipairs(hls_variants) do
+    for _, variant in ipairs(variants) do
         sorted_variants[#sorted_variants + 1] = variant
 
         local resolution = variant.height and tostring(variant.height) .. 'p'
@@ -754,7 +869,8 @@ local function create_hls_data_from_url_variants(url)
         elseif base_label == '' then
             base_label = bitrate_label
         end
-        if base_label == '' then base_label = 'HLS Variant' end
+        if variant.title and variant.title ~= '' then base_label = variant.title end
+        if base_label == '' then base_label = browser_stream and 'Stream' or 'HLS Variant' end
         label_counts[base_label] = (label_counts[base_label] or 0) + 1
     end
 
@@ -789,12 +905,15 @@ local function create_hls_data_from_url_variants(url)
         elseif label == '' then
             label = bitrate_label
         end
-        if label == '' then label = 'HLS Variant' end
+        if variant.title and variant.title ~= '' then label = variant.title end
+        if label == '' then label = browser_stream and 'Stream' or 'HLS Variant' end
         if label_counts[label] > 1 then label = label .. ' #' .. tostring(variant.source_index) end
 
-        local hint_parts = { 'HLS URL' }
+        local hint_parts = { browser_stream and 'Browser stream' or 'HLS URL' }
         if resolution_hint ~= '' then hint_parts[#hint_parts + 1] = resolution_hint end
         if bitrate_label ~= '' then hint_parts[#hint_parts + 1] = bitrate_label end
+        if variant.fps then hint_parts[#hint_parts + 1] = tostring(variant.fps) .. 'fps' end
+        if variant.codec then hint_parts[#hint_parts + 1] = variant.codec end
 
         video_formats[#video_formats + 1] = {
             id = variant.url,
@@ -836,6 +955,7 @@ local function create_hls_data_from_url_variants(url)
 
     return {
         hls = true,
+        browser_stream = browser_stream,
         hls_mode = 'url',
         video_formats = video_formats,
         audio_formats = {},
@@ -998,10 +1118,17 @@ end
 ---@param url string | nil
 ---@return Data | nil
 local function refresh_hls_data(url)
+    local stream_data = stream_variants and create_hls_data_from_url_variants(url, stream_variants, true)
+    if stream_data then
+        stream_data.switch_failed = url_data[url] and url_data[url].switch_failed
+        url_data[url] = stream_data
+        return stream_data
+    end
     if not is_direct_hls_url(url) then return nil end
 
     local url_variant_data = create_hls_data_from_url_variants(url)
     if url_variant_data then
+        url_variant_data.switch_failed = url_data[url] and url_data[url].switch_failed
         url_data[url] = url_variant_data
         return url_variant_data
     end
@@ -1029,10 +1156,51 @@ local function refresh_hls_data(url)
     return data
 end
 
-local function uosc_set_format_counts()
-    if not uosc_available then return end
+local function unavailable_data(message)
+    return { video_formats = {}, audio_formats = {}, unavailable = message }
+end
 
+local function current_stream_data(url)
+    local parameters = mp.get_property_native('video-params') or {}
+    local height, width = parameters.h, parameters.w
+    local title = height and (tostring(height) .. 'p（当前源）') or '当前播放源'
+    return {
+        hls = true, hls_mode = 'url', browser_stream = true,
+        direct_current = true,
+        video_active_id = url, audio_active_id = '', audio_formats = {},
+        video_formats = {{id = url, title = title, label = title,
+            hint = '网站仅移交了当前源；请在网页选择清晰度后重新移交',
+            properties = hls_properties({height = tostring(height or ''), width = tostring(width or '')})}},
+    }
+end
+
+local function uosc_set_format_counts()
     local data = url_data[current_url]
+    -- Safe diagnostics for integration tests and support: never expose signed
+    -- media URLs, cookies, headers, or format IDs.
+    local state = {
+        status = data and (data.unavailable and 'unavailable' or 'ready') or 'loading',
+        source = data and (data.direct_current and 'direct' or data.browser_stream and 'browser'
+            or data.hls and 'hls' or 'ytdl') or 'unknown',
+        video = {}, videoCount = data and #data.video_formats or 0,
+        audioCount = data and #data.audio_formats or 0,
+    }
+    if not current_url then state.status = 'idle' end
+    if pending_browser_switch then state.status = 'loading' end
+    if data and data.switch_failed then state.status = 'unavailable' end
+    if data then
+        for _, format in ipairs(data.video_formats) do
+            local properties = format.properties or {}
+            local height, width = tonumber(properties.height), tonumber(properties.width)
+            state.video[#state.video + 1] = {title = format.title or format.label or '', height = height, width = width}
+            if not data.switch_failed and format.id == data.video_active_id
+                and (data.hls_mode ~= 'url' or current_url == loaded_url) then
+                state.activeHeight = height
+            end
+        end
+    end
+    mp.set_property_native('user-data/quality-menu/state', state)
+    if not uosc_available then return end
     if data then
         mp.commandv('script-message-to', 'uosc', 'set', 'vformats', #data.video_formats)
         mp.commandv('script-message-to', 'uosc', 'set', 'aformats', #data.audio_formats)
@@ -1048,17 +1216,21 @@ local function process_json_string(json)
     local json_table, err = utils.parse_json(json)
 
     if (json_table == nil) then
-        osd_message('fetching formats failed...', 2)
         if err == nil then err = 'unexpected error occurred' end
         msg.error('failed to parse JSON data: ' .. err)
         return
     end
 
-    if json_table.formats == nil then
+    if type(json_table.formats) ~= 'table' then
         return
     end
 
-    return process_json(json_table)
+    local success, data = pcall(process_json, json_table)
+    if not success then
+        msg.warn('invalid format metadata returned by yt-dlp')
+        return nil
+    end
+    return data
 end
 
 ---Unknown format falls back on highest ranked format if possible
@@ -1085,6 +1257,56 @@ local function format_string(video_id, audio_id)
 end
 
 local hls_switch_cleanup = nil
+local browser_switch_timer = nil
+local stream_switch_timer = nil
+local stream_switch_generation = 0
+local STREAM_SWITCH_PROPERTY = 'user-data/quality-menu/stream-switch'
+
+begin_stream_switch = function(target_url)
+    local session = mp.get_property_native('user-data/uosc_danmaku/live-session')
+    if not mp.get_property_bool('user-data/uosc_danmaku/live-active', false)
+        or type(session) ~= 'string' or session == '' then return end
+    if stream_switch_timer then stream_switch_timer:kill() end
+    stream_switch_generation = stream_switch_generation + 1
+    local generation = stream_switch_generation
+    mp.set_property_native(STREAM_SWITCH_PROPERTY, {
+        generation = generation, provider = 'bilibili', sessionId = session,
+        from = mp.get_property('path'), to = target_url,
+        startedAt = mp.get_time(), expiresAt = os.time() + 15, stage = 'loading',
+    })
+    stream_switch_timer = mp.add_timeout(15, function()
+        local marker = mp.get_property_native(STREAM_SWITCH_PROPERTY)
+        if marker and marker.generation == generation then
+            mp.set_property_native(STREAM_SWITCH_PROPERTY, nil)
+        end
+    end)
+end
+
+mp.register_event('file-loaded', function()
+    loaded_url = mp.get_property('path')
+    if url_data[loaded_url] then url_data[loaded_url].switch_failed = nil end
+    if pending_browser_switch == mp.get_property('path') then
+        pending_browser_switch = nil
+        if browser_switch_timer then browser_switch_timer:kill() end
+    end
+    local marker = mp.get_property_native(STREAM_SWITCH_PROPERTY)
+    if marker and marker.to == mp.get_property('path') then
+        marker.stage = 'loaded'
+        mp.set_property_native(STREAM_SWITCH_PROPERTY, marker)
+    end
+end)
+
+mp.register_event('end-file', function(event)
+    if event and event.reason == 'error' and pending_browser_switch then
+        if url_data[pending_browser_switch] then url_data[pending_browser_switch].switch_failed = true end
+        pending_browser_switch = nil
+        if browser_switch_timer then browser_switch_timer:kill() end
+        if stream_switch_timer then stream_switch_timer:kill() end
+        mp.set_property_native(STREAM_SWITCH_PROPERTY, nil)
+        uosc_set_format_counts()
+        osd_message('切换清晰度失败，请在浏览器刷新播放地址后重试', 5)
+    end
+end)
 
 ---@param target_url string
 local function load_hls_variant_resume(target_url)
@@ -1093,7 +1315,8 @@ local function load_hls_variant_resume(target_url)
 
     if hls_switch_cleanup then hls_switch_cleanup() end
 
-    if reload_duration and reload_duration > 0 and time_pos then
+    if not mp.get_property_bool('user-data/uosc_danmaku/live-active', false)
+        and reload_duration and reload_duration > 0 and time_pos then
         local seeker
         local cleanup_timer
         local cleaned = false
@@ -1117,7 +1340,18 @@ local function load_hls_variant_resume(target_url)
         hls_switch_cleanup = cleanup
     end
 
-    msg.verbose('switching HLS variant URL')
+    msg.verbose('switching browser-resolved stream')
+    pending_browser_switch = target_url
+    if url_data[target_url] then url_data[target_url].switch_failed = nil end
+    if browser_switch_timer then browser_switch_timer:kill() end
+    browser_switch_timer = mp.add_timeout(15, function()
+        if pending_browser_switch ~= target_url then return end
+        if url_data[target_url] then url_data[target_url].switch_failed = true end
+        pending_browser_switch = nil
+        uosc_set_format_counts()
+        osd_message('切换清晰度超时，请在浏览器刷新播放地址后重试', 5)
+    end)
+    begin_stream_switch(target_url)
     mp.commandv('loadfile', target_url, 'replace')
 end
 
@@ -1125,19 +1359,24 @@ end
 ---@param video_format string
 ---@param audio_format string
 local function set_format(url, video_format, audio_format)
+    if stream_switch_in_progress() then
+        osd_message('正在切换清晰度，请稍候', 3)
+        return
+    end
     local data = url_data[url]
     if not data then return end
 
     if data.hls and data.hls_mode == 'url' then
-        if video_format == '' or data.video_active_id == video_format then return end
+        if video_format == '' or (data.video_active_id == video_format and url == loaded_url) then return end
 
-        local target_data = create_hls_data_from_url_variants(video_format)
+        local target_data = data.browser_stream
+            and create_hls_data_from_url_variants(video_format, stream_variants, true)
+            or create_hls_data_from_url_variants(video_format)
         if not target_data then
             msg.warn('refusing unknown HLS variant URL')
             return
         end
 
-        data.video_active_id = video_format
         url_data[video_format] = target_data
         if url == mp.get_property('path') then load_hls_variant_resume(video_format) end
         return
@@ -1154,6 +1393,8 @@ end
 ---@param active_format string | nil
 ---@param menu_type UIState
 local function text_menu_open(formats, active_format, menu_type)
+    local menu_data = url_data[current_url] or {}
+    local allow_disabled = not menu_data.hls
     local active = 0
     local selected = 1
     --set the cursor to the current format
@@ -1182,7 +1423,7 @@ local function text_menu_open(formats, active_format, menu_type)
 
     local width, height
     local margin_top, margin_bottom = 0, 0
-    local num_options = #formats > 0 and #formats + 2 or 1
+    local num_options = #formats > 0 and #formats + (allow_disabled and 2 or 1) or 1
 
     ---@return integer
     local function get_scrolled_lines()
@@ -1216,10 +1457,10 @@ local function text_menu_open(formats, active_format, menu_type)
             for i, format in ipairs(formats) do
                 ass:append(choose_prefix(i) .. format.label .. '\\N')
             end
-            ass:append(choose_prefix(#formats + 1) .. 'Disabled\\N')
-            ass:append(choose_prefix(#formats + 2) .. menu_type.to_other_type.type_capitalized .. ' menu')
+            if allow_disabled then ass:append(choose_prefix(#formats + 1) .. 'Disabled\\N') end
+            ass:append(choose_prefix(num_options) .. menu_type.to_other_type.type_capitalized .. ' menu')
         else
-            ass:append('no formats found\\N')
+            ass:append((menu_data.unavailable or '此播放源没有可切换的档位') .. '\\N')
             ass:append(opts.selected_and_inactive .. menu_type.to_other_type.type_capitalized .. ' menu')
         end
 
@@ -1388,7 +1629,14 @@ local function uosc_menu_open(formats, active_format, menu_type)
             menu_type.to_other_type.type .. '_formats_toggle',
         },
     }
-    menu.items[#menu.items + 1] = {
+    local data = url_data[current_url] or {}
+    if #formats == 0 then
+        menu.items[#menu.items + 1] = {
+            title = data.unavailable or '此播放源没有可切换的档位',
+            selectable = false, muted = true, value = 'ignore',
+        }
+    end
+    if not data.hls then menu.items[#menu.items + 1] = {
         title = 'Disabled',
         italic = true,
         muted = true,
@@ -1401,7 +1649,7 @@ local function uosc_menu_open(formats, active_format, menu_type)
             current_url,
             '',
         }
-    }
+    } end
 
     for _, format in ipairs(formats) do
         menu.items[#menu.items + 1] = {
@@ -1563,6 +1811,17 @@ local function loading_message(menu_type)
         osd_message('fetching available ' .. menu_type.type .. ' formats...', 60)
     end
     open_menu_state = menu_type
+    uosc_set_format_counts()
+    if fetching_timer then fetching_timer:kill() end
+    local source_url = current_url
+    fetching_timer = mp.add_timeout(math.max(1, tonumber(opts.fetch_timeout) or 20), function()
+        if current_url ~= source_url or url_data[source_url] then return end
+        url_data[source_url] = unavailable_data('获取清晰度超时；请刷新网页后重新移交播放')
+        uosc_set_format_counts()
+        if open_menu_state and open_menu_state == open_menu_state.to_fetching then
+            menu_open(open_menu_state)
+        end
+    end)
 end
 
 ---@param menu_type UIState
@@ -1571,25 +1830,29 @@ function menu_open(menu_type)
     menu_type = menu_type.to_menu
 
     local data = url_data[current_url]
-    if is_direct_hls_url(current_url) then
-        data = refresh_hls_data(current_url)
-    elseif not data then
+    data = refresh_hls_data(current_url) or data
+    if not data then
         if opts.fetch_formats and not should_skip_fetch_formats(current_url) then
             loading_message(menu_type)
             return
         end
 
-        -- shallow clone so that each url has it's own active format ids
-        data = {}
-        for k, v in pairs(opts.predefined_data) do
-            data[k] = v
+        if should_skip_fetch_formats(current_url) then
+            data = current_stream_data(current_url)
+        else
+            -- shallow clone so that each url has its own active format ids
+            data = {}
+            for k, v in pairs(opts.predefined_data) do data[k] = v end
         end
         url_data[current_url] = data
     end
+    if fetching_timer then fetching_timer:kill() end
+    uosc_set_format_counts()
     local formats = menu_type.is_video and data.video_formats or data.audio_formats
     local active_format
     if menu_type.is_video then active_format = data.video_active_id
     else active_format = data.audio_active_id end
+    if data.switch_failed or (data.hls_mode == 'url' and current_url ~= loaded_url) then active_format = nil end
 
     msg.verbose('current ytdl-format: ' .. mp.get_property('ytdl-format', ''))
 
@@ -1641,6 +1904,7 @@ mp.register_event('start-file', function()
     local new_url = get_url()
     local url_changed = current_url ~= new_url
     current_url = new_url
+    if url_changed and fetching_timer then fetching_timer:kill() end
     uosc_set_format_counts()
 
     -- new path isn't an url
@@ -1656,6 +1920,15 @@ end)
 mp.add_hook('on_load', 9, function()
     local path = mp.get_property('path')
     local data = url_data[path]
+    local browser_variant = stream_variants and find_hls_variant(path, stream_variants)
+    if browser_variant then
+        -- file-local options prevent a previous DASH audio track leaking into
+        -- a muxed FLV/HLS quality. HTTP headers remain those supplied at launch.
+        mp.set_property_native('file-local-options/audio-files',
+            browser_variant.audio_url and {browser_variant.audio_url} or {})
+        mp.set_property_bool('file-local-options/ytdl', false)
+        return
+    end
 
     if data and data.hls then
         if data.hls_mode == 'url' then
@@ -1688,6 +1961,10 @@ end)
 
 mp.register_event('file-loaded', function()
     local data = refresh_hls_data(current_url)
+    if not data and current_url and should_skip_fetch_formats(current_url) then
+        data = current_stream_data(current_url)
+        url_data[current_url] = data
+    end
     if not data then return end
 
     uosc_set_format_counts()
@@ -1768,23 +2045,20 @@ mp.observe_property('user-data/mpv/ytdl/json-subprocess-result', 'native', funct
         return
     end
 
+    local data = url_data[current_url]
+    if data and data.hls then return end
     local json = ytdl_result.stdout
-
-    if ytdl_result.status ~= 0 or json == '' then
-        json = nil
-        osd_message('fetching formats failed...', 2)
-    elseif json then
-        ---@type Data | nil
-        local data = url_data[current_url]
-        if data == nil then
-            data = process_json_string(json)
-            url_data[current_url] = data
-            uosc_set_format_counts()
-        end
-        if not data then return end
-        if open_menu_state and open_menu_state == open_menu_state.to_fetching then
-            menu_open(open_menu_state)
-        end
+    if ytdl_result.status ~= 0 or type(json) ~= 'string' or json == '' then
+        data = unavailable_data('无法获取清晰度；请刷新网页后重新移交播放')
+    else
+        -- A late valid result may replace a previous timeout/error state.
+        data = process_json_string(json)
+            or unavailable_data('此播放源未提供可用的清晰度列表')
     end
-
+    url_data[current_url] = data
+    if fetching_timer then fetching_timer:kill() end
+    uosc_set_format_counts()
+    if open_menu_state then
+        menu_open(open_menu_state)
+    end
 end)

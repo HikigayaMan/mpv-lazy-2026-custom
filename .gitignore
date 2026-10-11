@@ -45,11 +45,13 @@ viewed.json
 # 运行态 (不提交)
 portable_config/recent.json
 portable_config/saved-props.json
+portable_config/saved-props.json.*
 portable_config/trakt_config.json
 portable_config/trakt_history.json
 portable_config/script-opts/rife_runtime.json
 portable_config/script-opts/rife_sr_runtime.json
 portable_config/script-opts/uosc_danmaku_style.json
+portable_config/script-opts/uosc_danmaku_style.json.*
 portable_config/script-opts/trakt_scrobble.conf
 portable_config/_cache/
 

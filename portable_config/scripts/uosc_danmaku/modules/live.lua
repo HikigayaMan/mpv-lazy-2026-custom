@@ -12,6 +12,10 @@ local LIVE_NICK_LIMIT = 48
 local LIVE_REFRESH_DELAY = 0.25
 local LIVE_ACTIVE_PROPERTY = "user-data/uosc_danmaku/live-active"
 local LIVE_INPUT_COUNT_PROPERTY = "user-data/uosc_danmaku/live-input-count"
+local LIVE_SESSION_PROPERTY = "user-data/uosc_danmaku/live-session"
+local STREAM_SWITCH_PROPERTY = "user-data/quality-menu/stream-switch"
+local STREAM_SWITCH_ACK_PROPERTY = "user-data/uosc_danmaku/live-switch-ack"
+local STREAM_SWITCH_SECONDS = 15
 
 LIVE_DANMAKU = {
     active = false,
@@ -23,6 +27,10 @@ LIVE_DANMAKU = {
 }
 
 local refresh_timer = nil
+local switch_timer = nil
+local pending_switch = nil
+local last_switch_generation = 0
+local stream_path = nil
 
 local function valid_session_id(session_id)
     return type(session_id) == "string" and session_id:match("^[%w_-]+$") and #session_id <= 64
@@ -30,6 +38,35 @@ end
 
 local function current_time()
     return mp.get_property_number("time-pos", 0) or 0
+end
+
+local function valid_stream_path(path)
+    return type(path) == "string" and #path > 0 and #path <= 16384
+        and path:match("^https?://[^/%s]+") and not path:find("[%z\r\n]")
+end
+
+local function stream_switch_marker()
+    local marker = mp.get_property_native(STREAM_SWITCH_PROPERTY)
+    if type(marker) ~= "table" or marker.provider ~= "bilibili"
+        or marker.sessionId ~= LIVE_DANMAKU.session_id then return nil end
+    local generation = marker.generation
+    local started = marker.startedAt
+    local expires = marker.expiresAt
+    local now = mp.get_time()
+    local epoch = os.time()
+    if type(generation) ~= "number" or generation <= 0 or generation == math.huge or generation ~= math.floor(generation)
+        or type(started) ~= "number" or started ~= started or started > now + 0.1
+        or now - started > STREAM_SWITCH_SECONDS
+        or type(expires) ~= "number" or expires ~= expires or expires <= epoch
+        or expires > epoch + STREAM_SWITCH_SECONDS + 1
+        or not valid_stream_path(marker.from) or not valid_stream_path(marker.to)
+        or (marker.stage ~= "loading" and marker.stage ~= "loaded") then return nil end
+    return marker
+end
+
+local function cancel_stream_switch()
+    if switch_timer then switch_timer:kill(); switch_timer = nil end
+    pending_switch = nil
 end
 
 -- Lua slices bytes, so retain whole UTF-8 characters at the input limit.
@@ -122,7 +159,12 @@ local function live_start(session_id)
     end
     LIVE_DANMAKU.active = true
     LIVE_DANMAKU.session_id = session_id
+    cancel_stream_switch()
+    last_switch_generation = 0
+    stream_path = mp.get_property("path")
     mp.set_property_bool(LIVE_ACTIVE_PROPERTY, true)
+    mp.set_property_native(LIVE_SESSION_PROPERTY, session_id)
+    mp.set_property_native(STREAM_SWITCH_ACK_PROPERTY, nil)
     ENABLED = true
     toggle_danmaku_switch("on")
     show_danmaku_func(true)
@@ -156,7 +198,7 @@ local function live_batch(session_id, json)
         msg.warn("live-batch rejected: invalid payload")
         return
     end
-    if not ENABLED then return end
+    if not ENABLED or pending_switch then return end
     if mp.get_property_bool("pause", false) then
         LIVE_DANMAKU.dropped_while_paused = LIVE_DANMAKU.dropped_while_paused + 1
         return
@@ -212,9 +254,13 @@ function stop_live_danmaku(session_id, quiet)
         refresh_timer:kill()
         refresh_timer = nil
     end
+    cancel_stream_switch()
     clear_live_items()
     LIVE_DANMAKU.active = false
     LIVE_DANMAKU.session_id = nil
+    stream_path = nil
+    mp.set_property_native(LIVE_SESSION_PROPERTY, "")
+    mp.set_property_native(STREAM_SWITCH_ACK_PROPERTY, nil)
     mp.set_property_bool(LIVE_ACTIVE_PROPERTY, false)
     LIVE_DANMAKU.stopping = true
     ENABLED = false
@@ -228,6 +274,8 @@ end
 
 mp.set_property_native("user-data/uosc_danmaku/live-api-version", 1)
 mp.set_property_bool(LIVE_ACTIVE_PROPERTY, false)
+mp.set_property_native(LIVE_SESSION_PROPERTY, "")
+mp.set_property_native(STREAM_SWITCH_ACK_PROPERTY, nil)
 mp.set_property_native(LIVE_INPUT_COUNT_PROPERTY, 0)
 mp.register_script_message("live-start", live_start)
 mp.register_script_message("live-batch", live_batch)
@@ -237,6 +285,45 @@ mp.register_script_message("live-ping", function(session_id)
     end
 end)
 mp.register_script_message("live-stop", stop_live_danmaku)
-mp.register_event("end-file", function()
+mp.register_event("end-file", function(event)
+    if not LIVE_DANMAKU.active then return end
+    local marker = stream_switch_marker()
+    local path = mp.get_property("path")
+    if marker and marker.stage == "loading" and not pending_switch
+        and marker.generation > last_switch_generation
+        -- MPV may clear path while the old file unloads during loadfile replace.
+        -- The cached stream_path still binds this stop to the authorized source;
+        -- file-loaded below must confirm the exact target before resuming input.
+        and marker.from == stream_path
+        and (path == nil or path == "" or path == marker.from or path == marker.to)
+        and (event.reason == "stop" or event.reason == "restart") then
+        pending_switch = { generation = marker.generation, from = marker.from, to = marker.to,
+            startedAt = marker.startedAt, expiresAt = marker.expiresAt }
+        last_switch_generation = marker.generation
+        if refresh_timer then refresh_timer:kill(); refresh_timer = nil end
+        clear_live_items()
+        hide_danmaku_func(true)
+        switch_timer = mp.add_timeout(math.max(0.01, STREAM_SWITCH_SECONDS - (mp.get_time() - marker.startedAt)), function()
+            switch_timer = nil
+            if pending_switch then stop_live_danmaku(nil, true) end
+        end)
+        return
+    end
     stop_live_danmaku(nil, true)
+end)
+mp.register_event("file-loaded", function()
+    if not pending_switch or not LIVE_DANMAKU.active then return end
+    local marker = stream_switch_marker()
+    local path = mp.get_property("path")
+    if not marker or marker.generation ~= pending_switch.generation
+        or marker.from ~= pending_switch.from or marker.to ~= pending_switch.to
+        or marker.startedAt ~= pending_switch.startedAt or marker.expiresAt ~= pending_switch.expiresAt
+        or path ~= pending_switch.to then
+        stop_live_danmaku(nil, true)
+        return
+    end
+    stream_path = path
+    cancel_stream_switch()
+    clear_live_items()
+    if ENABLED then show_danmaku_func(true) end
 end)

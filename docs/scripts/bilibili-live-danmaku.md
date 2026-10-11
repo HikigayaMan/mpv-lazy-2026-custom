@@ -9,13 +9,13 @@
 已有 Release 和在线 External Player 不包含本次功能，需要同时更新浏览器脚本、Bilibili 专用中继和播放器配置。专用中继使用独立端口，已有 Telegram／斗鱼中继可继续运行。
 
 1. 用 Tampermonkey 或 Violentmonkey 安装本仓库根目录的 `external_player.js`（打开脚本的本地内容，粘贴到新建用户脚本并保存），禁用旧版重复脚本，然后完整刷新直播页面。
-2. 将 `portable_config/scripts/uosc_danmaku/` 的修改覆盖到完整 mpv 整合包的同名目录。
+2. 将 `portable_config/scripts/uosc_danmaku/` 和 `portable_config/scripts/quality-menu.lua` 的修改覆盖到完整 mpv 整合包的同名位置。
 3. 将本仓库 `tools/telegram-web-mpv-bridge/` 放到整合包根目录下的同名目录。
 4. 在该工具目录安装源码依赖，或使用从本次源码构建的 `bilibili-live-bridge.exe`。该程序与已有 `browser-media-bridge.exe` 并存。
 
 本地更新压缩包中的 `external_player.user.js` 与 `external_player.js` 内容相同，可以直接导入脚本管理器。安装本地定制版后关闭该脚本的自动更新，避免被原上游版本覆盖。
 
-更新已经运行的安装时，还需要重新导入新版用户脚本、完整刷新直播页，并重启 Bilibili 中继；只覆盖磁盘上的 EXE 不会更新已启动的服务。2026-10-11 修复版脚本版本为 `1.2.14.11`。
+更新已经运行的安装时，还需要重新导入新版用户脚本、完整刷新直播页，并重启 Bilibili 中继；只覆盖磁盘上的 EXE 不会更新已启动的服务。2026-10-11 品质切换修复版脚本版本为 `1.2.14.12`。
 
 源码方式（Python 3.10+）：
 
@@ -55,9 +55,13 @@ python -m venv .venv
 3. 脚本取得当前房间弹幕认证信息，为这次播放器创建独立的 Windows IPC pipe。
 4. MPV 中的 `uosc_danmaku` 自动显示收到的文字弹幕，可通过 `j` 或 `工具 > 弹幕 > 开关弹幕` 隐藏和恢复。
 
-在 `工具 > 弹幕 > 弹幕设置` 中调整字体、字号、透明度、速度、显示区域和直播帧率。保存跨进程默认样式后，新启动的播放器也会应用设置。礼物、系统广播和进房提示不作为文字弹幕显示。
+在 `工具 > 弹幕 > 弹幕设置` 中调整字号、透明度、速度、显示区域和直播帧率。合法更改会自动保存，新启动的播放器也会应用设置，详见 [右键设置自动保存](./settings-persistence.md)。礼物、系统广播和进房提示不作为文字弹幕显示。
 
 表情弹幕以文本显示：保留消息中的文字和 `[dog]` 等表情标签，纯图片表情使用消息携带的名称；缺少名称时显示 `[表情]`。不会下载或绘制表情图片，也不会把图片地址当作弹幕。
+
+视频和直播的品质选择、切换失败提示及验证方式见 [流品质说明](stream-quality.md)。
+
+新版脚本会把当前账号可用的直播品质交给 MPV 的“流品质”菜单，初次交接优先使用可用最高品质。菜单中选择同一房间的另一品质时会保留弹幕会话和显示／隐藏选择，清除旧视频时间轴上的弹幕；新流加载完成后继续显示新收到的消息。加载期间收到的消息会丢弃，不会在播放恢复后堆积回放。一次切换完成后才能继续切换，切换失败或超过 15 秒仍会结束弹幕会话，请在网页刷新播放地址后重新交接。
 
 建议保留直播标签页，断线重连时可从当前浏览器会话刷新短期认证。关闭标签页后已建立的弹幕连接会继续运行，但认证过期后可能无法恢复。暂停时不会积压弹幕；关闭播放器或切换到其他文件后会释放该会话。
 
@@ -81,6 +85,8 @@ python -m venv .venv
 .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe -m unittest discover -s tools\telegram-web-mpv-bridge -p "test_*.py"
 .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe -m unittest discover -s tools\release -p "test_*.py"
 node --test tools/telegram-web-mpv-bridge/test_bilibili_live_handoff.mjs
+node --test tools/telegram-web-mpv-bridge/test_bilibili_stream_quality.mjs
+.\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe -m unittest discover -s tools\release -p "test_quality_menu_lua.py"
 ```
 
 Lua 行为测试额外需要 `lupa`。真实播放器的离线接入验证可运行：

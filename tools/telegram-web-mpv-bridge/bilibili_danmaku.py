@@ -12,6 +12,7 @@ from collections import deque
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import struct
@@ -30,6 +31,9 @@ MAX_PACKET_COUNT = 4096
 MAX_PENDING = 300
 MAX_BATCH = 120
 MAX_AGE = 2.0
+STREAM_SWITCH_PROPERTY = "user-data/quality-menu/stream-switch"
+STREAM_SWITCH_ACK_PROPERTY = "user-data/uosc_danmaku/live-switch-ack"
+STREAM_SWITCH_SECONDS = 15
 SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 SAFE_HOST = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+chat\.bilibili\.com\Z")
 
@@ -533,7 +537,9 @@ class BilibiliSession:
     async def player_loop(self) -> None:
         await self.attach_player()
         playback_seen = False
-        initial_path = None
+        initial_path = await self.ipc.command(["get_property", "path"])
+        active_switch = None
+        last_switch_generation = 0
         while True:
             if self.remote_task.done():
                 self.remote_task.result()
@@ -541,8 +547,54 @@ class BilibiliSession:
             if not live_active:
                 self.ended_reason = "mpv_live_session_ended"
                 return
+            live_session = await self.ipc.command(["get_property", "user-data/uosc_danmaku/live-session"])
+            if live_session != self.session_id:
+                self.ended_reason = "mpv_live_session_changed"
+                return
             idle = await self.ipc.command(["get_property", "idle-active"])
             path = await self.ipc.command(["get_property", "path"])
+            try:
+                raw_switch = await self.ipc.command(["get_property", STREAM_SWITCH_PROPERTY])
+            except RuntimeError:
+                raw_switch = None  # Absent user-data property is normal outside a switch.
+            marker = self.valid_stream_switch(raw_switch)
+            if active_switch:
+                if not marker or time.monotonic() > active_switch["deadline"] or any(marker[key] != active_switch[key] for key in ("generation", "from", "to", "startedAt", "expiresAt")):
+                    self.ended_reason = "mpv_stream_switch_invalid"
+                    return
+            elif marker and marker["generation"] > last_switch_generation and marker["from"] == initial_path:
+                if path and path not in (marker["from"], marker["to"]):
+                    self.ended_reason = "mpv_file_changed"
+                    return
+                active_switch = {key: marker[key] for key in ("generation", "from", "to", "startedAt", "expiresAt")}
+                active_switch["deadline"] = time.monotonic() + min(STREAM_SWITCH_SECONDS, marker["expiresAt"] - time.time())
+                last_switch_generation = marker["generation"]
+            if active_switch:
+                if marker["stage"] == "loaded":
+                    # The prior path/idle reads may predate file-loaded while
+                    # the marker read already sees its new stage. Refresh the
+                    # player state before deciding whether the target loaded.
+                    path = await self.ipc.command(["get_property", "path"])
+                    idle = await self.ipc.command(["get_property", "idle-active"])
+                    if not await self.ipc.command(["get_property", "user-data/uosc_danmaku/live-active"]):
+                        self.ended_reason = "mpv_live_session_ended"
+                        return
+                    if await self.ipc.command(["get_property", "user-data/uosc_danmaku/live-session"]) != self.session_id:
+                        self.ended_reason = "mpv_live_session_changed"
+                        return
+                if path and path not in (active_switch["from"], active_switch["to"]):
+                    self.ended_reason = "mpv_file_changed"
+                    return
+                # Messages timestamped against the old stream must not reappear
+                # at zero when a live quality switch restarts MPV's time-pos.
+                self.take_batch(paused=True)
+                if marker["stage"] == "loading" or idle or not path or path != active_switch["to"]:
+                    await asyncio.sleep(0.25)
+                    continue
+                initial_path = path
+                await self.ipc.command(["set_property", STREAM_SWITCH_ACK_PROPERTY,
+                                        {"sessionId": self.session_id, "generation": active_switch["generation"]}])
+                active_switch = None
             if path:
                 if initial_path and path != initial_path:
                     self.ended_reason = "mpv_file_changed"
@@ -560,6 +612,28 @@ class BilibiliSession:
                                         json.dumps(batch, ensure_ascii=False, separators=(",", ":"))])
                 self.sent += len(batch)
             await asyncio.sleep(0.25)
+
+    def valid_stream_switch(self, marker: Any) -> dict[str, Any] | None:
+        """Accept only a bounded, session-bound local quality transition.
+
+        Stream URLs remain in memory and are never included in diagnostics.
+        A generation authorizes exactly one old-to-new path transition.
+        """
+        if not isinstance(marker, dict) or marker.get("provider") != "bilibili" or marker.get("sessionId") != self.session_id:
+            return None
+        generation, expires, started = (marker.get(key) for key in ("generation", "expiresAt", "startedAt"))
+        if isinstance(generation, bool) or not isinstance(generation, (int, float)) or not math.isfinite(generation) or generation <= 0 or generation != int(generation):
+            return None
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in (expires, started)):
+            return None
+        remaining = expires - time.time()
+        if not 0 < remaining <= STREAM_SWITCH_SECONDS + 1 or started < 0 or marker.get("stage") not in ("loading", "loaded"):
+            return None
+        for key in ("from", "to"):
+            value = marker.get(key)
+            if not isinstance(value, str) or not re.match(r"^https?://[^/\s]+", value) or len(value) > 16384 or any(char in value for char in ("\x00", "\r", "\n")):
+                return None
+        return marker
 
     async def run(self) -> None:
         self.remote_task = asyncio.create_task(self.remote_loop())

@@ -14,16 +14,25 @@ local function is_active()
     return false
 end
 
+local function sync_hdr_output()
+    if is_active() then
+        mp.set_property("target-colorspace-hint", "auto")
+        mp.set_property("inverse-tone-mapping", "no")
+    end
+end
+
 local function enable()
     if is_active() then return end
     -- vf-pre 不是可读写属性，必须用 vf 命令的 pre 子命令
     mp.command("vf pre @" .. LABEL .. ":d3d11vpp=nvidia-true-hdr")
     mp.set_property("target-colorspace-hint", "auto")
     mp.set_property("inverse-tone-mapping", "no")
+    mp.commandv("script-message-to", "save_global_props", "remember", "vf")
 end
 
 local function disable()
     mp.command("vf remove @" .. LABEL)
+    mp.commandv("script-message-to", "save_global_props", "remember", "vf")
 end
 
 local function toggle()
@@ -42,9 +51,8 @@ end
 mp.register_script_message("rtx-hdr-toggle", toggle)
 
 -- 切换文件后 [SDR] profile 会重置 target-colorspace-hint=no，需重新应用
-mp.register_event("file-loaded", function()
-    if is_active() then
-        mp.set_property("target-colorspace-hint", "auto")
-        mp.set_property("inverse-tone-mapping", "no")
-    end
-end)
+mp.register_event("file-loaded", sync_hdr_output)
+
+-- Saved user filters may be restored after file-loaded. Keep RTX HDR output
+-- tied to its filter instead of saving source-dependent SDR/HDR profile values.
+mp.observe_property("vf", "native", sync_hdr_output)

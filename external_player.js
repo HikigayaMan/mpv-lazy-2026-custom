@@ -3,7 +3,7 @@
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.14.11
+// @version                 1.2.14.12
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -39,7 +39,7 @@ const VIDEO_URL_REGEX_EXACT = /^https?:\/\/((?![^"^']*http)[^"^']+(\.|%2e)(mp4|m
 
 const defaultConfig = {
     global: {
-        version: '1.2.14.11',
+        version: '1.2.14.12',
         language: (navigator.language || navigator.userLanguage) === 'zh-CN' ? 'zh' : 'en',
         buttonXCoord: '0',
         buttonYCoord: '0',
@@ -124,7 +124,7 @@ const defaultConfig = {
                     "https://live.bilibili.com/roomid=\\d+.*",
                     "https://live.bilibili.com/blanc/\\d+.*"
                 ],
-                preferredQuality: '4',
+                preferredQuality: 'auto',
                 preferredLine: '0',
             },
             aniGamer: {
@@ -189,7 +189,7 @@ const defaultConfig = {
             system: 'windows',
             icon: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsEAAA7BAbiRa+0AAA1qSURBVHhezVt7jBXVGf/OsA8W9sXyWgoUZHkIgihSkEetQbD2ARYTtS2UAlqpVZeSSGpbEmuaJlr7h+xCEFMItoSa2tBYG2zloRCjZEEUioCyvF8Lgiyw7AN25/T3O3OHHWbv3T1z7130l5y9d86dOed83/f7HmdmVkl7Y7nOlEY9UJSUSBOaI0PFlWIc54uWruYcJefw/SJ+q8Jv+yRTDuDcSumuDshD6oo5p53QPgpY4vaDEPdBqMkQaKw4qq9kod9Bc9F07JONYD8bV+OfQ7FdfQx9FWgbRau35HF1GL1pRfoUoLWCtafj20wIOEVyVK4R5CpaI39HiwKuLAMtE41KqdWX8bke/avlpPqnPKd89aWE1BXwoO4gk/QMUaoUVr7DjFiP1mR+TR86oGV7X6VB78DSy+Ewq6EIqjdppKaAcn23ZOrnpaMaa6xMwW8EOqKRHQ16Oxj2jDzpbDT9SSA5Bbzg5kmevCgZap6xTJ3XfcORg0amNek/S71aKAtUtemPgOgKKHPHgOor4OPD5TKO0+KJKYDxoTNand4LNjwiTzkfmH5L8HJ7LHHnwg+3SCaEv4TjL1t4gmvgWjLVUKztXRhonum3hL0CyvQzsPoKkCb7S6N8a+CaXJUlueplGGqR19k27Fyg3P2D5KnfmEnSHd3TDcakTmiX9J8QHBeavlbQNgMWu78ywtfiezqFZ10QbOkC18jYlKeehuF+a/paQesMeMmdg4FWmqosVeHpq37MgNpVUPVYheZv/hxcFX+PHqKb4dcNNfpRKXXguvGReIpydxSqsK0ocDJNNZcMfKEhTDEidT+0ryF1dUceL0Rp7MYs72AVtagjPkcdcQpudgwWPILmsragIoLKigJWkaIbUaOMlyecbaYvhPgKYJ7PlW0ocIYY6ke1BAWDNfMh6MgikVFofSF8JxQvHKoJv/vC+6AS2Ph7A66lInYjq28/J3KalOYPURXBORgPGnSldFCjZZ66YPoD4LAtUeYul0L1GPZn0YHFZ0PQSb1EJvYUKYKlKfAVMCEsdCJwUZkQlo3M+PgLkbdOiJylMUjt+KuOD85ZgHZBr0KNMMf0BdByqDJ3Aiz/niltfZ+1ASfC+cNg7elfh8Wh+XocN0YZIw7IihwIfRFuSCW8e8r/IfZpA55Ld6hF6T7f2Wz6YrheAe/oDNmtK6STuj1SrqeQUMBUCP7t3p4uSON0IgNCdET76LzIXyqR9hmXyAZbsGyu1bsky7jCtah2vR736ocQ9SMLn4WFzB4s8t0+HtXDwpP6TSkygUyqAStv7yJSOlSkJ307ipIpU566VRr1w16Hh2YF/B3b2kbsrEh9W9DUwKyBIuO7e/4a9HPS6yoW3gFfchELrmDBqboEldAvV+TxIXBtprkoSqBsTZDxWTA9hmYFVMlUlJEjIm1pIcz0/iKj4ff00YDsBhS+G6g3Y4TI3NvAECiqE3yxDgsJnxsFVHQPjDtnkBdwrWMVZctVt0hXPc3rCCpA6bmRoisWMQZR/l5E+8vUbBzQ2hP7gq5IgR2x0JE4/6e3iozoATfBNVRQsqAShiK6T++HgyjapIxK5noHvgKWub3ReY+19bHwQvjgAxCOPp9ofkZwUj+IfND2fsSL6aBwPn6rjcMcW9Tg2rug1BHdcJDACC1AGR2ZhBIfEctXQJNMAzU6WfsTVvw9RPsCCNCWFRPl/mGIGbNHitwBBjE2sEUFh2ZwnQZRspjmbDTJeTqrHEh+Pw99F7jX2o8wQJ88+H1X+HISiw6C8YBx4UFE9SL4tGFDRDo0YN2sOcZCodYG9GSdwj8OImIWNDfWut7HAifAhzsi9dlWdj4Y/D5EIRNOiYMQRGcjNtwJVjFuRGUDWcg1OQyINmvyZB0LN8h2pIcukUzVy8qHMHgeLDWiMPlCZ9NhFDK7RE7yLk4AjOZTBoj8cDgiPIIm2WCrYMah3mDBEJa8IeXGBWXNUsWQZ5CDC0rMQwubySD0INC/CIGsMaL1CQZg0v44hF+9W2TzEc/iQfSHELPAhm+iqqQ72CiaS8nA4MNhGCs5eA5l7iADGAP4uMoOmGQAihAKkgpobY6x5SjY8D9sfUN7NG6C7kZ6Y/3QGwq3YQPdgAWSsnUDLkBLCUXns7q2wUFxdh/QM9VqjmCKJBuqakT+9onIhkMtrU3hfwIlTEKxRbTGBjKyG5jZxZbNlEHJUAd/elpdANBy+Vh0GuS/hmwEU5bKHxwXeXWnSCW2vkFQURNQb8wMsCFepmAfd41UgrUCEAHJgEJbBhRA+Fwogfv7dMJnwzlsWF7fi20vdnsUNIheoDeVQGWQ7mGX4GEmxuliqwCe46pCB1+K0mrSFMBdZSbadqTKV5Ep9nx+vbuRKXSH72MPQISZYGSyEZ7guEoX0QUw7FcHXAzZcOayyNpPRQ7FedjFvUSXjulhIl3gnG0W4OLaW1u0OG92sDjixmkg9v9hnELgvNjguU4QPAz3JQRl1uoLusAFWwXwFhdLz/ZQAqlLv89DFCfFf4yCqG8+5gpNtvO0yD8QJxgHgsLyKxlhdqY2C+Q5jq6mC5y2veDCFa/RF9OJ+lgVOg6bmjnYIN1W7B0HcQLF0xoUT2/u9xTFW2RBUFH1SJNnuNuzWZ93/RkqYI8VAzgoJqjCBOHJkwWtyP3BQNCdEX7yTUhl8P8gaqDw/x5A5YiCifEgB1ko3vw0SjUUc54PcWwV4Mo+B3XxQessAIodhCVsxm8NPt0LEch+MFjk4WFemguC8W0HssEq1AYVJz2686ZKIrB65AOVqxjXaoGcQMkB6uGAefRlqbX9UAD9zDrYhEC681LW+twBDkdED+MoSmNafB0sfxkCMSvYzLePzzEoWFvgWJS5kQropSrlqj5lXjlpC1AA09OnmIjb4aig5Qd39aI7a/2wRRnZ16EIWoPS+BjmSET3MHjOeVy7lynTZl2c94qugiL2O7H38Cq852gWgBDvo0CJeuOCoEBTEeGLQ3SnYraB5qQ7ac+dHUtkW/B5QcU5kUu2AZCy8vW7+U6Dr9/1VoGQgBCfnPdYwNo7CsIpjWBg4/2B/4DuDIgMgvHOSwQqqxom3FyFA1sZeJ6WDf5XRsM35LKus37SgqD5L2xemHfb8s1EwpyHtd78TOQ10P0kChv6eTLZhaxaD+Gr+eDD5nrKWKPrpUm9wUPvkvnOcWhko3n9zAYY5DAstwkTd6Y/JQDdJLx15vHW2M5v5xkvekehuw96IJ8270XA3MLnhbZjeJulTfJLdZSHzTrTstKMagtM+O9j3iPsREqg9enbjOQUfO9Zj+7rsffnfT9aLwrdg6DSSP01B5H6eJ8g2jgrY5+By/i4qKv+WDqpW6yfD2BiPp5agDzOlx7i3SVmscPylpbmdpfgri8VcCxiGTZL+3j/oBUWXgcyvE7vkbNqpP+GaTMD2OHIC9aDERDkAtLPy/BllqCkZBhcLBlAn6fgqQpPyzNrrEK6jCQ84WW6PwZfr21WAJGpXpNLepd5lGwLLKgKtcFibFDoj3mYJLxX4HGq5TOH5M0Y5vul+0Q+QiqOJDxluqh3S5Za43V4aOk5S9y7JFttNvfOQwGsVYD+GVDGfb1R0/fyLM/NSZSwkghZGIsK/BC5fu0RKIGuFEV4Kp/3Chv0JHnCecf0xdBSAUS5u0IK1FxslKMFF0oLoW8qQMHTF1UftrNMk7yZGfXmBa+j4GTPiVqRtxFMK5A1zHookC04L58XVOu/Sqkzy/QFEF+85bpAGjVfkhqU1EtSDIa4Zjh2eXd2w24vz3sQan7CgvhkKEwuTmFcBY2ZgU9/j8K1dsDqFcgeDWRkFKv7YOBr0Acx6Gj5hUIJdz04b3wsdb+BCd/HKRlJvSZHzcek7AL/GwI2DIAiirEgPlRl6mQwIwxLcC7vNfBVOb4ix3hyyn85k4Ez8UoTwyhMN0mDTESts9X0hdD6sGXuzyRXvWLSYpR4EAavZeNsoG8uAiWbv5+gxRkvLkIBLgVmP2keheph8Fpav0b/HNRfbvrioG29lrmLJF/93rhCKkrwERP62mcQXE3bK2obFL4z2kV5Tp5SvzN9CWA3XZn7IoLi02l/X7g94At/Sb8kTzoLTF8rsCNZqbMQOXSRqaOTCUQ3ClybyfewvIXwRDTClbuPIp8uRajOivQqXXuD7kTBXX1Vrsh8CL/M9FsguseVu+Og6ZXYM9z8FfuXmc+kXj2CXd57pt8Sdi4QBP8np1qNl1q98hrlvixwbtb3dXoVjDEuqvBEajF3iXsPcvTzkoMig9sL211kqmB6o/Lr9A4w8Ncob982/Ukg9aTzLWyjf6Rn4FspNhqjTB82LGnPFiyGGISJBmzblZTJDrVaXml+7zcZpK4AH89qR4r1AxhxJqwyGTGis4kPXB7ZES/vtwaujFYmxemotboWnxtQNa3G37XyukqLitOngCCW6f6i9Hcg9GS0MSjy+1wTxK8KqRA/gLKfK+EnG3/jvepGfQL9FejbiLZOHnMOoTetaB8FBLHYzUawGgihSuAaJaDyzXCPYgiUDwV0NQLzCTWzN59T8t/nM+QAzqtEqq3krWtzRrtA5P/q10sKtGxUxgAAAABJRU5ErkJggg==',
             iconSize: 50,
-            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields-append=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields-append=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields-append=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    media.time ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
+            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields-append=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields-append=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields-append=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts-append=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    media.time ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
             presetEvent: {
                 playAuto: false,
                 pauseAuto: true,
@@ -1300,9 +1300,237 @@ function logLaunchArgs(args, media) {
     if (redacted.length > 0) {
         redacted[0] = '[sensitive media URL redacted]';
     }
+    for (let index = 1; index < redacted.length; index++) {
+        if (/^--audio-file=|quality-menu-(?:stream|hls)_variants=|cookie:/i.test(String(redacted[index]))) {
+            redacted[index] = '[sensitive media option redacted]';
+        }
+    }
     console.log(redacted);
 }
 // LAUNCH_LOG_HELPER_END
+
+// BILIBILI_STREAM_QUALITY_HELPERS_START
+function isBilibiliStreamUrl(value) {
+    try {
+        const url = new URL(value);
+        return /^https?:$/.test(url.protocol) && !url.username && !url.password &&
+            String(value).length <= 4096 && url.href.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(String(value));
+    } catch (error) { return false; }
+}
+
+function normalizeBilibiliLiveQuality(value) {
+    // Keep the meaning of saved preferences from the legacy playUrl endpoint.
+    const legacy = { '4': 'auto', '3': '150', '2': '80' };
+    const normalized = legacy[String(value)] || String(value || 'auto');
+    return /^(?:80|150|250|400|10000|15000|20000|30000)$/.test(normalized) ? normalized : 'auto';
+}
+
+function selectBilibiliStreamVariant(variants, preferredQuality = 'auto') {
+    if (!Array.isArray(variants) || !variants.length) return undefined;
+    const sorted = [...variants].sort((left, right) => Number(right.quality) - Number(left.quality) ||
+        (Number(right.bandwidth) || 0) - (Number(left.bandwidth) || 0));
+    const limit = Number(preferredQuality);
+    return (limit > 0 ? sorted.find(item => Number(item.quality) <= limit) : sorted[0]) || sorted.at(-1);
+}
+
+function encodeBilibiliStreamVariants(variants, selected, maxLength = 20480) {
+    const payloadLimit = Math.min(Number(maxLength) || 0, 20480);
+    if (payloadLimit <= 0) return undefined;
+    const seen = new Set();
+    const items = [];
+    // The launch is a Windows command line: keep one codec/CDN per quality and bound its size.
+    for (const variant of Array.isArray(variants) ? variants.slice(0, 16) : []) {
+        if (!isBilibiliStreamUrl(variant?.url) || seen.has(variant.url)) continue;
+        const item = { url: new URL(variant.url).href };
+        if (variant.audio_url && isBilibiliStreamUrl(variant.audio_url)) item.audio_url = new URL(variant.audio_url).href;
+        for (const key of ['width', 'height', 'bandwidth', 'fps']) {
+            const value = Number(variant[key]);
+            const maximum = key === 'fps' ? 240 : key === 'bandwidth' ? 1e9 : 16384;
+            if (Number.isFinite(value) && value > 0 && value <= maximum) item[key] = key === 'fps' ? value : Math.floor(value);
+        }
+        for (const key of ['title', 'codec']) {
+            if (!variant[key]) continue;
+            let label = String(variant[key]).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, key === 'title' ? 120 : 64);
+            const maximumBytes = key === 'title' ? 360 : 64;
+            while (new TextEncoder().encode(label).length > maximumBytes) label = [...label].slice(0, -1).join('');
+            if (label) item[key] = label;
+        }
+        seen.add(item.url);
+        items.push(item);
+    }
+    if (!seen.has(selected?.url)) return undefined;
+    const highestUrl = items[0]?.url;
+    while (items.length) {
+        const encoded = encodeURIComponent(JSON.stringify(items));
+        if (encoded.length <= payloadLimit) return { encoded, variants: items };
+        // Keep the selected stream and the highest available tier. If those cannot
+        // fit together, omit the optional list and keep the chosen direct stream.
+        const removable = items.findLastIndex(item => item.url !== selected.url && item.url !== highestUrl);
+        if (removable < 0) break;
+        items.splice(removable, 1);
+    }
+}
+
+function buildMpvEncodedScriptOption(optionName, encodedValue) {
+    if (!/^[a-z0-9_-]+$/i.test(String(optionName)) || typeof encodedValue !== 'string') {
+        throw new Error('Invalid MPV script option');
+    }
+    // MPV treats a leading percent as its suboption quoting syntax. Protect the
+    // percent-encoded JSON with one fixed-length quote; ush only transports it.
+    const byteLength = new TextEncoder().encode(encodedValue).length;
+    return `--script-opts-append="${optionName}=%${byteLength}%${encodedValue}"`;
+}
+
+function attachBilibiliStreamVariants(media, variants, selected) {
+    media.mpvOptions = [...(media.mpvOptions || [])].filter(option => !String(option).includes('quality-menu-stream_variants='));
+    for (const option of ['--no-ytdl', '--force-window=immediate']) {
+        if (!media.mpvOptions.includes(option)) media.mpvOptions.push(option);
+    }
+    const globalConfig = typeof currentConfig !== 'undefined' ? currentConfig?.global : undefined;
+    const fields = [media.video || selected?.url, media.audio || selected?.audio_url,
+        media.subtitle, media.title, media.origin, media.referer, media.cookie, media.time,
+        media.bilibili?.cid, ...media.mpvOptions, globalConfig?.networkProxy,
+        media.ytdlp?.networkProxy, media.ytdlp?.impersonate, media.ytdlp?.cookiesFromBrowser,
+        media.ytdlp?.format, media.ytdlp?.quality];
+    const otherLength = fields.reduce((total, value) => total + String(value ?? '').length, 0);
+    // Gzip shrinks the ush URI, but MPV still receives an uncompressed Windows command line.
+    // Reserve executable/option quoting overhead and keep the estimated total below 30k.
+    const payload = encodeBilibiliStreamVariants(variants, selected, Math.min(20480, 30000 - 3000 - otherLength));
+    if (payload) media.mpvOptions.push(buildMpvEncodedScriptOption('quality-menu-stream_variants', payload.encoded));
+    media.sensitiveUrl = true;
+    // Browser-authenticated direct URLs must not be re-extracted anonymously by yt-dlp or relayed as a different path.
+    media.disableBrowserRelay = true;
+    return media;
+}
+
+async function fetchBilibiliQualityJson(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    try {
+        const response = await fetch(url, { credentials: 'include', signal: controller.signal });
+        if (!response.ok) throw new Error(`Bilibili stream request failed (${response.status})`);
+        const payload = await response.json();
+        if (Number(payload?.code) !== 0) throw new Error(`Bilibili stream unavailable (API code ${Number(payload?.code)})`);
+        return payload;
+    } finally { clearTimeout(timeout); }
+}
+
+function parseBilibiliLiveStreams(data, preferredLine = '0') {
+    const playurl = data?.playurl_info?.playurl;
+    const descriptions = new Map((playurl?.g_qn_desc || []).map(item => [Number(item.qn), item]));
+    const candidates = [];
+    for (const stream of playurl?.stream || []) {
+        for (const format of stream?.format || []) {
+            for (const codec of format?.codec || []) {
+                if (codec?.drm === true || Number(codec?.drm) > 0) continue;
+                const quality = Number(codec?.current_qn);
+                const urls = (codec?.url_info || []).map(item => `${item.host || ''}${codec.base_url || ''}${item.extra || ''}`)
+                    .filter(isBilibiliStreamUrl);
+                if (!Number.isInteger(quality) || quality <= 0 || !urls.length) continue;
+                const line = Math.max(0, Math.min(Number(preferredLine) || 0, urls.length - 1));
+                const description = descriptions.get(quality);
+                const detail = description?.media_base_desc?.detail_desc?.desc || description?.desc;
+                const metadata = codec.media_info || {};
+                const candidate = { url: urls[line], quality, title: String(detail || `Quality ${quality}`),
+                    codec: String(codec.video_codecs?.base || codec.codec_name || ''),
+                    width: Number(metadata.width) || undefined, height: Number(metadata.height) || undefined,
+                    // No nominal bitrate is advertised when the API only provides realtime throughput.
+                    score: (format.format_name === 'flv' ? 4 : format.format_name === 'fmp4' ? 2 : 1) +
+                        (codec.codec_name === 'avc' ? 1 : 0) };
+                candidates.push(candidate);
+            }
+        }
+    }
+    const byQuality = new Map();
+    for (const item of candidates) {
+        if (!byQuality.has(item.quality) || item.score > byQuality.get(item.quality).score) byQuality.set(item.quality, item);
+    }
+    return [...byQuality.values()].sort((left, right) => right.quality - left.quality);
+}
+
+async function resolveBilibiliLiveStreams(roomId, preferredQuality = 'auto', preferredLine = '0') {
+    if (!/^[1-9]\d*$/.test(String(roomId || ''))) throw new Error('Invalid Bilibili live room id');
+    const request = async quality => (await fetchBilibiliQualityJson(
+        `https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id=${roomId}&qn=${quality}&protocol=0,1&format=0,1,2&codec=0,1&platform=web&ptype=8&mask=0&no_playurl=0`
+    )).data;
+    // Ask for the highest server-supported tier; use current_qn, never the requested qn, as the actual quality.
+    const initial = await request(30000);
+    if (Number(initial?.live_status) !== 1) throw new Error('Bilibili room is not live');
+    const initialVariants = parseBilibiliLiveStreams(initial, preferredLine);
+    if (!initialVariants.length) throw new Error('Bilibili returned no playable live streams');
+    const accepted = new Set(initialVariants.map(item => item.quality));
+    for (const stream of initial.playurl_info?.playurl?.stream || []) {
+        for (const format of stream.format || []) {
+            for (const codec of format.codec || []) {
+                for (const qn of codec.accept_qn || []) if (Number.isInteger(Number(qn)) && Number(qn) > 0) accepted.add(Number(qn));
+            }
+        }
+    }
+    const variantsByQuality = new Map(initialVariants.map(item => [item.quality, item]));
+    // Probe only advertised tiers. A tier silently downgraded by the server is not added under its requested name.
+    const qualities = [...accepted].sort((left, right) => right - left).slice(0, 12)
+        .filter(quality => !variantsByQuality.has(quality));
+    for (let index = 0; index < qualities.length; index += 3) {
+        const responses = await Promise.allSettled(qualities.slice(index, index + 3).map(request));
+        for (const response of responses) {
+            if (response.status !== 'fulfilled') continue;
+            for (const variant of parseBilibiliLiveStreams(response.value, preferredLine)) {
+                if (!variantsByQuality.has(variant.quality)) variantsByQuality.set(variant.quality, variant);
+            }
+        }
+    }
+    const variants = [...variantsByQuality.values()].sort((left, right) => right.quality - left.quality);
+    return { variants, selected: selectBilibiliStreamVariant(variants, normalizeBilibiliLiveQuality(preferredQuality)) };
+}
+
+async function prepareBilibiliLiveStreamLaunch(media, player, roomId) {
+    if (!roomId || !isMpvDanmakuPlayer(player) || String(media.bilibili?.liveQualityRoom) === String(roomId)) return media;
+    const settings = currentConfig.global.parser.bilibiliLive;
+    const result = await resolveBilibiliLiveStreams(roomId, settings.preferredQuality, settings.preferredLine);
+    const launchMedia = { ...media, video: result.selected.url, audio: undefined,
+        bilibili: { ...(media.bilibili || {}), liveQualityRoom: String(roomId) },
+        referer: `https://live.bilibili.com/${roomId}`, cookie: undefined };
+    return attachBilibiliStreamVariants(launchMedia, result.variants, result.selected);
+}
+
+function parseBilibiliDashStreams(data, preferredCodec) {
+    const dash = data?.dash;
+    if (!dash) return [];
+    const getUrl = item => item?.baseUrl || item?.base_url || item?.backupUrl?.[0] || item?.backup_url?.[0];
+    const audioItems = [dash.flac?.audio, ...(dash.dolby?.audio || []), ...(dash.audio || [])].filter(Boolean);
+    const audio = audioItems.find(item => isBilibiliStreamUrl(getUrl(item)));
+    const byQuality = new Map();
+    for (const video of dash.video || []) {
+        const quality = Number(video.id);
+        const url = getUrl(video);
+        if (!Number.isInteger(quality) || quality <= 0 || !isBilibiliStreamUrl(url)) continue;
+        const previous = byQuality.get(quality);
+        const preferred = Number(video.codecid) === Number(preferredCodec);
+        if (previous && (previous.preferred || !preferred)) continue;
+        const support = (data.support_formats || []).find(item => Number(item.quality) === quality);
+        const rate = String(video.frameRate || video.frame_rate || '').split('/').map(Number);
+        const fps = rate.length === 2 && rate[1] > 0 ? rate[0] / rate[1] : rate[0];
+        byQuality.set(quality, { url, audio_url: getUrl(audio), quality,
+            title: String(support?.new_description || support?.display_desc || support?.description || `${Number(video.height) || quality}p`),
+            width: Number(video.width) || undefined, height: Number(video.height) || undefined,
+            bandwidth: Number(video.bandwidth) || undefined, fps: Number.isFinite(fps) && fps > 0 ? fps : undefined,
+            codec: String(video.codecs || ''), preferred });
+    }
+    return [...byQuality.values()].sort((left, right) => right.quality - left.quality);
+}
+
+async function fetchBilibiliVideoPlayInfo(aid, cid, epid, fnval = 4048) {
+    if (epid) {
+        const result = await fetchBilibiliQualityJson(`https://api.bilibili.com/pgc/player/web/v2/playurl?qn=127&otype=json&fourk=1&fnver=0&fnval=${fnval}&avid=${aid}&cid=${cid}&ep_id=${epid}&from_client=BROWSER&module=bangumi&drm_tech_type=2&support_multi_audio=true`);
+        return result.result?.video_info;
+    }
+    const nav = await fetchBilibiliLiveJson('https://api.bilibili.com/x/web-interface/nav');
+    const key = value => String(value || '').split('/').pop().split('.')[0];
+    const query = buildBilibiliWbiQuery({ avid: aid, cid, qn: 127, otype: 'json', fourk: 1, fnver: 0, fnval },
+        key(nav?.data?.wbi_img?.img_url), key(nav?.data?.wbi_img?.sub_url));
+    return (await fetchBilibiliQualityJson(`https://api.bilibili.com/x/player/wbi/playurl?${query}`)).data;
+}
+// BILIBILI_STREAM_QUALITY_HELPERS_END
 
 class BaseParser {
     constructor() {
@@ -1503,6 +1731,10 @@ class BaseParser {
             }
             media = await this.prepareLaunchMedia(player);
 
+            // The outer Bilibili room can be handed off by an iframe or a resource parser.
+            // Resolve the same authenticated quality list for those routes as for the native live parser.
+            media = await prepareBilibiliLiveStreamLaunch(media, player, bilibiliLiveRoomId);
+
             // Bilibili's outer room page can delegate stream parsing to a /blanc iframe.
             // Attach the room's live input after every parser's handoff, including IFRAME.
             if (bilibiliLiveRoomId) {
@@ -1565,7 +1797,7 @@ class BaseParser {
                                 media.ytdlp.impersonate ? `--ytdl-raw-options-append="impersonate=${media.ytdlp.impersonate}"` : '',
                                 media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append="cookies-from-browser=${media.ytdlp.cookiesFromBrowser}"` : '',
                                 media.ytdlp.format ? `--ytdl-format="${media.ytdlp.format}"` : media.ytdlp.quality ? `--ytdl-format="bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best"` : '',
-                                media.bilibili.cid ? `--script-opts="cid=${media.bilibili.cid}"` : '',
+                                media.bilibili.cid ? `--script-opts-append="cid=${media.bilibili.cid}"` : '',
                                 media.title ? `--force-media-title="${media.title}"` : '',
                                 media.time ? `--start="${media.time}"` : '',
                             ]
@@ -2157,6 +2389,7 @@ const PARSER = {
                 if (dash) {
                     currentMedia.audio = dash.audio;
                     currentMedia.video = dash.video;
+                    attachBilibiliStreamVariants(currentMedia, dash.variants, dash.selected);
                     return;
                 }
             }
@@ -2288,72 +2521,14 @@ const PARSER = {
             }
         }
         async getDash(aid, cid, codecid, quality, epid) {
-            const url = epid
-            ? `https://api.bilibili.com/pgc/player/web/v2/playurl?qn=120&otype=json&fourk=1&fnver=0&fnval=4048&avid=${aid}&cid=${cid}&ep_id=${epid}&from_client=BROWSER&module=bangumi&drm_tech_type=2&support_multi_audio=true`
-            : `https://api.bilibili.com/x/player/playurl?qn=120&otype=json&fourk=1&fnver=0&fnval=4048&avid=${aid}&cid=${cid}`;
-
-            const response = await (await fetch(url, {
-                method: 'GET',
-                credentials: 'include'
-            })).json();
-            const data = epid
-                ? response.result?.video_info
-                : response.data;
-
+            const data = await fetchBilibiliVideoPlayInfo(aid, cid, epid);
             if (!data) {
                 currentTryCount = MAX_TRY_COUNT;
-                throw new Error(response.message || translation.requireLoginOrVip);
+                throw new Error(translation.requireLoginOrVip);
             }
-
-            let video = undefined;
-            let audio = undefined;
-            let dash = data.dash;
-            if (!dash) {
-                return undefined;
-            }
-
-            const getUrl = item => item?.baseUrl || item?.base_url || item?.backupUrl?.[0] || item?.backup_url?.[0];
-
-            let hiRes = dash.flac;
-            let dolby = dash.dolby;
-            if (hiRes && hiRes.audio) {
-                audio = getUrl(hiRes.audio);
-            } else if (dolby && dolby.audio && dolby.audio.length > 0) {
-                audio = getUrl(dolby.audio[0]);
-            } else if (dash.audio && dash.audio.length > 0) {
-                audio = getUrl(dash.audio[0]);
-            }
-
-            const videos = dash.video || [];
-            if (videos.length === 0) {
-                return undefined;
-            }
-
-            let candidates = videos.filter(item => item.id <= quality);
-            if (candidates.length === 0) {
-                candidates = videos;
-            }
-
-            let selected = candidates[0];
-            for (const item of candidates) {
-                if (item.id !== selected.id) {
-                    break;
-                }
-                if (item.codecid == codecid) {
-                    selected = item;
-                    break;
-                }
-            }
-
-            video = getUrl(selected);
-            if (!video) {
-                return undefined;
-            }
-
-            return {
-                video: video,
-                audio: audio
-            };
+            const variants = parseBilibiliDashStreams(data, codecid);
+            const selected = selectBilibiliStreamVariant(variants, quality);
+            return selected ? { video: selected.url, audio: selected.audio_url, variants, selected } : undefined;
         }
 
         async getFlvOrMP4(aid, cid) {
@@ -2592,23 +2767,12 @@ const PARSER = {
             }
             this.roomId = roomid;
 
-            const quality = currentConfig.global.parser.bilibiliLive.preferredQuality;
-            const url = `https://api.live.bilibili.com/room/v1/Room/playUrl?quality=${quality}&cid=${roomid}`;
-            const response = await (await fetch(url, {
-                method: 'GET',
-                credentials: 'include'
-            })).json();
-
-            const durls = response.data.durl;
-            const line = currentConfig.global.parser.bilibiliLive.preferredLine;
-            let durl = durls[durls.length - 1];
-            for (let index = 0; index < durls.length; index++) {
-                if (line == index) {
-                    durl = durls[index];
-                    break;
-                }
-            }
-            currentMedia.video = durl.url;
+            const settings = currentConfig.global.parser.bilibiliLive;
+            const result = await resolveBilibiliLiveStreams(roomid, settings.preferredQuality, settings.preferredLine);
+            currentMedia.video = result.selected.url;
+            currentMedia.audio = undefined;
+            currentMedia.bilibili.liveQualityRoom = String(roomid);
+            attachBilibiliStreamVariants(currentMedia, result.variants, result.selected);
         }
     },
     ANI_GAMER: class Parser extends BaseParser {
@@ -2736,8 +2900,7 @@ const PARSER = {
                 }
 
                 this.hlsVariants = payload.variants;
-                this.hlsVariantsOption =
-                    `--script-opts-append="quality-menu-hls_variants=${payload.encoded}"`;
+                this.hlsVariantsOption = buildMpvEncodedScriptOption('quality-menu-hls_variants', payload.encoded);
                 currentMedia.video = selected.url;
             } catch (error) {
                 const reason = error?.name === 'AbortError' ?
@@ -2901,11 +3064,20 @@ const PARSER = {
     },
     IFRAME: class Parser extends BaseParser {
         async execute() {
-            iframe.postMessage({
-                name: PROJECT_NAME,
-                method: 'execute'
-            }, '*');
-            await sleep(REFRESH_INTERVAL);
+            if (this.pendingExecute) return this.pendingExecute;
+            this.pendingExecute = new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    this.finishExecute = undefined;
+                    reject(new Error('The embedded video parser did not respond'));
+                }, 32000);
+                this.finishExecute = error => {
+                    clearTimeout(timeout);
+                    this.finishExecute = undefined;
+                    error ? reject(new Error(error)) : resolve();
+                };
+                iframe.postMessage({ name: PROJECT_NAME, method: 'execute' }, '*');
+            }).finally(() => { this.pendingExecute = undefined; });
+            return this.pendingExecute;
             await this.parseTitle();
         }
         async pause() {
@@ -5044,6 +5216,37 @@ function renderQuickQualitySettings() {
         return;
     }
     const parser = currentParser;
+    if (getBilibiliLiveRoomId(currentUrl)) {
+        const english = currentConfig.global.language === 'en';
+        setQuickQualityOptions([
+            { value: 'auto', label: translation.handoffQualityAuto },
+            { value: '10000', label: english ? 'Source' : '原画' },
+            { value: '400', label: english ? 'Blu-ray' : '蓝光' },
+            { value: '250', label: english ? 'Super HD' : '超清' },
+            { value: '150', label: english ? 'HD' : '高清' },
+            { value: '80', label: english ? 'Smooth' : '流畅' }
+        ], normalizeBilibiliLiveQuality(currentConfig.global.parser.bilibiliLive.preferredQuality));
+        handoffPreferredQuality.disabled = false;
+        handoffPreferredQuality.onchange = () => {
+            currentConfig.global.parser.bilibiliLive.preferredQuality = handoffPreferredQuality.value;
+            persistQuickSettings();
+        };
+        return;
+    }
+    if (parser?.parserKey === 'bilibili') {
+        setQuickQualityOptions([
+            { value: '127', label: translation.handoffQualityAuto },
+            { value: '120', label: '4K' }, { value: '116', label: '1080p60' },
+            { value: '112', label: '1080p+' }, { value: '80', label: '1080p' },
+            { value: '64', label: '720p' }, { value: '32', label: '480p' }, { value: '16', label: '360p' }
+        ], currentConfig.global.parser.bilibili.preferredQuality || '127');
+        handoffPreferredQuality.disabled = false;
+        handoffPreferredQuality.onchange = () => {
+            currentConfig.global.parser.bilibili.preferredQuality = handoffPreferredQuality.value;
+            persistQuickSettings();
+        };
+        return;
+    }
     if (parser?.parserKey === 'douyu' && typeof parser.getQualityOptions === 'function') {
         setQuickQualityOptions([{
             value: 'auto',
@@ -5789,9 +5992,12 @@ async function appendSettingIframe() {
                         <textarea name="regex" style="display: none;"></textarea>
                         <label data-translate="preferredQuality">首选画质</label>
                         <div class="radio-button-group" name="preferredQuality">
-                            <div class="radio-button active" value="4" data-translate="original">原画</div>
-                            <div class="radio-button active" value="3" data-translate="hd">高清</div>
-                            <div class="radio-button active" value="2" data-translate="smooth">流畅</div>
+                            <div class="radio-button active" value="auto" data-translate="bestAvailable">最高可用</div>
+                            <div class="radio-button" value="10000" data-translate="original">原画</div>
+                            <div class="radio-button" value="400" data-translate="blueRay">蓝光</div>
+                            <div class="radio-button" value="250" data-translate="superHd">超清</div>
+                            <div class="radio-button" value="150" data-translate="hd">高清</div>
+                            <div class="radio-button" value="80" data-translate="smooth">流畅</div>
                         </div>
                         <label data-translate="preferredLine">首选线路</label>
                         <div class="radio-button-group" name="preferredLine">
@@ -5860,6 +6066,9 @@ async function appendSettingIframe() {
                 preferredCodec: 'Preferred Codec',
                 preferredLine: 'Preferred Line',
                 original: 'Original',
+                bestAvailable: 'Best available',
+                blueRay: 'Blu-ray',
+                superHd: 'Super HD',
                 hd: 'HD',
                 smooth: 'Smooth',
                 mainLine: 'Main',
@@ -5905,6 +6114,9 @@ async function appendSettingIframe() {
                 preferredCodec: '首选编码',
                 preferredLine: '首选线路',
                 original: '原画',
+                bestAvailable: '最高可用',
+                blueRay: '蓝光',
+                superHd: '超清',
                 hd: '高清',
                 smooth: '流畅',
                 mainLine: '主线',
@@ -6190,9 +6402,11 @@ async function appendSettingIframe() {
                 parser.querySelectorAll('.radio-button-group').forEach(radioButtonGroup => {
                     const radioButtons = radioButtonGroup.querySelectorAll('.radio-button');
                     radioButtons.forEach(radioButton => {
-                        if (radioButton.getAttribute('value') === config.global.parser[parser.id][
-                            radioButtonGroup.getAttribute('name')
-                        ]) {
+                        let selectedValue = config.global.parser[parser.id][radioButtonGroup.getAttribute('name')];
+                        if (parser.id === 'bilibiliLive' && radioButtonGroup.getAttribute('name') === 'preferredQuality') {
+                            selectedValue = { '4': 'auto', '3': '150', '2': '80' }[selectedValue] || selectedValue;
+                        }
+                        if (radioButton.getAttribute('value') === selectedValue) {
                             radioButton.classList.add('active');
                         } else {
                             radioButton.classList.remove('active');
@@ -6417,7 +6631,9 @@ async function initTop() {
             return;
         }
         if (data.method === 'currentMedia') {
-            currentMedia = data.currentMedia;
+            if (event.source && event.source !== iframe) return;
+            if (data.currentMedia) currentMedia = data.currentMedia;
+            currentParser?.finishExecute?.(data.error);
             return;
         }
     });
@@ -6476,12 +6692,12 @@ function initIframe() {
                 return;
             }
             if (data.method === 'execute') {
-                await currentParser.execute();
-                parent.postMessage({
-                    name: PROJECT_NAME,
-                    method: 'currentMedia',
-                    currentMedia: currentMedia
-                }, '*');
+                try {
+                    await currentParser.execute();
+                    parent.postMessage({ name: PROJECT_NAME, method: 'currentMedia', currentMedia }, '*');
+                } catch (error) {
+                    parent.postMessage({ name: PROJECT_NAME, method: 'currentMedia', error: error?.message || 'Embedded video parsing failed' }, '*');
+                }
                 return;
             }
             if (data.method === 'pause') {

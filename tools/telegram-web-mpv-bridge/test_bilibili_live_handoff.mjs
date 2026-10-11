@@ -253,6 +253,7 @@ function iframeHandoffSandbox() {
         updateHandoffStatus: (...args) => statuses.push(args), showToast: text => toasts.push(text),
         policy: { createScript: text => text }, compress: text => text,
         logLaunchArgs() {},
+        prepareBilibiliLiveStreamLaunch: async media => media,
         bilibiliMediaBridge: { startDanmaku: async request => {
             starts.push(asPlain(request));
             return { type: 'danmakuStarted', provider: 'bilibili', apiVersion: 2, sessionId: request.sessionId };
@@ -312,6 +313,22 @@ test('iframe handoff preserves video and the failure reason if live authenticati
     assert.ok(!launches[0].includes('--input-ipc-server'));
     assert.match(toasts[0], /API code -352/);
     assert.equal(statuses.at(-1)[0], 'danmaku-unavailable');
+});
+
+test('the complete iframe MPV handoff replaces a captured low-quality stream and carries variants plus live danmaku', async () => {
+    const { context, child, messageListeners, starts, launches } = iframeHandoffSandbox();
+    vm.runInContext(between('// BILIBILI_STREAM_QUALITY_HELPERS_START', '// BILIBILI_STREAM_QUALITY_HELPERS_END'), context);
+    const highest = { url: 'https://fixture.bilivideo.com/source-1440.flv', quality: 10000, title: '1440P 原画', height: 1440 };
+    const lower = { url: 'https://fixture.bilivideo.com/captured-720.flv', quality: 250, title: '720P 超清', height: 720 };
+    context.resolveBilibiliLiveStreams = async () => ({ variants: [highest, lower], selected: highest });
+    await context.initTop();
+    await messageListeners[0]({ source: child, data: { name: 'external-player', method: 'init' } });
+    await context.currentParser.play(context.currentConfig.players.find(player => player.name === 'MPV'));
+    assert.equal(launches.length, 1);
+    assert.match(launches[0], /source-1440\.flv/);
+    assert.match(launches[0], /quality-menu-stream_variants=/);
+    assert.match(launches[0], /--input-ipc-server=\\\\\.\\pipe\\mpv-lazy-bilibili-/);
+    assert.equal(starts.length, 1);
 });
 
 test('room detection supports outer and embedded live pages and rejects unrelated/video pages', () => {

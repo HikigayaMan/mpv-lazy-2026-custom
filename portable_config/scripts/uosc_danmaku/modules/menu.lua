@@ -724,13 +724,13 @@ local menu_items_config = {
     bold = { title = "粗体", hint = options.bold, original = options.bold,
         footnote = "true / false", },
     fontsize = { title = "大小", hint = options.fontsize, original = options.fontsize,
-        scope = { min = 0, max = math.huge }, footnote = "请输入整数(>=0)", },
+        scope = { min = 1, max = 500 }, footnote = "请输入整数(1-500)", },
     outline = { title = "描边", hint = options.outline, original = options.outline,
-        scope = { min = 0.0, max = 4.0 }, footnote = "输入范围：(0.0-4.0)" },
+        scope = { min = 0.0, max = 20.0 }, footnote = "输入范围：(0.0-20.0)" },
     shadow = { title = "阴影", hint = options.shadow, original = options.shadow,
-        scope = { min = 0, max = math.huge }, footnote = "请输入整数(>=0)", },
+        scope = { min = 0, max = 20 }, footnote = "请输入整数(0-20)", },
     scrolltime = { title = "速度", hint = options.scrolltime, original = options.scrolltime,
-        scope = { min = 1, max = math.huge }, footnote = "请输入整数(>=1)", },
+        scope = { min = 1, max = 120 }, footnote = "请输入整数(1-120)", },
     opacity = { title = "透明度", hint = options.opacity, original = options.opacity,
         scope = { min = 0, max = 1 }, footnote = "输入范围：0（完全透明）到1（不透明）", },
     displayarea = { title = "弹幕显示范围", hint = options.displayarea, original = options.displayarea,
@@ -740,6 +740,18 @@ local menu_items_config = {
 }
 -- 创建一个包含键顺序的表，这是样式菜单的排布顺序
 local ordered_keys = {"bold", "fontsize", "outline", "shadow", "scrolltime", "opacity", "displayarea", "live_fps_mode"}
+
+local function style_save_hint()
+    local status = mp.get_property_native("user-data/uosc_danmaku/style-defaults-status")
+    if status == "save-error" then
+        return "本次更改已生效，自动保存失败；可用保存按钮重试"
+    elseif status == "clear-error" then
+        return "清除保存样式失败；请检查配置目录是否可写"
+    elseif status == "cleared" then
+        return "已清除保存样式，下次启动使用配置文件；本次样式保持"
+    end
+    return "更改会自动保存，下次启动继续使用"
+end
 
 -- 设置弹幕样式菜单
 function open_style_menu_get(query, indicator)
@@ -771,7 +783,7 @@ function open_style_menu_get(query, indicator)
         for _, key in ipairs(ordered_keys) do
             serial = serial + 1
             local config = menu_items_config[key]
-            local text = string.format("  [%02d] %s   [目前：%s] ", serial, config.title, config.hint)
+            local text = string.format("  [%02d] %s   [目前：%s] ", serial, config.title, tostring(config.hint))
             text = config.hint ~= config.original and text .. "⟳" or text
             local style = serial == select_num and "{\\c&HFFDE7F&}" or "{\\c&HCCCCCC&}"
             local item_config = { text = text, style = style }
@@ -781,11 +793,11 @@ function open_style_menu_get(query, indicator)
         table.insert(menu_log, { text = ("-"):rep(33), style = "{\\c&H888888&}" })
         if select_num == 0 then
             table.insert(menu_log, {
-                text = "注: 修改先对本次播放生效，可用保存按钮设为跨进程默认",
+                text = "注: " .. style_save_hint(),
                 style = "{\\c&HFFDE7F&}"
             })
             table.insert(menu_log, {
-                text = "输入【p】保存当前样式为跨进程默认；输入【c】清除保存样式",
+                text = "输入【p】立即保存当前样式；输入【c】清除保存样式",
                 style = "{\\c&H999999&}"
             })
             table.insert(menu_log, {
@@ -805,11 +817,11 @@ function open_style_menu_get(query, indicator)
             local hint_text = select_query == "bold" and "提示: 输入【y】切换状态" or "提示: " .. scope
             local hint_style = "{\\c&H999999&}"
             if source and source:lower() == "\\r" then
-                hint_text = string.format("提示: 回车将恢复默认配置 < %s >", config.original)
+                hint_text = string.format("提示: 回车将恢复默认配置 < %s >", tostring(config.original))
             end
             if indicator == "refresh" or indicator == "updata" then
                 indicator = ""
-                hint_text = "提示: 样式更改成功"
+                hint_text = "提示: 样式已更改并自动保存"
                 hint_style = "{\\c&HFFDE7F&}"
                 mp.add_timeout(1.5, build_menu)
             elseif indicator == "error" then
@@ -817,6 +829,9 @@ function open_style_menu_get(query, indicator)
                 hint_text = "提示: 输入非数字字符或范围出错"
                 hint_style = "{\\c&H4C4CC3&}"
                 mp.add_timeout(1.5, build_menu)
+            elseif indicator == "save-error" then
+                hint_text = "提示: 本次更改已生效，自动保存失败；请检查配置目录是否可写"
+                hint_style = "{\\c&H4C4CC3&}"
             end
 
             table.insert(menu_log, { text = input_text, style = "{\\c&HCCCCCC&}" })
@@ -901,15 +916,15 @@ function open_style_menu_uosc(actived, status)
         table.insert(items, item_config)
     end
     table.insert(items, {
-        title = "保存当前样式",
-        hint = "设为跨进程默认",
+        title = "立即保存当前样式",
+        hint = "更改已自动保存，可手动重试",
         icon = "save",
         keep_open = true,
         selectable = true,
     })
     table.insert(items, {
         title = "清除已保存样式",
-        hint = "恢复脚本默认值",
+        hint = "下次启动使用配置文件；本次保持",
         icon = "delete",
         keep_open = true,
         selectable = true,
@@ -919,7 +934,7 @@ function open_style_menu_uosc(actived, status)
         type = "menu_style",
         title = "弹幕样式",
         search_style = "disabled",
-        footnote = "修改先对本次播放生效，可用保存按钮设为跨进程默认",
+        footnote = style_save_hint(),
         item_actions_place = "outside",
         items = items,
         callback = { mp.get_script_name(), 'setup-danmaku-style'},
@@ -928,7 +943,7 @@ function open_style_menu_uosc(actived, status)
     local actions = "open-menu"
     if status ~= nil then
         -- msg.info(status)
-        if status == "updata" then
+        if status == "updata" or status == "edit" then
             -- "updata" 模式会保留输入框文字
             menu_props.title = "  " .. menu_items_config[actived]["footnote"]
             actions = "update-menu"
@@ -939,10 +954,12 @@ function open_style_menu_uosc(actived, status)
             menu_props.title = "输入非数字字符或范围出错"
             -- 创建一个定时器，在1秒后触发回调函数，删除搜索栏错误信息
             mp.add_timeout(1.0, function() open_style_menu_uosc(actived, "updata") end)
+        elseif status == "save-error" then
+            menu_props.title = "本次更改已生效，自动保存失败"
         end
         menu_props.search_style = "palette"
         menu_props.search_debounce = "submit"
-        menu_props.footnote = menu_items_config[actived]["footnote"] or ""
+        menu_props.footnote = (menu_items_config[actived]["footnote"] or "") .. " · " .. style_save_hint()
         menu_props.on_search = { "script-message-to", mp.get_script_name(), "setup-danmaku-style", actived }
     end
 
@@ -1463,30 +1480,58 @@ mp.register_script_message('cancel-active-request', function(menu_type)
     perform_cancel_active_request(menu_type)
 end)
 
+local function apply_menu_style_value(key, value, status)
+    local changed, saved
+    if key == "live_fps_mode" then
+        changed, saved = set_live_fps_mode(value)
+    else
+        changed, saved = set_danmaku_style_value(key, value)
+    end
+    if not changed then
+        open_style_menu(key, "error")
+        return false
+    end
+    menu_items_config[key].hint = options[key]
+    open_style_menu(key, saved and status or "save-error")
+    if not saved then
+        show_message("本次样式更改已生效，自动保存失败；请检查配置目录是否可写", 3)
+    end
+    if key ~= "live_fps_mode" then
+        if not refresh_live_danmaku_style() and (key == "fontsize" or key == "scrolltime") then
+            load_danmaku(true, true)
+        end
+    end
+    return true
+end
+
 mp.register_script_message("setup-danmaku-style", function(query, text)
     local event = utils.parse_json(query)
-    if event ~= nil then
+    if type(event) == "table" then
         -- item点击 或 图标点击
         if event.type == "activate" then
             if event.action == "save-style-default" or (not event.action and event.index == #ordered_keys + 1) then
-                if save_danmaku_style_defaults() then
-                    show_message("已保存当前样式为跨进程默认", 2)
+                if save_danmaku_style_defaults(true) then
+                    show_message("已保存当前样式，下次启动继续使用", 2)
+                else
+                    show_message("保存样式失败；请检查配置目录是否可写", 3)
                 end
                 open_style_menu()
                 return
             elseif event.action == "clear-style-default" or (not event.action and event.index == #ordered_keys + 2) then
                 if clear_danmaku_style_defaults() then
-                    show_message("已清除保存样式", 2)
+                    show_message("已清除保存样式，下次启动使用配置文件", 2)
+                else
+                    show_message("清除保存样式失败；请检查配置目录是否可写", 3)
                 end
                 open_style_menu()
                 return
             end
             if not event.action then
-                if ordered_keys[event.index] == "bold" then
-                    options.bold = not options.bold
-                    menu_items_config.bold.hint = options.bold and "true" or "false"
-                    refresh_live_danmaku_style()
-                elseif ordered_keys[event.index] == "live_fps_mode" then
+                local key = ordered_keys[event.index]
+                if not key then return end
+                if key == "bold" then
+                    apply_menu_style_value(key, not options.bold, "updata")
+                elseif key == "live_fps_mode" then
                     local choices = menu_items_config.live_fps_mode.choices
                     local current = tostring(options.live_fps_mode)
                     local next_index = 1
@@ -1496,54 +1541,40 @@ mp.register_script_message("setup-danmaku-style", function(query, text)
                             break
                         end
                     end
-                    set_live_fps_mode(choices[next_index])
-                    menu_items_config.live_fps_mode.hint = options.live_fps_mode
+                    apply_menu_style_value(key, choices[next_index], "updata")
+                else
+                    -- Opening the input field does not alter or save a setting.
+                    open_style_menu(key, "edit")
                 end
-                -- "updata" 模式会保留输入框文字
-                open_style_menu(ordered_keys[event.index], "updata")
                 return
             else
-                -- msg.info("event.action：" .. event.action)
-                if event.action == "live_fps_mode" then
-                    set_live_fps_mode(menu_items_config[event.action]["original"])
-                else
-                    options[event.action] = menu_items_config[event.action]["original"]
-                end
-                menu_items_config[event.action]["hint"] = options[event.action]
-                open_style_menu(event.action, "updata")
-                if not refresh_live_danmaku_style() and (event.action == "fontsize" or event.action == "scrolltime") then
-                    load_danmaku(true)
-                end
+                local config = menu_items_config[event.action]
+                if not config then return end
+                apply_menu_style_value(event.action, config.original, "updata")
             end
         end
     else
         -- 数值输入
-        if text == nil or text == "" then
+        local config = menu_items_config[query]
+        if not config or type(text) ~= "string" or text == "" then
             return
         end
         local newText, _ = text:gsub("%s", "") -- 移除所有空白字符
-        if menu_items_config[query] and menu_items_config[query].choices then
-            if set_live_fps_mode(newText) then
-                menu_items_config[query].hint = options[query]
-                open_style_menu(query, "refresh")
+        if config.choices then
+            if apply_menu_style_value(query, newText, "refresh") then
                 return
             end
-        elseif tonumber(newText) ~= nil and menu_items_config[query]["scope"] ~= nil then
+        elseif tonumber(newText) ~= nil and config.scope ~= nil then
             local num = tonumber(newText)
-            local min_num = menu_items_config[query]["scope"]["min"]
-            local max_num = menu_items_config[query]["scope"]["max"]
+            local min_num = config.scope.min
+            local max_num = config.scope.max
             if num and min_num <= num and num <= max_num then
-                if string.match(menu_items_config[query]["footnote"], "整数") then
+                if string.match(config.footnote, "整数") then
                     -- 输入范围为整数时向下取整
-                    num = tostring(math.floor(num))
+                    num = math.floor(num)
                 end
-                options[query] = tostring(num)
-                menu_items_config[query]["hint"] = options[query]
                 -- "refresh" 模式会清除输入框文字
-                open_style_menu(query, "refresh")
-                if not refresh_live_danmaku_style() and (query == "fontsize" or query == "scrolltime") then
-                    load_danmaku(true, true)
-                end
+                apply_menu_style_value(query, num, "refresh")
                 return
             end
         end

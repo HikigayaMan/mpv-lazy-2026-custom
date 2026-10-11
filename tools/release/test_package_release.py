@@ -87,6 +87,16 @@ class ReleaseAssetDigestTests(unittest.TestCase):
 
 
 class ReleaseOverlayTests(unittest.TestCase):
+    def test_excludes_preference_recovery_and_temporary_files(self) -> None:
+        for rel in (
+            "portable_config/saved-props.json.bak",
+            "portable_config/saved-props.json.tmp-123",
+            "portable_config/script-opts/uosc_danmaku_style.json.bak.123",
+            "portable_config/script-opts/uosc_danmaku_style.json.tmp.123",
+        ):
+            self.assertTrue(PACKAGE_RELEASE.matches_exclude_glob(rel, Path(rel).name), rel)
+            self.assertFalse(PACKAGE_RELEASE.should_overlay(rel, Path(rel).name), rel)
+
     def test_bilibili_runtime_is_included_in_config_updates(self) -> None:
         for name in (
             "bridge.py", "bilibili_danmaku.py", "requirements.txt",
