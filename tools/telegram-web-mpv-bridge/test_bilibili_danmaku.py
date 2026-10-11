@@ -16,9 +16,9 @@ import brotli
 
 from bilibili_danmaku import (
     AuthRejected, BilibiliDanmakuManager, BilibiliSession, HEADER, MAX_PENDING,
-    MpvPipe, decode_packets, make_packet, normalize_danmaku, validate_auth, validate_start,
+    MpvPipe, SessionFailure, safe_failure, decode_packets, make_packet, normalize_danmaku, validate_auth, validate_start,
 )
-from bridge import BridgeState, ws_handler
+from bridge import BRIDGE_VERSION, BridgeState, handle_http_client, ws_handler
 
 
 def auth():
@@ -40,6 +40,53 @@ def json_packet(operation, payload, version=0):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_large_emotes_inline_emotes_and_structured_content_become_text(self):
+        def with_emote(raw, options=None, extra=None, dm_type=1):
+            payload = event(raw)
+            meta = payload["info"][0]
+            meta.extend([None] * (16 - len(meta)))
+            meta[12], meta[13], meta[15] = dm_type, options or {}, {"extra": json.dumps(extra or {})}
+            return payload
+
+        image = "https://i0.hdslb.com/bfs/live/fixture.png"
+        cases = [
+            (with_emote("欢迎[dog]大家", {"url": image}, {"emots": {"[dog]": {"url": image}}}), "欢迎[dog]大家"),
+            (with_emote("", {"emoji": "[大笑]", "url": image}), "[大笑]"),
+            (with_emote(None, json.dumps({"name": "笑哭", "url": image})), "笑哭"),
+            (with_emote(image, {"descript": "开心", "url": image}), "开心"),
+            (with_emote("", {"url": image}, {"content": "[比心]", "emoticon_unique": "official_13"}), "[比心]"),
+            (with_emote("", {}, {"emots": {"[笑]": {"url": image}, "[哭]": {"url": image}}}), "[笑][哭]"),
+            (with_emote("official_13", {"emoticon_unique": "official_13", "url": image}), "[表情]"),
+            (with_emote("", {"url": image}), "[表情]"),
+            (with_emote({"text": "颜文字 (^_^)"}), "颜文字 (^_^)"),
+            (with_emote('[1.0,0.0,"0.8-0.5",10.0,"辛苦了",0.0]'), "辛苦了"),
+            (with_emote('{"url":"https://bad.invalid/a.png"}'), "[表情]"),
+        ]
+        for payload, expected in cases:
+            with self.subTest(expected=expected):
+                compressed = make_packet(5, brotli.compress(json_packet(5, payload)), 3)
+                message = normalize_danmaku(decode_packets(compressed)[0][1])
+                self.assertEqual(message["text"], expected)
+                self.assertNotIn("https://", message["text"])
+                self.assertNotIn('"url"', message["text"])
+
+    def test_empty_malformed_metadata_does_not_invent_normal_danmaku(self):
+        self.assertIsNone(normalize_danmaku(event("")))
+        payload = event("[大笑]")
+        payload["info"][0].extend([None] * 12)
+        payload["info"][0][13] = "{malformed"
+        payload["info"][0][15] = {"extra": "{malformed"}
+        self.assertEqual(normalize_danmaku(payload)["text"], "[大笑]")
+
+    def test_safe_failure_never_copies_raw_exception_details(self):
+        secret = "temporary-test-token and SESSDATA=secret"
+        for exc in (RuntimeError(secret), ValueError(secret), OSError(secret), TimeoutError(secret)):
+            result = safe_failure(exc, "remote-connect")
+            self.assertNotIn(secret, json.dumps(result))
+            self.assertIn("code", result)
+        auth_error = safe_failure(AuthRejected(bilibili_code=-101), "remote-auth")
+        self.assertEqual(auth_error["bilibiliCode"], -101)
+
     def test_auth_and_heartbeat_wire_header(self):
         packet = json_packet(7, {"roomid": 545068}, 1)
         self.assertEqual(HEADER.unpack_from(packet), (len(packet), 16, 1, 7, 1))
@@ -170,6 +217,59 @@ async def eventually(predicate, timeout=2):
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_health_and_status_distinguish_browser_from_telegram_and_failed_start(self):
+        state = BridgeState(1, 1024, "mpv.exe", "127.0.0.1", 8999)
+        state.browser_clients.add(FakeOwner())
+        await state.handle_ws_message(json.dumps({"type": "hello", "protocol": 2}), FakeOwner())
+        invalid = start_request()
+        invalid["auth"]["token"] = ""
+        with self.assertRaises(ValueError):
+            await state.danmaku.start(invalid, FakeOwner())
+        server = await asyncio.start_server(lambda reader, writer: handle_http_client(reader, writer, state), "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            async def request(path):
+                reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.write(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
+                await writer.drain()
+                raw = await reader.read()
+                writer.close()
+                await writer.wait_closed()
+                return json.loads(raw.split(b"\r\n\r\n", 1)[1])
+            health = await request("/health")
+            self.assertEqual(health["bridgeVersion"], BRIDGE_VERSION)
+            self.assertFalse(health["connected"])
+            self.assertTrue(health["browserConnected"])
+            self.assertEqual(health["browserClients"], 1)
+            status = await request("/status")
+            self.assertEqual(status["bridgeVersion"], "2026.10.11")
+            self.assertEqual(status["danmaku"], [])
+            self.assertEqual(status["diagnostics"]["helloCount"], 1)
+            self.assertEqual(status["diagnostics"]["failedStarts"], 1)
+            self.assertEqual(status["diagnostics"]["recentFailures"][0]["error"]["code"], "bilibili_metadata_invalid")
+            self.assertNotIn("temporary-test-client", json.dumps(status))
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_failed_start_survives_empty_active_list_as_safe_diagnostic(self):
+        def factory(*args):
+            return BilibiliSession(*args, connector=FakeConnector(FakeRemote(code=-101)), ipc=FakeIpc())
+        manager = BilibiliDanmakuManager(session_factory=factory)
+        with self.assertRaises(SessionFailure) as error:
+            await manager.start(start_request(), FakeOwner())
+        self.assertEqual(error.exception.code, "bilibili_auth_rejected")
+        self.assertEqual(manager.snapshots(), [])
+        diagnostics = manager.diagnostics()
+        self.assertEqual((diagnostics["startRequests"], diagnostics["startedSessions"], diagnostics["failedStarts"]), (1, 0, 1))
+        failure = diagnostics["recentFailures"][0]
+        self.assertEqual(failure["error"]["bilibiliCode"], -101)
+        self.assertEqual(failure["error"]["phase"], "remote-auth")
+        encoded = json.dumps(diagnostics)
+        self.assertNotIn("temporary-test-token", encoded)
+        self.assertNotIn("temporary-test-client", encoded)
+        self.assertNotIn("userAgent", encoded)
+
     @unittest.skipUnless(os.name == "nt", "Windows named-pipe transport")
     async def test_real_windows_pipe_ignores_events_and_matches_response(self):
         import ctypes

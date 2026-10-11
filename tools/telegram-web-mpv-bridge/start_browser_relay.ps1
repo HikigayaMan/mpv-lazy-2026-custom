@@ -23,7 +23,21 @@ function Test-BridgePort {
     } catch { return $false } finally { $bridgeClient.Dispose() }
 }
 
-if (Test-BridgePort) { exit 0 }
+function Test-BridgeReady {
+    if (-not (Test-BridgePort)) { return $false }
+    try {
+        $bridgeHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$HttpPort/health" -TimeoutSec 2
+        if ($Bilibili) {
+            return $bridgeHealth.danmakuApiVersion -ge 2 -and $bridgeHealth.danmakuProviders -contains 'bilibili'
+        }
+        return $bridgeHealth.ok -eq $true
+    } catch { return $false }
+}
+
+if (Test-BridgeReady) { exit 0 }
+if (Test-BridgePort) {
+    throw "Port $HttpPort is occupied by an incompatible service. Check /health and restart the correct browser relay."
+}
 $bridgeExe = Join-Path $bridgeRoot $(if ($Bilibili) { 'bilibili-live-bridge.exe' } else { 'browser-media-bridge.exe' })
 $bridgePython = Join-Path $bridgeRoot '.venv\Scripts\python.exe'
 $bridgeScript = Join-Path $bridgeRoot 'bridge.py'
@@ -42,7 +56,7 @@ $bridgeLogPrefix = if ($Bilibili) { 'bilibili-bridge' } else { 'bridge' }
 $bridgeProcess = Start-Process -WindowStyle Hidden -FilePath $bridgeLauncher -ArgumentList $bridgeArgs -WorkingDirectory $bridgeRoot -RedirectStandardOutput (Join-Path $bridgeRoot "$bridgeLogPrefix.out.log") -RedirectStandardError (Join-Path $bridgeRoot "$bridgeLogPrefix.err.log") -PassThru
 $bridgeDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 while ([DateTime]::UtcNow -lt $bridgeDeadline) {
-    if (Test-BridgePort) { exit 0 }
+    if (Test-BridgeReady) { exit 0 }
     if ($bridgeProcess.HasExited) { throw "Browser relay exited during startup; see $bridgeLogPrefix.err.log." }
     Start-Sleep -Milliseconds 150
 }

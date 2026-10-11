@@ -14,7 +14,7 @@ function between(start, end) {
 
 function sandbox(overrides = {}) {
     const context = vm.createContext({
-        TextEncoder, AbortController, console,
+        TextEncoder, AbortController, URL, console,
         setTimeout, clearTimeout,
         document: { cookie: 'SESSDATA=must-stay-in-browser; buvid3=device-test', addEventListener() {} },
         navigator: { userAgent: 'Mozilla/5.0 BilibiliBrowserTest/1.0' },
@@ -224,6 +224,104 @@ test('Bilibili uses an isolated bridge instance and leaves existing Telegram/Dou
     assert.equal(bilibili.bootstrapCommand, '-File "bridge.ps1" -Bilibili');
     assert.notEqual(existing.pendingDanmakuStarts, bilibili.pendingDanmakuStarts);
     assert.notEqual(existing.activeDanmakuSessions, bilibili.activeDanmakuSessions);
-    const parser = between('BILIBILI_LIVE: class Parser', 'ANI_GAMER: class Parser');
-    assert.match(parser, /this\.roomId, bilibiliMediaBridge/);
+    const commonHandoff = between('class BaseParser {', 'function isRelayPlayer(');
+    assert.match(commonHandoff, /bilibiliLiveRoomId, bilibiliMediaBridge/);
+});
+
+function iframeHandoffSandbox() {
+    const messageListeners = [];
+    const launches = [];
+    const statuses = [];
+    const toasts = [];
+    const authRooms = [];
+    const starts = [];
+    const context = sandbox({
+        PROJECT_NAME: 'external-player', REFRESH_INTERVAL: 1, MAX_TRY_COUNT: 1,
+        currentUrl: 'https://live.bilibili.com/719085',
+        location: { href: 'https://live.bilibili.com/719085' },
+        currentMedia: undefined, currentPlayer: undefined, currentTryCount: 0,
+        topListenersAttached: false, isReloading: false, iframe: undefined,
+        translation: { handoffDanmakuUnavailable: 'Danmaku unavailable; playing video only', loadFail: 'Load failed' },
+        document: { title: 'Bilibili live room', addEventListener() {} },
+        window: { addEventListener: (type, listener) => {
+            if (type === 'message') messageListeners.push(listener);
+        }, open: url => launches.push(url) },
+        appendAll: async () => {}, showButtonDiv() {}, updateHandoffForCurrentParser() {},
+        isResourceFallbackParser: () => false, resourceFallbackCanShow: () => false,
+        isTelegramUrl: () => false, shouldUseBrowserRelay: () => false,
+        showLoading() {}, hideLoading() {}, sleep: async () => {},
+        updateHandoffStatus: (...args) => statuses.push(args), showToast: text => toasts.push(text),
+        policy: { createScript: text => text }, compress: text => text,
+        logLaunchArgs() {},
+        bilibiliMediaBridge: { startDanmaku: async request => {
+            starts.push(asPlain(request));
+            return { type: 'danmakuStarted', provider: 'bilibili', apiVersion: 2, sessionId: request.sessionId };
+        }, stopDanmaku() {} }
+    });
+    vm.runInContext([
+        between('const defaultConfig = {', 'if (DEBUG === true)'),
+        between('class BaseParser {', 'function isRelayPlayer('),
+        'const PARSER = { ' + between('IFRAME: class Parser extends BaseParser {', 'function compress('),
+        between('async function initTop() {', 'function initIframe()'),
+        'globalThis.BaseParser = BaseParser; globalThis.defaultConfig = defaultConfig;'
+    ].join('\n'), context);
+    context.resolveBilibiliLiveDanmakuAuth = async roomId => {
+        authRooms.push(roomId);
+        return resolved;
+    };
+    context.currentConfig = asPlain(context.defaultConfig);
+    context.currentParser = new context.BaseParser();
+    context.currentParser.parserKey = 'bilibiliLive';
+    const childMedia = asPlain(context.currentMedia);
+    childMedia.video = 'https://fixture.bilivideo.com/live.flv';
+    childMedia.mpvOptions = ['--no-ytdl'];
+    const child = { postMessage: message => {
+        if (message.method === 'execute') messageListeners[0]({
+            data: { name: 'external-player', method: 'currentMedia', currentMedia: childMedia }
+        });
+    } };
+    return { context, child, messageListeners, launches, statuses, toasts, authRooms, starts };
+}
+
+test('the real iframe init/currentMedia/play route attaches live danmaku using the outer Bilibili room', async () => {
+    const fixture = iframeHandoffSandbox();
+    const { context, child, messageListeners, starts, authRooms, launches } = fixture;
+    await context.initTop();
+    await messageListeners[0]({ source: child, data: { name: 'external-player', method: 'init', isReloading: false } });
+    // This is the actual Bilibili page behavior: IFRAME replaces BILIBILI_LIVE and has no parserKey.
+    assert.equal(context.currentParser.parserKey, undefined);
+    const player = context.currentConfig.players.find(player => player.name === 'MPV');
+    await context.currentParser.play(player);
+    assert.deepEqual(authRooms, ['719085']);
+    assert.equal(starts.length, 1);
+    assert.equal(starts[0].provider, 'bilibili');
+    assert.equal(starts[0].roomId, '48743');
+    assert.equal(launches.length, 1);
+    assert.match(launches[0], /fixture\.bilivideo\.com\/live\.flv/);
+    assert.match(launches[0], /--input-ipc-server=\\\\\.\\pipe\\mpv-lazy-bilibili-/);
+});
+
+test('iframe handoff preserves video and the failure reason if live authentication fails', async () => {
+    const { context, child, messageListeners, starts, launches, statuses, toasts } = iframeHandoffSandbox();
+    context.resolveBilibiliLiveDanmakuAuth = async () => { throw new Error('API code -352'); };
+    await context.initTop();
+    await messageListeners[0]({ source: child, data: { name: 'external-player', method: 'init' } });
+    await context.currentParser.play(context.currentConfig.players.find(player => player.name === 'MPV'));
+    assert.equal(starts.length, 0);
+    assert.equal(launches.length, 1);
+    assert.ok(!launches[0].includes('--input-ipc-server'));
+    assert.match(toasts[0], /API code -352/);
+    assert.equal(statuses.at(-1)[0], 'danmaku-unavailable');
+});
+
+test('room detection supports outer and embedded live pages and rejects unrelated/video pages', () => {
+    const context = sandbox();
+    for (const url of ['https://live.bilibili.com/719085',
+        'https://live.bilibili.com/blanc/719085?liteVersion=true', 'https://live.bilibili.com/roomid=719085']) {
+        assert.equal(context.getBilibiliLiveRoomId(url), '719085');
+    }
+    for (const url of ['https://www.bilibili.com/video/BV123', 'https://attacker.example/live.bilibili.com/719085',
+        'https://live.bilibili.com.attacker.example/719085', 'https://live.bilibili.com/0']) {
+        assert.equal(context.getBilibiliLiveRoomId(url), undefined);
+    }
 });

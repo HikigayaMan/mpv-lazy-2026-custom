@@ -35,8 +35,13 @@ def packet(operation: int, payload: dict, version: int = 0) -> bytes:
     return make_packet(operation, json.dumps(payload, ensure_ascii=False).encode("utf-8"), version)
 
 
-def chat_frame(text: str, compressed: bool = True) -> bytes:
-    frame = packet(5, {"cmd": "DANMU_MSG", "info": [[0, 1, 25, 0x12AB34], text, [1, "测试观众"]]})
+def chat_frame(text: str, compressed: bool = True, emoticon_label: str | None = None) -> bytes:
+    meta = [0, 1, 25, 0x12AB34]
+    if emoticon_label is not None:
+        meta.extend([None] * 10)
+        meta[12] = 1
+        meta[13] = {"emoji": emoticon_label, "url": "https://example.invalid/emoticon.png"}
+    frame = packet(5, {"cmd": "DANMU_MSG", "info": [meta, text, [1, "测试观众"]]})
     return make_packet(5, brotli.compress(frame), 3) if compressed else frame
 
 
@@ -127,7 +132,7 @@ async def wait_ass(path: Path, expected_text: str) -> str:
     raise AssertionError(f"rendered ASS did not contain {expected_text!r}: {path}")
 
 
-async def run_mode(mpv: Path, mode: str, output: Path) -> dict:
+async def run_mode(mpv: Path, script: Path, mode: str, output: Path) -> dict:
     run_dir = output / (mode + "-" + uuid.uuid4().hex[:8])
     run_dir.mkdir(parents=True)
     config = run_dir / "config"
@@ -144,7 +149,6 @@ async def run_mode(mpv: Path, mode: str, output: Path) -> dict:
                           "userAgent": "Mozilla/5.0 offline-smoke",
                           "hostList": [{"host": "broadcastlv.chat.bilibili.com", "wss_port": 443}]})
     session = BilibiliSession("545068", session_id, pipe_name, auth, owner, connector=connector, ipc=ipc)
-    script = REPO / "portable_config/scripts/uosc_danmaku"
     options = {
         "render_mode": mode, "opacity": "1", "vf_fps": "no",
         "auto_load": "no", "autoload_for_url": "no", "autoload_local_danmaku": "no",
@@ -177,13 +181,13 @@ async def run_mode(mpv: Path, mode: str, output: Path) -> dict:
             await wait_property(ipc, "user-data/uosc_danmaku/live-active", True)
             await wait_property(ipc, "user-data/uosc_danmaku/has-danmaku", True)
 
-            await remote.queue.put(chat_frame("第一条真实播放器弹幕"))
+            await remote.queue.put(chat_frame("第一条真实播放器弹幕 [dog]"))
             await eventually(lambda: session.sent >= 1, "compressed packet reached MPV")
             await wait_property(ipc, "user-data/uosc_danmaku/live-input-count", 1)
             ass_path = run_dir / f"uosc-danmaku-{process.pid}.ass"
             if mode == "ass":
                 await wait_property(ipc, "track-list", has_danmaku_track)
-                await wait_ass(ass_path, "第一条真实播放器弹幕")
+                await wait_ass(ass_path, "第一条真实播放器弹幕 [dog]")
                 await wait_property(ipc, "secondary-sid", lambda sid: sid not in (False, "no", None))
 
             # Session IDs isolate subsequent player invocations.
@@ -210,11 +214,13 @@ async def run_mode(mpv: Path, mode: str, output: Path) -> dict:
 
             await ipc.command(["keypress", "j"])
             await wait_property(ipc, "user-data/uosc_danmaku/danmaku-switch-on", True)
-            await remote.queue.put(chat_frame("重新启用后收到弹幕", compressed=False))
+            await remote.queue.put(chat_frame("", compressed=False,
+                                             emoticon_label="重新启用后收到弹幕 [大笑]"))
             await eventually(lambda: session.sent >= 3, "resumed packet crossed IPC")
             await wait_property(ipc, "user-data/uosc_danmaku/live-input-count", 1)
             if mode == "ass":
-                content = await wait_ass(ass_path, "重新启用后收到弹幕")
+                content = await wait_ass(ass_path, "重新启用后收到弹幕 [大笑]")
+                require("example.invalid" not in content, "emoticon image URL entered ASS output")
                 require("隐藏期间应丢弃" not in content, "hidden message reappeared after enabling")
 
             await ipc.command(["set_property", "pause", True])
@@ -260,7 +266,7 @@ async def run_mode(mpv: Path, mode: str, output: Path) -> dict:
     result = {"mode": mode, "passed": True, "authenticated_before_player_launch": started_before_player,
               "received": session.received, "sent": session.sent, "dropped": session.dropped,
               "stop_trigger": "live-stop" if mode == "ass" else "end-file", "artifacts": str(run_dir),
-              "mpv_exit_code": process.returncode}
+              "emoticons_as_text": True, "mpv_exit_code": process.returncode}
     (run_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return result
 
@@ -269,12 +275,15 @@ async def main_async(args) -> dict:
     require(os.name == "nt", "this integration smoke requires Windows named pipes")
     mpv = args.mpv.resolve()
     require(mpv.is_file(), "MPV executable does not exist: " + str(mpv))
+    script = args.script_dir.resolve()
+    require((script / "main.lua").is_file(), "MPV script folder has no main.lua: " + str(script))
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     results = []
     for mode in (["ass", "overlay"] if args.mode == "both" else [args.mode]):
-        results.append(await run_mode(mpv, mode, output))
-    report = {"passed": True, "network": "offline fixtures only", "player": str(mpv), "results": results}
+        results.append(await run_mode(mpv, script, mode, output))
+    report = {"passed": True, "network": "offline fixtures only", "player": str(mpv),
+              "script": str(script), "results": results}
     (output / "smoke-result.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
 
@@ -282,6 +291,9 @@ async def main_async(args) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mpv", type=Path, required=True)
+    parser.add_argument("--script-dir", type=Path,
+                        default=REPO / "portable_config/scripts/uosc_danmaku",
+                        help="Read-only source of the actual uosc_danmaku Lua folder to test")
     parser.add_argument("--mode", choices=("ass", "overlay", "both"), default="both")
     parser.add_argument("--output-dir", type=Path,
                         default=Path(tempfile.gettempdir()) / ("bilibili-live-smoke-" + uuid.uuid4().hex[:8]))

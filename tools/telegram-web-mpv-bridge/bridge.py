@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-from bilibili_danmaku import BilibiliDanmakuManager
+from bilibili_danmaku import BilibiliDanmakuManager, SessionFailure
 
 
 LOG = logging.getLogger("telegram-web-mpv-bridge")
@@ -35,6 +35,7 @@ DEFAULT_HTTP_PORT = 8999
 DEFAULT_WS_PORT = 9000
 DEFAULT_OPEN_ENDED_CHUNK = 8 * 1024 * 1024
 DEFAULT_TIMEOUT = 30.0
+BRIDGE_VERSION = "2026.10.11"
 DEFAULT_MPV_PATH = r"F:\mpv_2026\mpv-lazy\mpv.exe"
 
 
@@ -67,6 +68,8 @@ class BridgeState:
         self.pending: dict[str, PendingRequest] = {}
         self.lock = asyncio.Lock()
         self.danmaku = BilibiliDanmakuManager()
+        self.browser_clients: set = set()
+        self.browser_hello_count = 0
 
     @property
     def connected(self) -> bool:
@@ -147,6 +150,7 @@ class BridgeState:
             raise ValueError("WebSocket payload must be an object")
         msg_type = payload.get("type")
         if msg_type == "hello":
+            self.browser_hello_count += 1
             LOG.info("userscript connected: %s", payload.get("userAgent", "unknown"))
         elif msg_type == "registerVideo":
             if websocket is not None:
@@ -262,12 +266,19 @@ async def handle_http_client(reader: asyncio.StreamReader, writer: asyncio.Strea
         parsed = urlparse(target)
         if parsed.path == "/health":
             body = json.dumps({"ok": True, "connected": state.connected, "protocol": 2,
-                               "danmakuApiVersion": 2, "danmakuProviders": ["bilibili"]}).encode("utf-8")
+                               "bridgeVersion": BRIDGE_VERSION,
+                               "danmakuApiVersion": 2, "danmakuProviders": ["bilibili"],
+                               "browserConnected": bool(state.browser_clients),
+                               "browserClients": len(state.browser_clients)}).encode("utf-8")
             writer.write(http_response(200, "OK", {"Content-Type": "application/json"}, body))
             return
         if parsed.path == "/status":
             body = json.dumps({"connected": state.connected, "video": state.video.__dict__,
-                               "danmaku": state.danmaku.snapshots()}, ensure_ascii=False).encode("utf-8")
+                               "bridgeVersion": BRIDGE_VERSION,
+                               "danmaku": state.danmaku.snapshots(),
+                               "diagnostics": {"browserConnected": bool(state.browser_clients),
+                                               "browserClients": len(state.browser_clients), "helloCount": state.browser_hello_count,
+                                               **state.danmaku.diagnostics()}}, ensure_ascii=False).encode("utf-8")
             writer.write(http_response(200, "OK", {"Content-Type": "application/json; charset=utf-8"}, body))
             return
         if parsed.path == "/play/current":
@@ -327,6 +338,8 @@ async def handle_http_client(reader: asyncio.StreamReader, writer: asyncio.Strea
 
 
 async def ws_handler(websocket, state: BridgeState) -> None:
+    state.browser_clients.add(websocket)
+    LOG.info("browser relay WebSocket connected; clients=%s", len(state.browser_clients))
     tasks: set[asyncio.Task] = set()
     async def handle_message(message) -> None:
         try:
@@ -340,10 +353,11 @@ async def ws_handler(websocket, state: BridgeState) -> None:
                     decoded = json.loads(message)
                     if isinstance(decoded, dict):
                         payload = decoded
-            error = str(exc) if isinstance(exc, ValueError) else "local bridge request failed"
+            error = str(exc) if isinstance(exc, (ValueError, SessionFailure)) else "local bridge request failed"
+            error_code = exc.code if isinstance(exc, SessionFailure) else "bridge_request_failed"
             with contextlib.suppress(ConnectionClosed):
                 await websocket.send(json.dumps({"type": "error", "requestId": payload.get("requestId"),
-                                                  "id": payload.get("id"), "message": error}))
+                                                  "id": payload.get("id"), "message": error, "code": error_code}))
     try:
         async for message in websocket:
             payload = None
@@ -363,6 +377,7 @@ async def ws_handler(websocket, state: BridgeState) -> None:
     except ConnectionClosed:
         pass
     finally:
+        state.browser_clients.discard(websocket)
         for task in list(tasks):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

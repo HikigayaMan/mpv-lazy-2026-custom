@@ -34,8 +34,43 @@ SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 SAFE_HOST = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+chat\.bilibili\.com\Z")
 
 
-class AuthRejected(RuntimeError):
-    pass
+class SessionFailure(RuntimeError):
+    """A fixed, public error message/code with no remote payload contents."""
+
+    def __init__(self, code: str, message: str, *, bilibili_code: int | None = None) -> None:
+        super().__init__(message)
+        self.code, self.bilibili_code = code, bilibili_code
+
+
+class AuthRejected(SessionFailure):
+    def __init__(self, message: str = "Bilibili rejected danmaku authentication", *, bilibili_code: int | None = None) -> None:
+        super().__init__("bilibili_auth_rejected", message, bilibili_code=bilibili_code)
+
+
+def safe_failure(exc: BaseException, phase: str) -> dict[str, Any]:
+    """Keep only controlled messages and numeric error codes, never str(exc)."""
+    if isinstance(exc, SessionFailure):
+        result = {"code": exc.code, "message": str(exc), "phase": phase}
+        if exc.bilibili_code is not None:
+            result["bilibiliCode"] = exc.bilibili_code
+        return result
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        code = "mpv_attach_timeout" if phase.startswith("player") else "bilibili_connection_timeout"
+        message = "MPV live API attachment timed out" if phase.startswith("player") else "Bilibili connection timed out"
+    elif isinstance(exc, OSError):
+        code = "mpv_ipc_unavailable" if phase.startswith("player") else "bilibili_network_error"
+        message = "MPV IPC pipe is unavailable" if phase.startswith("player") else "Bilibili network connection failed"
+    elif isinstance(exc, ValueError):
+        code, message = "bilibili_packet_invalid", "Bilibili returned an unsupported or invalid packet"
+    else:
+        code = "mpv_live_api_error" if phase.startswith("player") else "bilibili_connection_error"
+        message = "MPV live API request failed" if phase.startswith("player") else "Bilibili connection failed"
+    result = {"code": code, "message": message, "phase": phase, "exceptionType": type(exc).__name__}
+    for name in ("errno", "winerror"):
+        value = getattr(exc, name, None)
+        if isinstance(value, int):
+            result[name] = value
+    return result
 
 
 def make_packet(operation: int, body: bytes = b"", version: int = 1) -> bytes:
@@ -95,16 +130,99 @@ def decode_packets(data: bytes, depth: int = 0, budget: list[int] | None = None)
     return packets
 
 
+def _metadata_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and len(value) <= 16384:
+        with contextlib.suppress(ValueError):
+            decoded = json.loads(value)
+            if isinstance(decoded, dict):
+                return decoded
+    return {}
+
+
+def _plain_text(value: Any, *, metadata: bool = False, depth: int = 0) -> str:
+    if depth > 2:
+        return ""
+    if not isinstance(value, str):
+        return ""
+    cleaned = re.sub(r"[\x00\r\n]", " ", value)
+    text = cleaned.strip()
+    if not text:
+        return ""
+    if text[:1] in ("{", "[") and len(text) <= 16384:
+        with contextlib.suppress(ValueError):
+            structured = json.loads(text)
+            if isinstance(structured, list):
+                # Mode 7 advanced danmaku stores the visible string at index 4.
+                return _plain_text(structured[4], metadata=True, depth=depth + 1) if len(structured) > 4 else ""
+            if isinstance(structured, dict):
+                return _emoticon_label(structured)
+        if text.startswith('{"') or text.startswith('[{"') or text.startswith('["'):
+            return ""
+    if metadata and re.match(r"^(?:https?:)?//", text, re.I):
+        return ""
+    if re.match(r"^(?:data:image/|blob:|<img\b)", text, re.I):
+        return ""
+    if re.match(r"^(?:https?:)?//\S+\.(?:png|gif|jpe?g|webp|avif|svg)(?:[?#].*)?$", text, re.I):
+        return ""
+    return (text if metadata else cleaned)[:160]
+
+
+def _emoticon_label(options: dict[str, Any]) -> str:
+    for key in ("emoji", "text", "name", "descript", "alt", "label", "content"):
+        value = options.get(key)
+        # Labels are scalar text only; don't recursively traverse arbitrary data.
+        if isinstance(value, str) and not value.lstrip().startswith(("{", "[\"")):
+            text = _plain_text(value, metadata=True)
+            if text:
+                return text
+    return ""
+
+
+def danmaku_text(info: list[Any]) -> str:
+    """Render Bilibili large/inline emotes as text, never image URLs or JSON.
+
+    The live model uses info[1] for text, info[0][12] for dm_type,
+    info[0][13] for large-emote options and info[0][15].extra for inline emots.
+    See xfgryujk/blivedm models/web.py DanmakuMessage for those wire fields.
+    """
+    meta = info[0] if info and isinstance(info[0], list) else []
+    emoticon = _metadata_object(meta[13]) if len(meta) > 13 else {}
+    mode_info = _metadata_object(meta[15]) if len(meta) > 15 else {}
+    extra = _metadata_object(mode_info.get("extra"))
+    raw = info[1] if len(info) > 1 else None
+    text = _plain_text(raw)
+    unique = emoticon.get("emoticon_unique") or extra.get("emoticon_unique")
+    if text and text != unique:
+        return text
+    text = _plain_text(extra.get("content"), metadata=True) or _emoticon_label(emoticon)
+    if text == unique:
+        text = ""
+    if not text and isinstance(raw, dict):
+        text = _emoticon_label(raw)
+    if text:
+        return text
+    emots = extra.get("emots")
+    if isinstance(emots, dict):
+        labels = [_plain_text(key, metadata=True) for key in list(emots)[:8]]
+        text = "".join(label for label in labels if label)
+        if text:
+            return text[:160]
+    is_emoticon = (len(meta) > 12 and meta[12] == 1) or extra.get("dm_type") == 1 or bool(emoticon) or bool(emots)
+    return "[表情]" if is_emoticon else ""
+
+
 def normalize_danmaku(payload: dict[str, Any]) -> dict[str, Any] | None:
     if str(payload.get("cmd", "")).split(":", 1)[0] != "DANMU_MSG":
         return None
     info = payload.get("info")
-    if not isinstance(info, list) or len(info) < 3 or not isinstance(info[1], str):
+    if not isinstance(info, list) or len(info) < 2:
         return None
-    text = re.sub(r"[\x00\r\n]", " ", info[1])[:160]
+    text = danmaku_text(info)
     if not text.strip():
         return None
-    user = info[2] if isinstance(info[2], list) else []
+    user = info[2] if len(info) > 2 and isinstance(info[2], list) else []
     nick = re.sub(r"[\x00\r\n]", " ", user[1])[:48] if len(user) > 1 and isinstance(user[1], str) else ""
     meta = info[0] if isinstance(info[0], list) else []
     color = meta[3] if len(meta) > 3 else 0xFFFFFF
@@ -229,6 +347,11 @@ class BilibiliSession:
         self.task: asyncio.Task | None = None
         self.remote_task: asyncio.Task | None = None
         self.status = "authenticating"
+        self.phase = "remote-auth"
+        self.error: dict[str, Any] | None = None
+        self.last_connection_error: dict[str, Any] | None = None
+        self.ended_reason: str | None = None
+        self.frames = self.danmaku_events = self.ignored_danmaku = 0
         self.received = self.sent = self.dropped = self.reconnects = 0
         self.player_attached = False
         self.auth_refresh: asyncio.Future | None = None
@@ -237,7 +360,11 @@ class BilibiliSession:
     def snapshot(self) -> dict[str, Any]:
         return {"provider": "bilibili", "sessionId": self.session_id, "roomId": self.room_id,
                 "status": self.status, "received": self.received, "sent": self.sent,
-                "dropped": self.dropped, "pending": len(self.pending), "reconnects": self.reconnects}
+                "dropped": self.dropped, "pending": len(self.pending), "reconnects": self.reconnects,
+                "phase": self.phase, "playerAttached": self.player_attached, "frames": self.frames,
+                "danmakuEvents": self.danmaku_events, "ignoredDanmaku": self.ignored_danmaku,
+                "error": self.error, "lastConnectionError": self.last_connection_error,
+                "endedReason": self.ended_reason}
 
     def enqueue(self, item: dict[str, Any]) -> None:
         self.received += 1
@@ -269,8 +396,13 @@ class BilibiliSession:
         self.task = asyncio.create_task(self.run())
         try:
             await asyncio.wait_for(asyncio.shield(self.started), 8.0)
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                self.error = safe_failure(SessionFailure("bilibili_auth_start_timeout", "Bilibili authentication did not complete within 8 seconds"), "remote-auth")
+                self.status = "failed"
             await self.stop()
+            if self.error and not isinstance(exc, asyncio.CancelledError):
+                raise SessionFailure(self.error["code"], self.error["message"], bilibili_code=self.error.get("bilibiliCode")) from None
             raise
 
     async def stop(self) -> None:
@@ -309,6 +441,7 @@ class BilibiliSession:
         failures = 0
         ever_authenticated = False
         while True:
+            remote_phase = "remote-connect"
             url = self.auth["urls"][failures % len(self.auth["urls"])]
             try:
                 async with self.connector(url, origin="https://live.bilibili.com", open_timeout=3,
@@ -318,29 +451,37 @@ class BilibiliSession:
                             "platform": "web", "type": 2, "key": self.auth["token"], "buvid": self.auth["buvid"]}
                     await ws.send(make_packet(7, json.dumps(auth, separators=(",", ":")).encode("utf-8")))
                     authenticated = False
+                    remote_phase = "remote-auth"
                     heartbeat = None
                     auth_deadline = time.monotonic() + 3
                     try:
                         while True:
                             timeout = 65 if authenticated else max(0.01, auth_deadline - time.monotonic())
                             frame = await asyncio.wait_for(ws.recv(), timeout)
+                            self.frames += 1
                             if not isinstance(frame, bytes):
                                 raise ValueError("Bilibili WebSocket sent a non-binary frame")
                             for operation, payload in decode_packets(frame):
                                 if operation == 8:
                                     if payload.get("code") != 0:
-                                        raise AuthRejected("Bilibili rejected danmaku authentication")
+                                        code = payload.get("code")
+                                        raise AuthRejected(bilibili_code=code if isinstance(code, int) and not isinstance(code, bool) else None)
                                     authenticated = ever_authenticated = True
                                     failures = 0
                                     self.status = "connected"
+                                    remote_phase = "remote-stream"
                                     if not self.started.done():
                                         self.started.set_result(True)
                                     if heartbeat is None:
                                         heartbeat = asyncio.create_task(self._heartbeat(ws))
                                 elif operation == 5 and authenticated:
+                                    if str(payload.get("cmd", "")).split(":", 1)[0] == "DANMU_MSG":
+                                        self.danmaku_events += 1
                                     message = normalize_danmaku(payload)
                                     if message:
                                         self.enqueue(message)
+                                    elif str(payload.get("cmd", "")).split(":", 1)[0] == "DANMU_MSG":
+                                        self.ignored_danmaku += 1
                             if heartbeat and heartbeat.done():
                                 heartbeat.result()
                     finally:
@@ -350,7 +491,8 @@ class BilibiliSession:
                                 await heartbeat
             except asyncio.CancelledError:
                 raise
-            except AuthRejected:
+            except AuthRejected as exc:
+                self.last_connection_error = safe_failure(exc, remote_phase)
                 if not ever_authenticated:
                     raise
                 self.status = "refreshing-auth"
@@ -359,6 +501,7 @@ class BilibiliSession:
             except Exception as exc:
                 # Never log token-bearing URL/body/exception contents.
                 LOG.info("Bilibili connection interrupted (%s), session=%s", type(exc).__name__, self.session_id)
+                self.last_connection_error = safe_failure(exc, remote_phase)
                 failures += 1
                 self.reconnects += 1
                 self.status = "reconnecting"
@@ -367,6 +510,7 @@ class BilibiliSession:
                 await asyncio.sleep(min(15, 0.5 * 2 ** min(failures - 1, 5)))
 
     async def attach_player(self) -> None:
+        self.phase = "player-wait"
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if self.remote_task.done():
@@ -379,6 +523,7 @@ class BilibiliSession:
                     await asyncio.sleep(0.05)
                     if await self.ipc.command(["get_property", "user-data/uosc_danmaku/live-active"]):
                         self.player_attached = True
+                        self.phase = "player-stream"
                         return
             except (OSError, RuntimeError, TimeoutError):
                 pass
@@ -394,16 +539,19 @@ class BilibiliSession:
                 self.remote_task.result()
             live_active = await self.ipc.command(["get_property", "user-data/uosc_danmaku/live-active"])
             if not live_active:
+                self.ended_reason = "mpv_live_session_ended"
                 return
             idle = await self.ipc.command(["get_property", "idle-active"])
             path = await self.ipc.command(["get_property", "path"])
             if path:
                 if initial_path and path != initial_path:
+                    self.ended_reason = "mpv_file_changed"
                     return
                 initial_path = path
             if not idle:
                 playback_seen = True
             elif playback_seen:
+                self.ended_reason = "mpv_became_idle"
                 return
             paused = await self.ipc.command(["get_property", "pause"])
             batch = self.take_batch(paused or not playback_seen)
@@ -416,8 +564,11 @@ class BilibiliSession:
     async def run(self) -> None:
         self.remote_task = asyncio.create_task(self.remote_loop())
         def remote_done(task):
-            if not self.started.done() and not task.cancelled():
+            if not task.cancelled():
                 exception = task.exception()
+                if exception:
+                    self.error = safe_failure(exception, "remote-stream" if self.started.done() else "remote-auth")
+            if not self.started.done() and not task.cancelled():
                 self.started.set_exception(RuntimeError("Bilibili danmaku authentication failed") if exception else RuntimeError("Bilibili connection ended"))
         self.remote_task.add_done_callback(remote_done)
         try:
@@ -428,7 +579,8 @@ class BilibiliSession:
             raise
         except Exception as exc:
             self.status = "failed"
-            LOG.warning("Bilibili session ended (%s), session=%s", type(exc).__name__, self.session_id)
+            self.error = self.error or safe_failure(exc, self.phase)
+            LOG.warning("Bilibili session failed: session=%s room=%s diagnostic=%s", self.session_id, self.room_id, json.dumps(self.error))
             if not self.started.done():
                 self.started.set_exception(RuntimeError("Bilibili danmaku connection failed"))
         finally:
@@ -444,21 +596,36 @@ class BilibiliSession:
             self.auth = {}
             if self.status != "failed":
                 self.status = "stopped"
+                self.ended_reason = self.ended_reason or "session_cancelled"
             with contextlib.suppress(Exception):
                 await self.owner.send(json.dumps({"type": "danmakuStopped", "provider": "bilibili",
-                                                  "sessionId": self.session_id, "status": self.status}))
+                                                  "sessionId": self.session_id, "status": self.status,
+                                                  "error": self.error, "endedReason": self.ended_reason}))
 
 
 class BilibiliDanmakuManager:
     def __init__(self, *, session_factory=BilibiliSession) -> None:
         self.sessions: dict[str, BilibiliSession] = {}
         self.session_factory = session_factory
+        self.recent_failures: deque[dict[str, Any]] = deque(maxlen=8)
+        self.start_requests = self.started_sessions = self.failed_starts = 0
 
     def snapshots(self) -> list[dict[str, Any]]:
         return [session.snapshot() for session in self.sessions.values()]
 
+    def diagnostics(self) -> dict[str, Any]:
+        return {"startRequests": self.start_requests, "startedSessions": self.started_sessions,
+                "failedStarts": self.failed_starts, "recentFailures": list(self.recent_failures)}
+
     async def start(self, payload: dict[str, Any], owner) -> dict[str, Any]:
-        room_id, session_id, pipe_name, auth = validate_start(payload)
+        self.start_requests += 1
+        try:
+            room_id, session_id, pipe_name, auth = validate_start(payload)
+        except ValueError as exc:
+            self.failed_starts += 1
+            self.recent_failures.append({"error": {"code": "bilibili_metadata_invalid", "phase": "request-validation", "message": str(exc)}, "timestamp": time.time()})
+            raise
+        LOG.info("Bilibili danmaku start requested: session=%s room=%s", session_id, room_id)
         for existing_id, session in list(self.sessions.items()):
             if session.task and session.task.done():
                 self.sessions.pop(existing_id, None)
@@ -470,9 +637,12 @@ class BilibiliDanmakuManager:
         self.sessions[session_id] = session
         try:
             await session.start()
+            self.started_sessions += 1
             return {"type": "danmakuStarted", "provider": "bilibili", "requestId": payload.get("requestId"),
                     "roomId": room_id, "sessionId": session_id, "apiVersion": 2}
-        except BaseException:
+        except BaseException as exc:
+            self.failed_starts += 1
+            self.recent_failures.append({**session.snapshot(), "timestamp": time.time()})
             if self.sessions.get(session_id) is session:
                 self.sessions.pop(session_id, None)
             raise

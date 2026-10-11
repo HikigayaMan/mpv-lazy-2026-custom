@@ -3,7 +3,7 @@
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.14.10
+// @version                 1.2.14.11
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -39,7 +39,7 @@ const VIDEO_URL_REGEX_EXACT = /^https?:\/\/((?![^"^']*http)[^"^']+(\.|%2e)(mp4|m
 
 const defaultConfig = {
     global: {
-        version: '1.2.14.10',
+        version: '1.2.14.11',
         language: (navigator.language || navigator.userLanguage) === 'zh-CN' ? 'zh' : 'en',
         buttonXCoord: '0',
         buttonYCoord: '0',
@@ -443,6 +443,16 @@ const BILIBILI_WBI_MIXIN_KEY_INDEXES = [
     22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52
 ];
 
+function getBilibiliLiveRoomId(pageUrl) {
+    try {
+        const parsed = new URL(pageUrl);
+        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.hostname !== 'live.bilibili.com') return undefined;
+        return parsed.pathname.match(/^\/(?:blanc\/|roomid=)?([1-9]\d*)(?:\/|$)/)?.[1];
+    } catch (error) {
+        return undefined;
+    }
+}
+
 function createBilibiliDanmakuSessionId() {
     bilibiliDanmakuSessionSequence = (bilibiliDanmakuSessionSequence % 0xffffff) + 1;
     const suffix = bilibiliDanmakuSessionSequence.toString(36);
@@ -498,7 +508,7 @@ async function resolveBilibiliLiveDanmakuAuth(roomId) {
     ]);
     const canonicalRoomId = String(room?.data?.room_id || '');
     if (Number(room?.code) !== 0 || !/^[1-9]\d*$/.test(canonicalRoomId)) {
-        throw new Error('Bilibili live room resolution failed');
+        throw new Error(`Bilibili live room resolution failed (API code ${Number(room?.code)})`);
     }
     // Guest nav responses use code -101 and still contain the WBI keys.
     const imgKey = String(nav?.data?.wbi_img?.img_url || '').split('/').pop().split('.')[0];
@@ -508,7 +518,7 @@ async function resolveBilibiliLiveDanmakuAuth(roomId) {
         `https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?${query}`
     );
     if (Number(info?.code) !== 0 || typeof info?.data?.token !== 'string' || !info.data.token) {
-        throw new Error('Bilibili live danmaku authentication unavailable');
+        throw new Error(`Bilibili live danmaku authentication unavailable (API code ${Number(info?.code)})`);
     }
     const uid = Number(nav?.data?.isLogin ? nav.data.mid : 0);
     const buvid = readBilibiliBuvid(document.cookie);
@@ -516,7 +526,8 @@ async function resolveBilibiliLiveDanmakuAuth(roomId) {
         .filter(item => /^[a-z0-9.-]+\.chat\.bilibili\.com$/i.test(String(item?.host || '')) &&
             Number.isInteger(Number(item?.wss_port)) && Number(item.wss_port) > 0 && Number(item.wss_port) <= 65535)
         .map(item => ({ host: String(item.host), wss_port: Number(item.wss_port) }));
-    if (!Number.isSafeInteger(uid) || uid < 0 || !buvid || !hostList.length) {
+    if (!buvid) throw new Error('Bilibili live buvid3 browser cookie unavailable');
+    if (!Number.isSafeInteger(uid) || uid < 0 || !hostList.length) {
         throw new Error('Bilibili live danmaku browser credentials unavailable');
     }
     // Only the short-lived danmaku token and buvid are sent locally. SESSDATA stays in the browser.
@@ -1445,8 +1456,9 @@ class BaseParser {
             updateHandoffStatus('resolving');
             const relayMode = currentConfig.global.browserRelayMode || 'auto';
             const telegramRelayLaunch = isTelegramUrl() && isRelayPlayer(player) && relayMode !== 'off';
-            const liveDanmakuLaunch = ['douyu', 'bilibiliLive'].includes(currentParser?.parserKey) && isMpvDanmakuPlayer(player);
-            showLoading(liveDanmakuLaunch && currentParser?.parserKey === 'bilibiliLive' ? 32000 :
+            const bilibiliLiveRoomId = getBilibiliLiveRoomId(currentUrl);
+            const liveDanmakuLaunch = (currentParser?.parserKey === 'douyu' || bilibiliLiveRoomId) && isMpvDanmakuPlayer(player);
+            showLoading(liveDanmakuLaunch && bilibiliLiveRoomId ? 32000 :
                 telegramRelayLaunch || liveDanmakuLaunch ? BROWSER_RELAY_BOOTSTRAP_TIMEOUT + 8000 : 6000);
 
             // 别名，方便播放事件使用
@@ -1454,6 +1466,7 @@ class BaseParser {
             let media = currentMedia;
             let parser = currentParser;
             let config = currentConfig.global;
+            let liveDanmakuError;
 
             currentTryCount = 0;
             let latestError = undefined;
@@ -1489,6 +1502,21 @@ class BaseParser {
                 return;
             }
             media = await this.prepareLaunchMedia(player);
+
+            // Bilibili's outer room page can delegate stream parsing to a /blanc iframe.
+            // Attach the room's live input after every parser's handoff, including IFRAME.
+            if (bilibiliLiveRoomId) {
+                const result = await prepareBilibiliLiveDanmakuLaunch(
+                    media, 'bilibiliLive', player, bilibiliLiveRoomId, bilibiliMediaBridge
+                );
+                media = result.media;
+                if (result.error) {
+                    liveDanmakuError = `${translation.handoffDanmakuUnavailable}: ${result.error.message}`;
+                    console.warn(`Bilibili live danmaku unavailable: ${result.error.message}`);
+                    updateHandoffStatus('danmaku-unavailable', liveDanmakuError);
+                    showToast(liveDanmakuError);
+                }
+            }
 
             if (!player.presetEvent.syncTime) {
                 media.time = undefined;
@@ -1578,7 +1606,8 @@ class BaseParser {
                     }
                 }
             }
-            updateHandoffStatus('success', player.name);
+            if (liveDanmakuError) updateHandoffStatus('danmaku-unavailable', liveDanmakuError);
+            else updateHandoffStatus('success', player.name);
 
             if (player.presetEvent.closeAuto) {
                 parser.close();
@@ -2551,18 +2580,6 @@ const PARSER = {
             await this.parseVideo();
             await this.parseTitle();
             await this.parseReferer();
-        }
-        async prepareLaunchMedia(player) {
-            const media = await super.prepareLaunchMedia(player);
-            const result = await prepareBilibiliLiveDanmakuLaunch(
-                media, this.parserKey, player, this.roomId, bilibiliMediaBridge
-            );
-            if (result.error) {
-                console.warn(`Bilibili live danmaku unavailable; starting video without danmaku: ${result.error.message}`);
-                updateHandoffStatus('danmaku-unavailable');
-                showToast(translation.handoffDanmakuUnavailable);
-            }
-            return result.media;
         }
         async parseVideo() {
             const roomids = currentUrl.match(
