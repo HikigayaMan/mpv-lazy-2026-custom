@@ -27,7 +27,8 @@ External Player 是浏览器用户脚本。它从网页取得视频地址、标�
 
 相关仓库：
 
-- 本地维护版：[luoxue03/external-player](https://github.com/luoxue03/external-player)
+- 本仓库定制版：[HikigayaMan/mpv-lazy-2026-custom](https://github.com/HikigayaMan/mpv-lazy-2026-custom)
+- 原作者定制来源：[luoxue03/external-player](https://github.com/luoxue03/external-player)
 - 上游项目：[LuckyPuppy514/external-player](https://github.com/LuckyPuppy514/external-player)
 - URL Scheme 处理器：[luoxue03/url-scheme-handler](https://github.com/luoxue03/url-scheme-handler)
 - 浏览器媒体中继：[luoxue03/telegram-web-mpv-bridge](https://github.com/luoxue03/telegram-web-mpv-bridge)
@@ -56,10 +57,10 @@ External Player 是浏览器用户脚本。它从网页取得视频地址、标�
 ### 浏览器脚本
 
 1. 安装 Tampermonkey 或 Violentmonkey。
-2. 安装仓库中的 [`external-player.user.js`](https://raw.githubusercontent.com/luoxue03/external-player/main/external-player.user.js)。
-3. 更新后完整刷新已经打开的视频网页。
+2. 从 [本仓库累计更新 Release](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.12-update) 解压并导入 `external_player.user.js`，禁用重复旧脚本。
+3. 关闭这份定制脚本的上游自动更新，更新后完整刷新已经打开的视频网页。
 
-整合包中的 `external_player.js` 与独立仓库的 `external-player.user.js` 内容相同。浏览器中只需要安装一份。
+本次累计包内的 `external_player.js` 与 `external_player.user.js` 内容相同，版本为 `1.2.14.15`。外仓库脚本不保证已同步本仓库修改；浏览器中只需要安装一份定制脚本。
 
 ### 注册 MPV
 
@@ -136,7 +137,7 @@ External Player 会把以下启动参数交给它：
 
 本仓库用户脚本为 `live.bilibili.com` 的 MPV 播放增加实时弹幕交接。视频仍使用直链；中继只负责弹幕，失败时仍启动视频。每次播放器使用独立 IPC pipe，避免混入其他房间的弹幕。
 
-需要安装本仓库修改后的 `external_player.js`，并同步更新中继 EXE 和 uosc 配置；上面的独立仓库安装链接及旧 Release 可能尚未包含此功能。详见 [安装与交接说明](./bilibili-live-danmaku.md)。
+需要安装本仓库修改后的用户脚本，并同步更新中继 EXE 和 uosc 配置；本次累计 Release 已包含这些文件，原项目旧 Release 可能尚未包含此功能。详见 [安装与交接说明](./bilibili-live-danmaku.md)。
 
 ### MissAV
 

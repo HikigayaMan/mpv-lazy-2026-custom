@@ -13,6 +13,31 @@
 
 打包脚本负责结构验证，播放验证脚本负责行为验证。
 
+## 本仓库累计更新包（2026-10-12）
+
+本次 `v2026.10.12-update` 使用 `package_custom_update.py`，从原仓库共同起点 `547e3d7f7a1aa44538ab55fdba3a36e5bcb61984` 计算到发布提交的全部修改。补齐耦合脚本目录，加入已验证的 B站 EXE、可导入用户脚本、逐文件哈希和 manifest；不复制本地运行目录、偏好、日志或旧补丁。仅支持无删除的覆盖升级；若未来删除源文件，必须先明确迁移方案。
+
+先提交源码，再构建 EXE、验证并打包。以下命令在仓库根目录执行，EXE 构建应使用同一份已提交的源码：
+
+```powershell
+.\tools\telegram-web-mpv-bridge\build_windows.ps1 -InstallDependencies
+$releaseDir = 'tools/telegram-web-mpv-bridge/build/custom-update'
+$releasePython = '.\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe'
+& $releasePython tools/release/smoke_test_bridge_exe.py --exe tools/telegram-web-mpv-bridge/bilibili-live-bridge.exe --output "$releaseDir/verification"
+& $releasePython tools/release/package_custom_update.py --ref HEAD --version v2026.10.12-update --exe tools/telegram-web-mpv-bridge/bilibili-live-bridge.exe --provenance "$releaseDir/verification/bridge-build-provenance.json" --notices "$releaseDir/verification/BRIDGE-THIRD-PARTY-NOTICES.txt" --output "$releaseDir/artifacts"
+& $releasePython tools/release/package_custom_update.py --verify "$releaseDir/artifacts/mpv-lazy-2026-custom-cumulative-update-v2026.10.12.zip"
+```
+
+验证工具启动自己创建的冻结 EXE，使用随机本机端口检查 health、WebSocket hello 和诊断，并确认原生 Brotli 模块已收录。生成的公开构建信息只包含版本和哈希。打包工具同时校验它与 EXE、发布提交的编译输入匹配。
+
+发到本仓库的新 Release 时，显式指定目标仓库并使用新 tag。例如安装 GitHub CLI 后可在源提交已推送的情况下执行：
+
+```powershell
+gh release create v2026.10.12-update "$releaseDir/artifacts/mpv-lazy-2026-custom-cumulative-update-v2026.10.12.zip" "$releaseDir/artifacts/SHA256SUMS-v2026.10.12-update.txt" --repo HikigayaMan/mpv-lazy-2026-custom --target (git rev-parse HEAD) --title '2026-10-12 累计增强更新' --notes-file docs/releases/v2026.10.12-update.md
+```
+
+下面的分类包工具保留原作者默认仓库和版本，不能将其默认上传命令直接用于本仓库累计更新。
+
 ## `package_release.py`：分类打包脚本
 
 ### 脚本用途

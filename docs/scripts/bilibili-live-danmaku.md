@@ -6,7 +6,7 @@
 
 ## 安装本次修改
 
-已有 Release 和在线 External Player 不包含本次功能，需要同时更新浏览器脚本、Bilibili 专用中继和播放器配置。专用中继使用独立端口，已有 Telegram／斗鱼中继可继续运行。
+原项目 Release 和外仓库在线脚本可能不包含本次定制功能。请使用 [本仓库累计更新 Release](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.12-update)，一次更新浏览器脚本、Bilibili 专用中继和播放器配置。专用中继使用独立端口，已有 Telegram／斗鱼中继可继续运行。完整覆盖步骤见 [README](../../README.MD)。下面的逐项安装用于源码开发者。
 
 1. 用 Tampermonkey 或 Violentmonkey 安装本仓库根目录的 `external_player.js`（打开脚本的本地内容，粘贴到新建用户脚本并保存），禁用旧版重复脚本，然后完整刷新直播页面。
 2. 将 `portable_config/scripts/uosc_danmaku/` 和 `portable_config/scripts/quality-menu.lua` 的修改覆盖到完整 mpv 整合包的同名位置。
@@ -15,7 +15,7 @@
 
 本地更新压缩包中的 `external_player.user.js` 与 `external_player.js` 内容相同，可以直接导入脚本管理器。安装本地定制版后关闭该脚本的自动更新，避免被原上游版本覆盖。
 
-更新已经运行的安装时，还需要重新导入新版用户脚本、完整刷新直播页；只有 EXE 修改时才需要重启 Bilibili 中继。只覆盖磁盘上的 EXE 不会更新已启动的服务。2026-10-11 网页全屏启动与弹幕偏好修复版脚本版本为 `1.2.14.13`。
+更新已经运行的安装时，还需要重新导入新版用户脚本、完整刷新直播页；EXE 修改时需要重启 Bilibili 中继。只覆盖磁盘上的 EXE 不会更新已启动的服务。本次累计包的用户脚本版本为 `1.2.14.15`，包含网页全屏、弹幕偏好、自动移交和同画质备用源修复。
 
 源码方式（Python 3.10+）：
 
