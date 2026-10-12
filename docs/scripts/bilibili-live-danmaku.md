@@ -6,7 +6,7 @@
 
 ## 安装本次修改
 
-原项目 Release 和外仓库在线脚本可能不包含本次定制功能。请使用 [本仓库累计更新 Release](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.12-update)，一次更新浏览器脚本、Bilibili 专用中继和播放器配置。专用中继使用独立端口，已有 Telegram／斗鱼中继可继续运行。完整覆盖步骤见 [README](../../README.MD)。下面的逐项安装用于源码开发者。
+原项目 Release 和外仓库在线脚本可能不包含本次定制功能。请使用 [本仓库累计更新 Release](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.12-progress-update)，一次更新浏览器脚本、Bilibili 专用中继和播放器配置。专用中继使用独立端口，已有 Telegram／斗鱼中继可继续运行。完整覆盖步骤见 [README](../../README.MD)。下面的逐项安装用于源码开发者。
 
 1. 用 Tampermonkey 或 Violentmonkey 安装本仓库根目录的 `external_player.js`（打开脚本的本地内容，粘贴到新建用户脚本并保存），禁用旧版重复脚本，然后完整刷新直播页面。
 2. 将 `portable_config/scripts/uosc_danmaku/` 和 `portable_config/scripts/quality-menu.lua` 的修改覆盖到完整 mpv 整合包的同名位置。
@@ -15,7 +15,7 @@
 
 本地更新压缩包中的 `external_player.user.js` 与 `external_player.js` 内容相同，可以直接导入脚本管理器。安装本地定制版后关闭该脚本的自动更新，避免被原上游版本覆盖。
 
-更新已经运行的安装时，还需要重新导入新版用户脚本、完整刷新直播页；EXE 修改时需要重启 Bilibili 中继。只覆盖磁盘上的 EXE 不会更新已启动的服务。本次累计包的用户脚本版本为 `1.2.14.15`，包含网页全屏、弹幕偏好、自动移交和同画质备用源修复。
+更新已经运行的安装时，还需要重新导入新版用户脚本、完整刷新直播页；EXE 修改时需要重启 Bilibili 中继。只覆盖磁盘上的 EXE 不会更新已启动的服务。本次累计包的用户脚本版本为 `1.2.14.19`，包含网页全屏、弹幕偏好、自动移交、同画质备用源和双向进度修复。
 
 源码方式（Python 3.10+）：
 
@@ -71,7 +71,7 @@ python -m venv .venv
 
 - 检查是否同时更新了用户脚本和中继 EXE，页面是否完整刷新。
 - 检查 `http://127.0.0.1:9002/status` 和工具目录的 `bilibili-bridge.err.log`。
-- `/health` 中的 `bridgeVersion` 应为 `2026.10.11`。`/status` 的 `diagnostics.startRequests` 为 0 表示浏览器尚未发起弹幕会话；`diagnostics.recentFailures` 保留会话创建失败的记录，`danmaku` 列表中的 `phase` 和 `error` 可定位 MPV 附加或运行阶段的失败。`diagnostics.browserConnected` 表示浏览器中继连接，旧字段 `connected` 仅用于 Telegram 视频链路。
+- `/health` 中的 `bridgeVersion` 应为 `2026.10.12`。`/status` 的 `diagnostics.startRequests` 为 0 表示浏览器尚未发起弹幕会话；`diagnostics.recentFailures` 保留会话创建失败的记录，`danmaku` 列表中的 `phase` 和 `error` 可定位 MPV 附加或运行阶段的失败。`diagnostics.browserConnected` 表示浏览器中继连接，旧字段 `connected` 仅用于 Telegram 视频链路。
 - 检查直播网页本身能否正常接收弹幕，浏览器是否有有效的 `buvid3`；认证被站点拒绝时，可刷新页面或在网页正常登录后重新交接。
 - 新版浮层会显示弹幕失败的具体阶段和原因。即使弹幕连接失败，视频仍可启动；“已交给播放器”只表示视频已启动，不代表弹幕连接成功。
 - 确认 `uosc_danmaku` 已加载，且弹幕没有被 `j` 隐藏。

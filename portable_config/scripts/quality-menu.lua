@@ -267,7 +267,7 @@ local function reload_resume()
     local reload_duration = mp.get_property_native('duration')
     local time_pos = mp.get_property('time-pos')
 
-    if begin_stream_switch then begin_stream_switch(mp.get_property('path')) end
+    if begin_stream_switch then begin_stream_switch(mp.get_property('path'), time_pos) end
     mp.command('playlist-play-index current')
 
     -- Tries to determine live stream vs. pre-recorded VOD. VOD has non-zero
@@ -1262,7 +1262,15 @@ local stream_switch_timer = nil
 local stream_switch_generation = 0
 local STREAM_SWITCH_PROPERTY = 'user-data/quality-menu/stream-switch'
 
-begin_stream_switch = function(target_url)
+begin_stream_switch = function(target_url, resume_position)
+    local progress = mp.get_property_native('user-data/mpv-lazy/playback-progress')
+    if type(progress) == 'table' and progress.active == true and progress.ready == true then
+        mp.set_property_native('user-data/mpv-lazy/progress-stream-switch', {
+            sessionId = progress.sessionId, identity = progress.identity,
+            from = mp.get_property('path'), to = target_url, expiresAt = mp.get_time() + 15,
+            resumePosition = tonumber(resume_position) or mp.get_property_number('time-pos', progress.position),
+        })
+    end
     local session = mp.get_property_native('user-data/uosc_danmaku/live-session')
     if not mp.get_property_bool('user-data/uosc_danmaku/live-active', false)
         or type(session) ~= 'string' or session == '' then return end
@@ -1351,7 +1359,7 @@ local function load_hls_variant_resume(target_url)
         uosc_set_format_counts()
         osd_message('切换清晰度超时，请在浏览器刷新播放地址后重试', 5)
     end)
-    begin_stream_switch(target_url)
+    begin_stream_switch(target_url, time_pos)
     mp.commandv('loadfile', target_url, 'replace')
 end
 

@@ -5,7 +5,9 @@ import argparse
 import asyncio
 import importlib.metadata
 import json
+import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -61,6 +63,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--allow-working-tree", action="store_true", help="Verify an uncommitted local development build; it cannot be used as a committed release input.")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     executable = args.exe.resolve()
@@ -68,8 +71,11 @@ def main() -> None:
     source_inputs = {}
     compiled_inputs = {}
     for name in BRIDGE_INPUTS:
-        committed = subprocess.check_output(["git", "-C", str(repo), "show", f"HEAD:{name}"])
         compiled = (repo / name).read_bytes()
+        if args.allow_working_tree:
+            committed = compiled.replace(b"\r\n", b"\n")
+        else:
+            committed = subprocess.check_output(["git", "-C", str(repo), "show", f"HEAD:{name}"])
         if committed.replace(b"\r\n", b"\n") != compiled.replace(b"\r\n", b"\n"):
             raise RuntimeError(f"Build input has uncommitted source changes: {name}")
         source_inputs[name] = sha256(committed)
@@ -95,21 +101,43 @@ def main() -> None:
                     if time.monotonic() >= deadline:
                         raise RuntimeError("Frozen bridge failed to start within 20 seconds.")
                     time.sleep(0.1)
-            assert health["ok"] and health["bridgeVersion"] == "2026.10.11"
+            expected_version = re.search(r'BRIDGE_VERSION = "([^"]+)"', (repo / BRIDGE_INPUTS[0]).read_text(encoding="utf-8")).group(1)
+            assert health["ok"] and health["bridgeVersion"] == expected_version
             assert health["danmakuApiVersion"] == 2 and health["danmakuProviders"] == ["bilibili"]
+            assert type(health.get("playbackProgressApiVersion")) is int and health["playbackProgressApiVersion"] == 1
+            assert type(health.get("playbackProgressHttpApiVersion")) is int and health["playbackProgressHttpApiVersion"] == 1
+            assert health["playbackProgressProviders"] == ["bilibili", "web"]
+            probe = urllib.request.Request(f"http://127.0.0.1:{http_port}/playback-progress",
+                data=json.dumps({"clientId": "progress-http-" + "a" * 32, "request": {
+                    "type": "getPlaybackProgress", "requestId": "frozen-http-test", "provider": "bilibili",
+                    "identity": "bilibili:1001:2002", "pageUrl": "https://www.bilibili.com/video/BV1fixture"}}).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(probe, timeout=3) as response:
+                assert response.status == 200 and "Access-Control-Allow-Origin" not in response.headers
+                reply = json.load(response)["reply"]
+                assert reply["type"] == "playbackProgressState" and reply["requestId"] == "frozen-http-test"
+                assert reply["apiVersion"] == 1 and reply["provider"] == "bilibili" and reply["identity"] == "bilibili:1001:2002"
             asyncio.run(verify_websocket(http_port, ws_port))
         finally:
-            process.terminate()
+            if process.poll() is None:
+                if os.name == "nt":
+                    stopped = subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    if stopped.returncode:
+                        raise RuntimeError("Could not stop the owned frozen bridge process tree.")
+                else:
+                    process.terminate()
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
     evidence = {"exeSha256": sha256(binary), "frozenHealthPassed": True, "frozenWebSocketPassed": True,
+                "frozenPlaybackHttpPassed": True,
                 "brotliBinaryIncluded": brotli_included, "python": sys.version.split()[0],
                 "packages": {name: importlib.metadata.version(name) for name in ("websockets", "Brotli", "pyinstaller")},
                 "sourceInputs": source_inputs, "compiledSourceInputs": compiled_inputs,
-                "sourceComparison": "Committed bytes; build checkout may differ only by LF/CRLF line endings."}
+                "sourceRef": "working-tree" if args.allow_working_tree else "HEAD",
+                "sourceComparison": "Canonical input bytes; build checkout may differ only by LF/CRLF line endings."}
     (args.output / "bridge-build-provenance.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
     (args.output / "BRIDGE-THIRD-PARTY-NOTICES.txt").write_text(notices(), encoding="utf-8")
     print(json.dumps(evidence, indent=2))

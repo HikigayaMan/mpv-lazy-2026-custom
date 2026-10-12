@@ -8,7 +8,7 @@ External Player 是浏览器用户脚本。它从网页取得视频地址、标�
 
 ```text
 网页
-  -> External Player 1.2.14.15
+  -> External Player 1.2.14.19
   -> ush://MPV
   -> url-scheme-handler.exe
   -> mpv.exe
@@ -51,16 +51,18 @@ External Player 是浏览器用户脚本。它从网页取得视频地址、标�
 - 网页交给 MPV/MPVNET 后自动以全屏播放，普通视频与直播均适用。
 - 可选“进入视频或直播页面后自动移交默认播放器”，默认关闭。
 - B站 DASH 视频与音频优先使用 API 同时返回的 HTTPS 标准端口 bilivideo.com 备用源，避免部分 PCDN 主源端口无法连接；保持原画质、编码和完整签名。
+- 网页与 MPV 双向续播并保存本机位置，支持 B站普通视频及分 P；登录时可同时写入 B站账号观看历史。
+- WebSocket 无法连接时，进度通道自动使用匿名扩展 HTTP 请求；.19 修复 MPV 参数传递，包内 Lua 兼容已导入 .18。
 
 ## 安装与更新
 
 ### 浏览器脚本
 
 1. 安装 Tampermonkey 或 Violentmonkey。
-2. 从 [本仓库累计更新 Release](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.12-update) 解压并导入 `external_player.user.js`，禁用重复旧脚本。
+2. 从 [本仓库累计更新 Release](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.12-progress-update) 解压并导入 `external_player.user.js`，禁用重复旧脚本。
 3. 关闭这份定制脚本的上游自动更新，更新后完整刷新已经打开的视频网页。
 
-本次累计包内的 `external_player.js` 与 `external_player.user.js` 内容相同，版本为 `1.2.14.15`。外仓库脚本不保证已同步本仓库修改；浏览器中只需要安装一份定制脚本。
+本次累计包内的 `external_player.js` 与 `external_player.user.js` 内容相同，版本为 `1.2.14.19`。外仓库脚本不保证已同步本仓库修改；浏览器中只需要安装一份定制脚本。
 
 ### 注册 MPV
 
@@ -73,7 +75,7 @@ External Player 是浏览器用户脚本。它从网页取得视频地址、标�
 
 ### 注册自动中继
 
-Telegram 和斗鱼弹幕需要 Browser Media Bridge。若希望点击网页按钮时自动启动中继，在 `url-scheme-handler` 中再增加：
+Telegram 和斗鱼弹幕需要 Browser Media Bridge；B站直播弹幕和双向进度使用同一注册入口启动独立的 B站中继。若希望点击网页按钮时自动启动中继，在 `url-scheme-handler` 中再增加：
 
 | 名称 | 程序 |
 |---|---|
@@ -86,6 +88,8 @@ External Player 会把以下启动参数交给它：
 ```
 
 中继安装方法见 [luoxue03/telegram-web-mpv-bridge](https://github.com/luoxue03/telegram-web-mpv-bridge#readme)。
+
+B站直播使用 `-Bilibili`，双向进度使用 `-PlaybackProgress`，由脚本按需要附加。B站中继为 HTTP `9002`／WebSocket `9001`，原 Telegram／斗鱼中继为 `8999/9000`。本次累计包已包含 B站 EXE；详见 [进度同步](./playback-progress.md)。
 
 ## 悬浮面板与设置
 
@@ -106,6 +110,8 @@ External Player 会把以下启动参数交给它：
 |---|---|---|
 | 默认播放器 | 主按钮点击后使用的播放器 | `MPV` |
 | 自动移交默认播放器 | 进入可解析的视频或直播页面后自动启动默认播放器 | 关闭 |
+| 网页与播放器双向进度 | 网页与 MPV／MPVNET 相互续播并保存本机位置 | 开启 |
+| B站账号观看历史 | 使用原网页登录状态把 MPV 位置写入 B站账号历史 | 开启 |
 | 首选画质 | yt-dlp、B 站或斗鱼的首选档位 | 最高可用 |
 | 浏览器中继 | `自动`、`始终中继`、`关闭` | 自动 |
 | 中继弹出通知 | 是否显示中继启动/回退通知 | 关闭 |
@@ -113,6 +119,8 @@ External Player 会把以下启动参数交给它：
 | 资源嗅探兜底 | 未命中专用解析器时观察网页媒体资源 | 开启 |
 
 `自动`只在 Telegram、`blob:` 或明确需要浏览器授权的来源上启用中继；普通直链不会多走一层代理。`始终中继`适合临时诊断浏览器可播、mpv 直连失败的 HTTP/HLS 来源。
+
+进度同步独立于浏览器媒体代理和旧播放器预设的“同步时间”。关闭网页后中继仍保存本机位置；账号历史需登录网页保持打开，重新进入同一视频可补同步。普通 BV／av 与分 P 支持，直播、番剧影视和互动分支不套用点播续播。详见 [双向进度说明](./playback-progress.md)。
 
 在浮层快速设置或完整设置中勾选“进入视频或直播页面后自动移交默认播放器”，之后打开视频、直播或在网页内切换到新的内容时，会使用上方选定且已启用的默认播放器。开启开关或修改默认播放器时，当前内容不会立即再次启动；打开下一条内容或刷新页面后生效。
 
@@ -199,7 +207,7 @@ External Player 已内置 Telegram 捕获逻辑，不需要另装旧版 Telegram
 
 ### 页面没有面板
 
-- 确认脚本版本为 `1.2.14.15`，更新后完整刷新当前网页。
+- 确认脚本版本为 `1.2.14.19`，更新后完整刷新当前网页。
 - 更新后完整刷新页面。
 - 查看控制台是否出现页面脚本异常。
 - 未适配网页只有在嗅探到可信媒体后才显示面板。

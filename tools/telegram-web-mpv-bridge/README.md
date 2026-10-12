@@ -4,7 +4,7 @@ Local bridge for the legacy Telegram Web range userscript and Bilibili live danm
 
 ## Bilibili Live Danmaku
 
-Use this checkout's `external_player.js` (version `1.2.14.15`), updated `uosc_danmaku` and `quality-menu.lua`, and this bridge together. Web handoffs to MPV/MPVNET start fullscreen, with optional automatic default-player handoff on video/live pages. The browser resolves the canonical live room and passes short-lived chat authentication to the loopback bridge; `bilibili_danmaku.py` connects to Bilibili and forwards bounded text batches to a per-launch MPV Windows IPC pipe. Gift/system messages are omitted, pause drops queued messages, and player exit or an unrelated file change stops the session. Keeping the page open permits authentication refresh on reconnect.
+Use this checkout's `external_player.js` (version `1.2.14.19`), updated `uosc_danmaku` and `quality-menu.lua`, and this bridge together. Web handoffs to MPV/MPVNET start fullscreen, with optional automatic default-player handoff on video/live pages. The browser resolves the canonical live room and passes short-lived chat authentication to the loopback bridge; `bilibili_danmaku.py` connects to Bilibili and forwards bounded text batches to a per-launch MPV Windows IPC pipe. Gift/system messages are omitted, pause drops queued messages, and player exit or an unrelated file change stops the session. Keeping the page open permits authentication refresh on reconnect.
 
 The browser also hands account-available stream qualities to MPV. A same-room quality switch keeps the danmaku session and visibility choice, drops messages received during loading, and clears the old playback timeline. The quality menu waits for the bridge to acknowledge the new stream before permitting another switch. Invalid, failed, or expired transitions still stop the session; the authorization is limited to one transition and 15 seconds. Signed stream URLs remain in memory and are not included in session diagnostics.
 
@@ -74,3 +74,7 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8999/play/current
 - This is a bridge, not a downloader; it does not persist full files.
 - Large binary ranges cross WebSocket, so performance depends on browser and local loopback throughput.
 - v1 supports single-range requests. Multi-range requests are treated as the first range.
+
+## Playback progress in the cumulative release
+
+External Player 1.2.14.19 and bridge 2026.10.12 add two-way resume for finite videos, Bilibili CID isolation, local persistence and browser-side Bilibili account history reporting. If browser WebSockets are unavailable, progress uses anonymous extension HTTP requests and polling on port 9002. Credentials stay in the browser. The v2026.10.12-progress-update cumulative release includes the earlier .15 features and this progress update. Update the userscript, bridge and player Lua together; see [the progress guide](../../docs/scripts/playback-progress.md).

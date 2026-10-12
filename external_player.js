@@ -3,7 +3,7 @@
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.14.15
+// @version                 1.2.14.19
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -12,6 +12,7 @@
 // @homepage                https://github.com/LuckyPuppy514/external-player
 // @include                 *://*
 // @connect                 v.anime1.me
+// @connect                 127.0.0.1
 // @grant                   GM_setValue
 // @grant                   GM_getValue
 // @grant                   GM.xmlHttpRequest
@@ -39,7 +40,7 @@ const VIDEO_URL_REGEX_EXACT = /^https?:\/\/((?![^"^']*http)[^"^']+(\.|%2e)(mp4|m
 
 const defaultConfig = {
     global: {
-        version: '1.2.14.15',
+        version: '1.2.14.17',
         language: (navigator.language || navigator.userLanguage) === 'zh-CN' ? 'zh' : 'en',
         buttonXCoord: '0',
         buttonYCoord: '0',
@@ -49,6 +50,8 @@ const defaultConfig = {
         resourceSniffing: true,
         defaultPlayer: 'MPV',
         autoHandoff: false,
+        playbackProgressSync: true,
+        bilibiliHistorySync: true,
         browserRelayMode: 'auto',
         browserRelayNotifications: false,
         edgeHide: false,
@@ -175,7 +178,7 @@ const defaultConfig = {
             system: 'windows',
             icon: 'data:image/png;base64,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',
             iconSize: 52,
-            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields-append=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields-append=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields-append=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts-append=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    media.time ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
+            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields-append=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields-append=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields-append=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts-append=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    Number.isFinite(Number(media.time)) && media.time !== undefined ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
             presetEvent: {
                 playAuto: false,
                 pauseAuto: true,
@@ -190,7 +193,7 @@ const defaultConfig = {
             system: 'windows',
             icon: 'data:image/png;base64,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',
             iconSize: 50,
-            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields-append=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields-append=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields-append=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts-append=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    media.time ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
+            playEvent: "let args = [\n    `\"${media.video}\"`,\n    media.audio ? `--audio-file=\"${media.audio}\"` : '',\n    media.subtitle ? `--sub-file=\"${media.subtitle}\"` : '',\n    ...(media.mpvOptions || []),\n    media.origin ? `--http-header-fields-append=\"origin: ${media.origin}\"` : '',\n    media.referer ? `--http-header-fields-append=\"referer: ${media.referer}\"` : '',\n    media.cookie ? `--http-header-fields-append=\"cookie: ${media.cookie}\"` : '',\n    config.networkProxy ? `--http-proxy=\"${config.networkProxy}\"` : '',\n    media.ytdlp.networkProxy ? `--ytdl-raw-options-append=\"proxy=[${media.ytdlp.networkProxy}]\"` : '',\n    media.ytdlp.impersonate ? `--ytdl-raw-options-append=\"impersonate=${media.ytdlp.impersonate}\"` : '',\n    media.ytdlp.cookiesFromBrowser ? `--ytdl-raw-options-append=\"cookies-from-browser=${media.ytdlp.cookiesFromBrowser}\"` : '',\n    media.ytdlp.format ? `--ytdl-format=\"${media.ytdlp.format}\"` : media.ytdlp.quality ? `--ytdl-format=\"bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best\"` : '',\n    media.bilibili.cid ? `--script-opts-append=\"cid=${media.bilibili.cid}\"` : '',\n    media.title ? `--force-media-title=\"${media.title}\"` : '',\n    Number.isFinite(Number(media.time)) && media.time !== undefined ? `--start=\"${media.time}\"` : '',\n]\nargs = args.filter(item => item !== '');\n\nlogLaunchArgs(args, media);\n\nwindow.open(`ush://${player.name}?${compress(args.join(' '))}`, '_self');",
             presetEvent: {
                 playAuto: false,
                 pauseAuto: true,
@@ -239,6 +242,11 @@ const translations = {
         ,handoffTelegramBlobUnavailable: 'Telegram media was not captured. Refresh the page and try again.'
         ,handoffDefaultPlayer: 'Default player'
         ,handoffAutoHandoff: 'Automatically hand off videos and live streams to the default player'
+        ,handoffProgressSync: 'Sync and remember webpage / player video progress'
+        ,handoffHistorySync: 'Save MPV progress to Bilibili account history'
+        ,handoffProgressUnavailable: 'Playback sync unavailable; local resume position is still saved'
+        ,handoffProgressUpdateRequired: 'Update the local Bilibili bridge to enable playback sync'
+        ,handoffHistoryFailed: 'Bilibili history could not be saved; local resume position is saved'
         ,handoffPreferredQuality: 'Preferred quality'
         ,handoffRelayMode: 'Browser relay'
         ,handoffEdgeHide: 'Hide at edge'
@@ -279,6 +287,11 @@ const translations = {
         ,handoffTelegramBlobUnavailable: '未捕获 Telegram 媒体。请刷新页面后重试。'
         ,handoffDefaultPlayer: '默认播放器'
         ,handoffAutoHandoff: '进入视频或直播页面后自动移交默认播放器'
+        ,handoffProgressSync: '网页与播放器双向同步并保存视频进度'
+        ,handoffHistorySync: '将 MPV 进度写入 B站账号观看历史'
+        ,handoffProgressUnavailable: '进度中继暂不可用，仍已保存本机续播位置'
+        ,handoffProgressUpdateRequired: '请更新本地 B站中继以启用播放进度同步'
+        ,handoffHistoryFailed: 'B站账号历史暂未写入，已保存本机续播位置'
         ,handoffPreferredQuality: '首选画质'
         ,handoffRelayMode: '浏览器中继'
         ,handoffEdgeHide: '贴边隐藏'
@@ -312,6 +325,8 @@ var handoffIsDragging = false;
 var handoffEdgeRevealUntil = 0;
 var handoffDefaultPlayer;
 var handoffAutoHandoff;
+var handoffProgressSync;
+var handoffHistorySync;
 var handoffPreferredQuality;
 var handoffRelayMode;
 var handoffEdgeHide;
@@ -601,11 +616,16 @@ class BrowserMediaBridge {
         this.connecting = undefined;
         this.pendingRegistrations = new Map();
         this.pendingDanmakuStarts = new Map();
+        this.pendingPlaybackRequests = new Map();
         this.activeDanmakuSessions = new Map();
         this.inflightFetches = new Map();
         this.clientId = createBridgeRequestId();
         this.telegramResponses = new Map();
         this.bootstrapPromise = undefined;
+        this.playbackTransport = undefined;
+        this.httpPlaybackSessions = new Set();
+        this.httpNeedsRebind = true;
+        this.httpReboundIdentities = new Set();
         document.addEventListener(TELEGRAM_RESPONSE_EVENT, event => this.handleTelegramResponse(event.detail));
     }
     async ensureConnected() {
@@ -643,6 +663,8 @@ class BrowserMediaBridge {
                     pending.reject(new Error('local bridge disconnected'));
                 }
                 this.pendingDanmakuStarts.clear();
+                for (const pending of this.pendingPlaybackRequests.values()) pending.reject(new Error('Playback bridge disconnected'));
+                this.pendingPlaybackRequests.clear();
                 this.activeDanmakuSessions.clear();
             });
         }).finally(() => {
@@ -676,16 +698,20 @@ class BrowserMediaBridge {
             await this.bootstrapLocalBridge();
         }
     }
-    async bootstrapLocalBridge() {
+    async bootstrapLocalBridge(command = this.bootstrapCommand) {
         if (this.bootstrapPromise) {
             return this.bootstrapPromise;
         }
         this.bootstrapPromise = (async () => {
             updateHandoffStatus('relay-starting');
-            window.open(`ush://${BROWSER_RELAY_BOOTSTRAP_APP}?${compress(this.bootstrapCommand)}`, '_self');
+            window.open(`ush://${BROWSER_RELAY_BOOTSTRAP_APP}?${compress(command)}`, '_self');
             const deadline = Date.now() + BROWSER_RELAY_BOOTSTRAP_TIMEOUT;
             while (Date.now() < deadline) {
                 try {
+                    if (command.endsWith(' -PlaybackProgress')) {
+                        const health = await fetchPlaybackBridgeHealth();
+                        if (health?.ok === true && health.playbackProgressApiVersion >= 1) return;
+                    }
                     await this.ensureConnected();
                     return;
                 } catch (error) {
@@ -702,6 +728,136 @@ class BrowserMediaBridge {
     }
     async bootstrapTelegramRelay() {
         return this.bootstrapLocalBridge();
+    }
+    async ensurePlaybackBridge(bootstrap = true) {
+        if (this.playbackTransport === 'http' && Date.now() - (this.lastHttpPlaybackAt || 0) < 10000) return;
+        let health;
+        try { health = await fetchPlaybackBridgeHealth(); } catch (error) {
+            if (!bootstrap) throw error;
+            await this.bootstrapLocalBridge(`${this.bootstrapCommand} -PlaybackProgress`);
+            health = await fetchPlaybackBridgeHealth();
+        }
+        if (health?.ok !== true || !Number.isInteger(health.playbackProgressApiVersion) || health.playbackProgressApiVersion < 1 ||
+            !Array.isArray(health.playbackProgressProviders) || !health.playbackProgressProviders.includes('bilibili') ||
+            !health.playbackProgressProviders.includes('web')) {
+            const error = new Error('Local bridge requires playback progress update');
+            error.code = 'playback_progress_update_required';
+            throw error;
+        }
+        if (this.playbackTransport === 'http' && health.playbackProgressHttpApiVersion === 1) return;
+        try { await this.ensureConnected(); this.playbackTransport = 'ws'; } catch (error) {
+            if (health.playbackProgressHttpApiVersion === 1 && typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function') {
+                this.playbackTransport = 'http';
+                return;
+            }
+            const failure = new Error('Playback bridge WebSocket unavailable');
+            failure.code = 'playback_ws_unavailable';
+            throw failure;
+        }
+    }
+    requestPlayback(message, bootstrap = false) {
+        // A late browser takeover must finish before a subsequent player start.
+        const pending = (this.playbackRequestQueue || Promise.resolve()).catch(() => undefined)
+            .then(() => this.performPlaybackRequest(message, bootstrap));
+        this.playbackRequestQueue = pending;
+        return pending;
+    }
+    async performPlaybackRequest(message, bootstrap = false) {
+        await this.ensurePlaybackBridge(bootstrap);
+        const requestId = createBridgeRequestId();
+        if (this.playbackTransport === 'http') {
+            const request = { ...message, requestId };
+            if (message.type === 'getPlaybackProgress' && (this.httpNeedsRebind || !this.httpReboundIdentities.has(message.identity))) request.rebind = true;
+            const result = await this.requestPlaybackHttp(request);
+            if (!result.reply || result.reply.requestId !== requestId) throw new Error('Invalid HTTP progress acknowledgement');
+            if (message.type === 'getPlaybackProgress') {
+                this.httpNeedsRebind = false;
+                this.httpReboundIdentities.add(message.identity);
+                if (result.reply.activeSessionId) this.httpPlaybackSessions.add(result.reply.activeSessionId);
+            }
+            if (message.type === 'startPlaybackProgress') this.httpPlaybackSessions.add(result.reply.sessionId);
+            if (message.type === 'stopPlaybackProgress') this.httpPlaybackSessions.delete(message.sessionId);
+            this.dispatchPlaybackHttpEvents(result.events);
+            this.schedulePlaybackHttpPoll();
+            return result.reply;
+        }
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                this.pendingPlaybackRequests.delete(requestId);
+                const error = new Error('Playback bridge request timed out');
+                error.code = 'playback_request_timeout';
+                reject(error);
+            }, 5000);
+            this.pendingPlaybackRequests.set(requestId, {
+                resolve: response => { clearTimeout(timeout); resolve(response); },
+                reject: error => { clearTimeout(timeout); reject(error); }
+            });
+            try { this.socket.send(JSON.stringify({ ...message, requestId })); }
+            catch (error) { this.pendingPlaybackRequests.delete(requestId); clearTimeout(timeout); reject(error); }
+        });
+    }
+    isPlaybackConnected() {
+        return this.playbackTransport === 'http' ? Date.now() - (this.lastHttpPlaybackAt || 0) < 10000 : this.socket?.readyState === 1;
+    }
+    requestPlaybackHttp(request) {
+        if (!this.httpPlaybackClientId) {
+            const bytes = crypto.getRandomValues(new Uint8Array(16));
+            this.httpPlaybackClientId = `progress-http-${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+        }
+        return new Promise((resolve, reject) => {
+            let settled = false, handle;
+            const fail = (code = 'playback_http_unavailable') => {
+                if (settled) return;
+                settled = true; clearTimeout(timer);
+                const error = new Error('Playback HTTP transport unavailable'); error.code = code;
+                if (code === 'playback_progress_client_expired') { this.lastHttpPlaybackAt = 0; this.httpNeedsRebind = true; }
+                reject(error);
+            };
+            const finish = response => {
+                if (settled) return;
+                if (response?.status === 410) { fail('playback_progress_client_expired'); return; }
+                try {
+                    const result = JSON.parse(response?.responseText || '');
+                    if (response?.status !== 200 || !Array.isArray(result.events)) { fail(); return; }
+                    settled = true; clearTimeout(timer); this.lastHttpPlaybackAt = Date.now(); resolve(result);
+                } catch (error) { fail(); }
+            };
+            const timer = setTimeout(() => { fail('playback_request_timeout'); try { handle?.abort?.(); } catch (error) {} }, 5000);
+            try {
+                handle = GM.xmlHttpRequest({ method: 'POST', url: 'http://127.0.0.1:9002/playback-progress',
+                    anonymous: true, headers: { 'Content-Type': 'application/json' }, timeout: 5000,
+                    data: JSON.stringify({ clientId: this.httpPlaybackClientId, request }),
+                    onload: finish, onerror: () => fail(), ontimeout: () => fail('playback_request_timeout'), onabort: () => fail() });
+                if (typeof handle?.then === 'function') handle.then(finish, () => fail());
+            } catch (error) { fail(); }
+        });
+    }
+    dispatchPlaybackHttpEvents(events) {
+        for (const message of events) {
+            if (message?.type === 'playbackProgressStopped') this.httpPlaybackSessions.delete(message.sessionId);
+            if (message?.type === 'playbackProgress' || message?.type === 'playbackProgressStopped') {
+                this.handleMessage({ data: JSON.stringify(message) });
+            }
+        }
+    }
+    schedulePlaybackHttpPoll() {
+        if (this.httpPlaybackPollTimer || this.httpPlaybackPolling || !this.httpPlaybackSessions.size) return;
+        this.httpPlaybackPollTimer = setTimeout(async () => {
+            this.httpPlaybackPollTimer = undefined;
+            this.httpPlaybackPolling = true;
+            try {
+                const result = await this.requestPlaybackHttp({ type: 'pollPlaybackProgress' });
+                this.dispatchPlaybackHttpEvents(result.events);
+            } catch (error) { /* The controller rebinds after a service restart. */ }
+            finally { this.httpPlaybackPolling = false; this.schedulePlaybackHttpPoll(); }
+        }, 1000);
+    }
+    detachPlaybackHttp() {
+        clearTimeout(this.httpPlaybackPollTimer); this.httpPlaybackPollTimer = undefined;
+        this.httpPlaybackSessions.clear();
+        if (this.playbackTransport === 'http' && this.httpPlaybackClientId) {
+            void this.requestPlaybackHttp({ type: 'detachPlaybackProgress' }).catch(() => undefined);
+        }
     }
     async startDanmaku({ provider, roomId, sessionId, pipeName, auth }) {
         await this.ensureLocalBridge();
@@ -765,7 +921,12 @@ class BrowserMediaBridge {
         }
         let message;
         try { message = JSON.parse(event.data); } catch (error) { return; }
-        if (message.type === 'sourceRegistered') {
+        if (['playbackProgressState', 'playbackProgressSaved', 'playbackProgressStarted'].includes(message.type)) {
+            const pending = this.pendingPlaybackRequests.get(message.requestId);
+            if (pending) { this.pendingPlaybackRequests.delete(message.requestId); pending.resolve(message); }
+        } else if (message.type === 'playbackProgress' || message.type === 'playbackProgressStopped') {
+            if (typeof playbackProgressSync !== 'undefined') playbackProgressSync.handleBridgeMessage(message);
+        } else if (message.type === 'sourceRegistered') {
             const pending = this.pendingRegistrations.get(message.requestId);
             if (pending) {
                 this.pendingRegistrations.delete(message.requestId);
@@ -784,6 +945,11 @@ class BrowserMediaBridge {
             this.activeDanmakuSessions.delete(message.sessionId);
         } else if (message.type === 'error') {
             const requestId = message.requestId || message.id;
+            const playbackPending = this.pendingPlaybackRequests.get(requestId);
+            if (playbackPending) {
+                this.pendingPlaybackRequests.delete(requestId);
+                playbackPending.reject(new Error(message.message || 'Playback progress request failed'));
+            }
             const pending = this.pendingRegistrations.get(requestId);
             if (pending) {
                 this.pendingRegistrations.delete(requestId);
@@ -801,6 +967,11 @@ class BrowserMediaBridge {
         }
     }
     sendJson(message) {
+        if (message.type === 'stopPlaybackProgress' && this.playbackTransport === 'http') {
+            this.httpPlaybackSessions.delete(message.sessionId);
+            void this.requestPlayback(message).catch(() => undefined);
+            return;
+        }
         if (this.socket?.readyState === WebSocket.OPEN) {
             this.socket.send(JSON.stringify(message));
         }
@@ -1553,6 +1724,444 @@ async function fetchBilibiliVideoPlayInfo(aid, cid, epid, fnval = 4048) {
 }
 // BILIBILI_STREAM_QUALITY_HELPERS_END
 
+// PLAYBACK_PROGRESS_HELPERS_START
+const PLAYBACK_PROGRESS_STORAGE = 'playback-progress-v1';
+function progressEnabled() { return currentConfig?.global?.playbackProgressSync !== false; }
+function validPlaybackRecord(record) {
+    return record && Number.isFinite(Number(record.position)) && Number(record.position) >= 0 &&
+        Number.isFinite(Number(record.updatedAt)) && Number(record.updatedAt) > 0;
+}
+function newestPlaybackRecord(...records) {
+    // A backwards seek is a new choice. Position itself must never decide which record wins.
+    return records.filter(validPlaybackRecord).reduce((latest, record) =>
+        !latest || Number(record.updatedAt) > Number(latest.updatedAt) ? record : latest, undefined);
+}
+function readLocalPlaybackRecord(identity) {
+    try { return GM_getValue(PLAYBACK_PROGRESS_STORAGE, {})?.[identity]; } catch (error) { return undefined; }
+}
+function saveLocalPlaybackRecord(identity, record) {
+    if (!identity || !validPlaybackRecord(record)) return;
+    try {
+        const stored = GM_getValue(PLAYBACK_PROGRESS_STORAGE, {}) || {};
+        if (newestPlaybackRecord(stored[identity], record) !== record) return;
+        stored[identity] = { position: Number(record.position), duration: Number(record.duration) || 0,
+            updatedAt: Number(record.updatedAt), paused: record.paused === true,
+            ended: record.ended === true, completed: record.completed === true,
+            source: record.source === 'mpv' ? 'mpv' : 'browser' };
+        const entries = Object.entries(stored).sort((a, b) => Number(b[1]?.updatedAt) - Number(a[1]?.updatedAt)).slice(0, 500);
+        GM_setValue(PLAYBACK_PROGRESS_STORAGE, Object.fromEntries(entries));
+    } catch (error) { /* Restricted storage must not prevent playback. */ }
+}
+function progressPageUrl(pageUrl) {
+    const url = new URL(pageUrl);
+    if (!['http:', 'https:'].includes(url.protocol)) return undefined;
+    // Keep content identifiers, discard tracking and explicit start-position parameters.
+    for (const key of [...url.searchParams.keys()]) {
+        if (/^(?:utm_.+|spm_id_from|share_.+|timestamp|t|start|vd_source|is_story_h5)$/i.test(key)) url.searchParams.delete(key);
+    }
+    url.searchParams.sort();
+    if (/^#(?:t|time|start)=/i.test(url.hash)) url.hash = '';
+    return url.href;
+}
+function playbackVideoElement() {
+    return [...document.querySelectorAll('video')].filter(video => {
+        const rect = video.getBoundingClientRect?.() || { width: 100, height: 100 };
+        return rect.width > 0 && rect.height > 0 && !video.closest?.('.bpx-player-video-adv,.bilibili-player-video-adv');
+    }).sort((a, b) => {
+        const area = video => { const r = video.getBoundingClientRect?.() || { width: 100, height: 100 }; return r.width * r.height; };
+        return area(b) - area(a);
+    })[0];
+}
+function isProgressLivePage(pageUrl, parserKey, video) {
+    const url = new URL(pageUrl);
+    return Boolean(getBilibiliLiveRoomId(pageUrl)) || /^(?:douyu|bilibiliLive|twitch)$/i.test(parserKey || '') ||
+        /(^|\.)(?:douyu\.com|twitch\.tv|huya\.com|live\.douyin\.com)$/i.test(url.hostname) || video?.duration === Infinity;
+}
+async function resolvePlaybackContent(media = {}, pageUrl = location.href) {
+    const url = new URL(pageUrl);
+    const video = playbackVideoElement();
+    if (isProgressLivePage(pageUrl, currentParser?.parserKey, video)) return undefined;
+    const page = typeof unsafeWindow === 'object' ? unsafeWindow : window;
+    if (url.hostname === 'www.bilibili.com') {
+        // PGC and interactive branches require their own history semantics; never reuse a UGC CID.
+        if (/^\/bangumi\//.test(url.pathname)) return undefined;
+        const route = url.pathname.match(/^\/video\/(BV[a-zA-Z0-9]+|av\d+)/);
+        let info = media.bilibili || {};
+        const part = Math.max(1, Number(url.searchParams.get('p')) || 1);
+        if (!info.aid || !info.cid) {
+            if (route) {
+                const query = route[1].startsWith('BV') ? `bvid=${route[1]}` : `aid=${route[1].slice(2)}`;
+                const result = await fetchBilibiliLiveJson(`https://api.bilibili.com/x/web-interface/view?${query}`);
+                const selected = result.data?.pages?.[part - 1];
+                if (result.code !== 0 || !selected) return undefined;
+                info = { aid: result.data.aid, bvid: result.data.bvid, cid: selected.cid, duration: selected.duration };
+            } else {
+                const initial = page.__INITIAL_STATE__;
+                const data = initial?.videoData || initial?.videoInfo;
+                const cid = initial?.p > 1 ? initial.cidMap?.[data?.aid]?.cids?.[initial.p] : data?.cid;
+                if (!data?.aid || !cid) return undefined;
+                info = { aid: data.aid, bvid: data.bvid, cid, duration: data.duration };
+            }
+        }
+        if (!/^[1-9]\d*$/.test(String(info.aid)) || !/^[1-9]\d*$/.test(String(info.cid))) return undefined;
+        return { provider: 'bilibili', identity: `bilibili:${info.aid}:${info.cid}`,
+            pageUrl: progressPageUrl(pageUrl), aid: Number(info.aid), cid: Number(info.cid), bvid: info.bvid,
+            page: part, duration: Number(info.duration) || Number(video?.duration) || 0 };
+    }
+    if (!video || !Number.isFinite(Number(video.duration)) || Number(video.duration) <= 0) return undefined;
+    // Canonical page identity survives CDN signature rotation and blob URL replacement.
+    const canonical = progressPageUrl(pageUrl);
+    return canonical ? { provider: 'web', identity: `web:${douyuMd5(canonical)}`,
+        pageUrl: canonical, duration: Number(video.duration) } : undefined;
+}
+async function fetchPlaybackBridgeHealth() {
+    // Extension requests and native loopback requests have different browser
+    // permission paths. Both are account-free health probes with a hard bound.
+    if (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function') {
+        try {
+            return await new Promise((resolve, reject) => {
+                let request, settled = false;
+                const finish = (response, failed = false) => {
+                    if (settled) return;
+                    settled = true; clearTimeout(timer);
+                    if (failed) { reject(new Error('Extension playback health request failed')); return; }
+                    try {
+                        if (response.status !== undefined && response.status !== 200) throw new Error('Playback health response failed');
+                        resolve(typeof response.response === 'object' && response.response !== null ?
+                            response.response : JSON.parse(response.responseText));
+                    } catch (error) { reject(new Error('Playback health response invalid')); }
+                };
+                const timer = setTimeout(() => {
+                    finish(undefined, true);
+                    try { request?.abort?.(); } catch (error) { /* The native fallback has its own timeout. */ }
+                }, 2800);
+                try {
+                    request = GM.xmlHttpRequest({ method: 'GET', url: 'http://127.0.0.1:9002/health',
+                        anonymous: true, timeout: 2500, responseType: 'text',
+                        onload: response => finish(response), onerror: () => finish(undefined, true),
+                        ontimeout: () => finish(undefined, true), onabort: () => finish(undefined, true) });
+                    // Some script managers expose promise completion instead of callbacks.
+                    if (typeof request?.then === 'function') request.then(response => finish(response), () => finish(undefined, true));
+                } catch (error) { finish(undefined, true); }
+            });
+        } catch (error) { /* Native localhost CORS is the second supported health transport. */ }
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    try {
+        const response = await fetch('http://127.0.0.1:9002/health', { credentials: 'omit',
+            mode: 'cors', cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error('Playback health response failed');
+        return await response.json();
+    } catch (error) {
+        const failure = new Error('Playback bridge health unavailable');
+        failure.code = 'playback_health_unavailable';
+        throw failure;
+    } finally { clearTimeout(timeout); }
+}
+async function readBilibiliAccountProgress(content) {
+    if (content.provider !== 'bilibili' || currentConfig?.global?.bilibiliHistorySync === false) return undefined;
+    const result = await fetchBilibiliLiveJson('https://api.bilibili.com/x/web-interface/history/cursor?max=0&view_at=0&business=archive&ps=30');
+    if (result.code !== 0) return undefined;
+    const item = result.data?.list?.find(item => String(item.history?.oid) === String(content.aid) &&
+        String(item.history?.cid) === String(content.cid) && item.history?.business === 'archive');
+    if (!item || !Number(item.view_at) || !Number.isFinite(Number(item.progress)) || Number(item.progress) < -1) return undefined;
+    return { position: Math.max(0, Number(item.progress)), duration: Number(item.duration) || content.duration,
+        updatedAt: Number(item.view_at) * 1000, paused: true, ended: Number(item.progress) === -1,
+        completed: Number(item.progress) === -1, source: 'account' };
+}
+function makePlaybackLaunch(media, sessionId, identity, position) {
+    if (!/^progress-[a-zA-Z0-9_-]{1,43}$/.test(sessionId)) throw new Error('Invalid playback session');
+    const pipeName = `mpv-lazy-${sessionId}`;
+    const options = (media.mpvOptions || []).filter(option => !/^--input-ipc-server(?:=|$)/i.test(String(option)) &&
+        !String(option).includes('web_progress-identity=') && !String(option).includes('web_progress-session_id='));
+    options.push(`--input-ipc-server="\\\\.\\pipe\\${pipeName}"`,
+        `--script-opts-append="web_progress-identity=${identity}"`,
+        `--script-opts-append="web_progress-session_id=${sessionId}"`);
+    return { ...media, time: Number(position) || 0, mpvOptions: options };
+}
+class BilibiliProgressReporter {
+    constructor() { this.states = new Map(); this.warningShown = false; }
+    cancel(identity) {
+        const state = this.states.get(identity);
+        if (!state) return;
+        state.generation = (state.generation || 0) + 1;
+        state.pending = undefined;
+        state.controller?.abort();
+    }
+    enqueue(content, record, force = false) {
+        if (content.provider !== 'bilibili' || currentConfig?.global?.bilibiliHistorySync === false || !validPlaybackRecord(record)) return;
+        let state = this.states.get(content.identity);
+        if (!state) { state = { lastSentAt: 0, startTs: Math.floor(Date.now() / 1000), realtime: 0 }; this.states.set(content.identity, state); }
+        state.pending = { content, record: { ...record }, force, generation: state.generation || 0 };
+        if (!state.busy && (force || Date.now() - state.lastSentAt >= 15000)) void this.flush(state);
+    }
+    async flush(state) {
+        if (state.busy || !state.pending || currentConfig?.global?.bilibiliHistorySync === false) return;
+        state.busy = true;
+        const pending = state.pending;
+        state.pending = undefined;
+        try {
+            const csrf = String(document.cookie || '').match(/(?:^|;\s*)bili_jct=([^;]+)/)?.[1];
+            if (!csrf) return; // Logged-out users retain local resume without account requests.
+            const nav = await fetchBilibiliLiveJson('https://api.bilibili.com/x/web-interface/nav');
+            if (pending.generation !== (state.generation || 0)) return;
+            if (!nav.data?.isLogin) return;
+            const { content, record } = pending;
+            const previous = state.previous;
+            if (previous && !previous.paused && record.updatedAt >= previous.updatedAt) {
+                state.realtime += Math.min(20, (record.updatedAt - previous.updatedAt) / 1000);
+            }
+            const position = Math.floor(record.position);
+            const duration = Math.floor(Number(record.duration) || content.duration || 0);
+            const body = { aid: content.aid, bvid: content.bvid || '', cid: content.cid, type: 3, dt: 2,
+                start_ts: state.startTs, mid: nav.data.mid, played_time: record.completed ? -1 : position,
+                realtime: Math.floor(state.realtime), real_played_time: Math.floor(state.realtime),
+                video_duration: duration, last_play_progress_time: position, max_play_progress_time: position,
+                play_type: record.ended ? 4 : record.paused ? 2 : state.previous ? 0 : 1,
+                csrf: decodeURIComponent(csrf), device: 'web', platform: 'web', mobi_app: 'web' };
+            const key = value => String(value || '').split('/').pop().split('.')[0];
+            const query = buildBilibiliWbiQuery(Object.fromEntries([
+                'start_ts', 'mid', 'aid', 'dt', 'realtime', 'played_time', 'real_played_time',
+                'video_duration', 'last_play_progress_time'
+            ].map(name => [`w_${name}`, body[name]])), key(nav.data.wbi_img?.img_url), key(nav.data.wbi_img?.sub_url));
+            const controller = new AbortController();
+            state.controller = controller;
+            const timer = setTimeout(() => controller.abort(), 6000);
+            let result;
+            try {
+                const response = await fetch(`https://api.bilibili.com/x/click-interface/web/heartbeat?${query}`, {
+                    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams(body).toString(), signal: controller.signal, keepalive: true });
+                if (!response.ok) throw new Error('Bilibili history request failed');
+                result = await response.json();
+            } finally { clearTimeout(timer); }
+            if (result.code !== 0) throw new Error('Bilibili history save failed');
+            state.previous = record;
+        } catch (error) {
+            // Keep a terminal snapshot after a transient failure even if MPV has already closed.
+            if (pending.generation !== (state.generation || 0)) return;
+            if (!state.pending || Number(pending.record.updatedAt) >= Number(state.pending.record.updatedAt)) {
+                state.pending = { ...pending, force: false };
+            }
+            if (!this.warningShown) {
+                this.warningShown = true;
+                console.warn('External Player: bilibili_history_sync_failed');
+                showToast(translation.handoffHistoryFailed);
+            }
+        } finally {
+            state.lastSentAt = Date.now();
+            state.busy = false;
+            state.controller = undefined;
+            if (state.pending?.force) void this.flush(state);
+        }
+    }
+}
+class PlaybackProgressSync {
+    constructor(bridge) {
+        this.bridge = bridge; this.generation = 0; this.reporter = new BilibiliProgressReporter();
+        this.listeners = []; this.warningShown = false;
+        document.addEventListener('pointerdown', event => {
+            if (event.target === this.video || event.target?.closest?.('.bpx-player-container,.bilibili-player-video-wrap')) this.userActionAt = Date.now();
+        }, true);
+        document.addEventListener('keydown', event => {
+            if (this.video && /^(?:Space|ArrowLeft|ArrowRight|Home|End|KeyK|KeyJ|KeyL)$/.test(event.code || '')) this.userActionAt = Date.now();
+        }, true);
+        window.addEventListener('pagehide', () => { this.saveBrowser(true); this.bridge.detachPlaybackHttp?.(); });
+        document.addEventListener('visibilitychange', () => { if (document.hidden) this.saveBrowser(true); });
+    }
+    notifyUnavailable(error) {
+        if (this.warningShown) return;
+        this.warningShown = true;
+        const code = ['playback_progress_update_required', 'playback_health_unavailable',
+            'playback_ws_unavailable', 'playback_request_timeout'].includes(error?.code) ? error.code : 'playback_progress_unavailable';
+        console.warn(`External Player: ${code}`);
+        showToast(error?.code === 'playback_progress_update_required' ?
+            translation.handoffProgressUpdateRequired : translation.handoffProgressUnavailable);
+    }
+    async resetPage(pageUrl) {
+        this.lastResolve = Date.now();
+        this.saveBrowser(true);
+        if (!progressEnabled() && this.sessionId) this.bridge.sendJson({ type: 'stopPlaybackProgress', sessionId: this.sessionId });
+        const generation = ++this.generation;
+        for (const [video, event, handler] of this.listeners) video.removeEventListener(event, handler);
+        this.listeners = []; this.content = undefined; this.video = undefined; this.sessionId = undefined;
+        this.record = undefined; this.echoUntil = 0; this.echoPosition = undefined; this.suspendBrowserUntil = 0;
+        this.userActionAt = 0;
+        this.initializing = true;
+        this.sequence = -1; this.browserTouched = false; this.lastBrowserSave = 0;
+        if (!progressEnabled() || self !== top) return;
+        try {
+            const content = await resolvePlaybackContent({}, pageUrl);
+            if (generation !== this.generation || getAutoHandoffPageKey(pageUrl) !== getAutoHandoffPageKey(location.href)) return;
+            this.content = content;
+            if (!content) return;
+            this.boundAutomaticKey = typeof getAutomaticHandoffKey === 'function' ? getAutomaticHandoffKey() : getAutoHandoffPageKey(pageUrl);
+            this.bindVideo();
+            const accountPromise = readBilibiliAccountProgress(content).catch(() => undefined);
+            const bridge = await this.bridge.requestPlayback({ type: 'getPlaybackProgress', ...this.bridgeContent(content) }).catch(() => undefined);
+            if (generation !== this.generation || this.content?.identity !== content.identity) return;
+            this.sessionId = this.browserTouched ? undefined : bridge?.activeSessionId;
+            this.record = newestPlaybackRecord(this.record, readLocalPlaybackRecord(content.identity), bridge?.record);
+            if (this.browserTouched) this.saveBrowser(true, true, true);
+            const account = await accountPromise;
+            if (generation !== this.generation || this.content?.identity !== content.identity) return;
+            const record = newestPlaybackRecord(this.record, readLocalPlaybackRecord(content.identity), account);
+            if (record && !this.browserTouched) {
+                this.record = record; saveLocalPlaybackRecord(content.identity, record); this.applyToVideo(record);
+                if (record.source === 'mpv') this.reporter.enqueue(content, record, true);
+            }
+        } catch (error) { /* An unavailable page API must not hide the manual player button. */ }
+        finally { if (generation === this.generation) this.initializing = false; }
+    }
+    bridgeContent(content = this.content) {
+        return { provider: content.provider, identity: content.identity, pageUrl: content.pageUrl };
+    }
+    bindVideo() {
+        const video = playbackVideoElement();
+        if (!video || video === this.video) return;
+        for (const [old, event, handler] of this.listeners) old.removeEventListener(event, handler);
+        this.listeners = []; this.video = video;
+        for (const event of ['play', 'pause', 'seeked', 'ended', 'loadedmetadata']) {
+            const handler = () => {
+                if (!this.content || this.video !== video) return;
+                if (event === 'loadedmetadata') { if (this.record && !this.browserTouched) this.applyToVideo(this.record); return; }
+                const userAction = Date.now() - (this.userActionAt || 0) <= 3000;
+                if (event === 'seeked' && this.echoUntil > Date.now() &&
+                    Math.abs(Number(video.currentTime) - Number(this.echoPosition)) < 0.25) return;
+                if (this.suspendBrowserUntil > Date.now() && event === 'pause' && !userAction) return;
+                if (this.initializing && !userAction) return;
+                if (event === 'play' || event === 'seeked') this.browserTouched = true;
+                const takeover = (this.sessionId || this.initializing) && (event === 'play' || event === 'seeked');
+                if (event === 'play' || event === 'seeked') { this.echoUntil = 0; this.suspendBrowserUntil = 0; }
+                this.saveBrowser(true, Boolean(takeover), this.initializing && userAction);
+            };
+            video.addEventListener(event, handler); this.listeners.push([video, event, handler]);
+        }
+        if (this.record && !this.browserTouched) this.applyToVideo(this.record);
+    }
+    applyToVideo(record) {
+        const video = this.video;
+        if (!video || this.browserTouched && !video.paused || !Number.isFinite(Number(video.duration)) || video.duration <= 0) return;
+        const position = record.completed ? 0 : Number(record.position);
+        if (Math.abs(Number(video.currentTime) - position) < 0.75) return;
+        const target = Math.min(position, Math.max(0, video.duration - 0.1));
+        this.echoUntil = Date.now() + 1800; this.echoPosition = target;
+        try { video.currentTime = target; } catch (error) { /* Wait for the page to load its metadata. */ }
+    }
+    saveBrowser(force = false, takeover = false, allowInitializing = false) {
+        if (!progressEnabled() || this.initializing && !allowInitializing || !this.content || !this.video || this.sessionId && !takeover) return;
+        if (getAutoHandoffPageKey(this.content.pageUrl) !== getAutoHandoffPageKey(location.href)) return;
+        if (!force && Date.now() - this.lastBrowserSave < 5000) return;
+        if (this.suspendBrowserUntil > Date.now() || this.echoUntil > Date.now()) return;
+        const position = Number(this.video.currentTime), duration = Number(this.video.duration);
+        if (!Number.isFinite(position) || position < 0 || !Number.isFinite(duration) || duration <= 0) return;
+        if (!this.browserTouched && this.video.paused) return;
+        const content = this.content;
+        const record = { position, duration, updatedAt: Math.max(Date.now(), Number(this.record?.updatedAt) || 0) + 1, paused: this.video.paused,
+            ended: this.video.ended === true, completed: this.video.ended === true, source: 'browser' };
+        this.record = record; this.lastBrowserSave = record.updatedAt;
+        this.reporter.cancel(content.identity);
+        saveLocalPlaybackRecord(content.identity, record);
+        if (takeover) { this.sessionId = undefined; this.sequence = -1; }
+        // Page watching is reported by Bilibili itself. Only MPV records need our account heartbeat.
+        void this.bridge.requestPlayback({ type: 'updatePlaybackProgress', ...this.bridgeContent(content),
+            ...record, takeover }).catch(() => undefined);
+    }
+    async tick() {
+        if (!progressEnabled()) return;
+        for (const state of this.reporter.states.values()) {
+            if (state.pending && !state.busy && Date.now() - state.lastSentAt >= 15000) void this.reporter.flush(state);
+        }
+        if (this.content && typeof getAutomaticHandoffKey === 'function' && this.boundAutomaticKey !== getAutomaticHandoffKey()) {
+            void this.resetPage(location.href); return;
+        }
+        if (!this.content) {
+            if (Date.now() - (this.lastResolve || 0) > 3000) void this.resetPage(location.href);
+            return;
+        }
+        this.bindVideo(); this.saveBrowser();
+        if (this.sessionId && !(this.bridge.isPlaybackConnected?.() ?? this.bridge.socket?.readyState === 1) && !this.reconnecting &&
+            Date.now() - (this.lastReconnect || 0) >= 5000) {
+            const content = this.content, generation = this.generation;
+            this.lastReconnect = Date.now();
+            this.reconnecting = this.bridge.requestPlayback({ type: 'getPlaybackProgress', ...this.bridgeContent(content) })
+                .then(state => {
+                    if (generation !== this.generation || content.identity !== this.content?.identity) return;
+                    this.sessionId = state.activeSessionId;
+                    const latest = newestPlaybackRecord(this.record, state.record);
+                    if (latest) {
+                        this.record = latest; saveLocalPlaybackRecord(content.identity, latest); this.applyToVideo(latest);
+                        if (latest.source === 'mpv') this.reporter.enqueue(content, latest, latest.ended === true);
+                    }
+                }).catch(() => undefined).finally(() => { this.reconnecting = undefined; });
+        }
+    }
+    handleBridgeMessage(message) {
+        if (!progressEnabled() || !this.content || message.identity !== this.content.identity ||
+            !this.sessionId || message.sessionId !== this.sessionId) return;
+        if (getAutoHandoffPageKey(this.content.pageUrl) !== getAutoHandoffPageKey(location.href) ||
+            typeof getAutomaticHandoffKey === 'function' && this.boundAutomaticKey !== getAutomaticHandoffKey()) return;
+        if (message.type === 'playbackProgressStopped') {
+            this.sessionId = undefined;
+            if (message.reason === 'browser_rebound') this.reporter.cancel(this.content.identity);
+            return;
+        }
+        if (message.source !== 'mpv' || !Number.isInteger(message.sequence) || message.sequence <= this.sequence || !validPlaybackRecord(message)) return;
+        this.sequence = message.sequence;
+        const record = { position: Number(message.position), duration: Number(message.duration) || this.content.duration,
+            updatedAt: Number(message.updatedAt), paused: message.paused === true, ended: message.ended === true,
+            completed: message.completed === true, source: 'mpv' };
+        if (newestPlaybackRecord(this.record, record) !== record) return;
+        const force = record.ended || record.paused && !this.record?.paused ||
+            this.record && record.position < this.record.position - 2;
+        this.record = record; this.browserTouched = false; saveLocalPlaybackRecord(this.content.identity, record);
+        this.applyToVideo(record); this.reporter.enqueue(this.content, record, force);
+    }
+    async prepareLaunch(media, player) {
+        if (!progressEnabled() || !isRelayPlayer(player)) return media;
+        const generation = this.generation;
+        const content = await resolvePlaybackContent(media);
+        if (!content || generation !== this.generation) return media;
+        media = { ...media, playbackProgressSync: true };
+        if (this.content?.identity !== content.identity) { this.content = content; this.record = undefined; this.browserTouched = false; this.bindVideo(); }
+        this.saveBrowser(true);
+        let local = newestPlaybackRecord(this.record, readLocalPlaybackRecord(content.identity));
+        const restartCompleted = record => record?.completed ? { ...record, position: 0, completed: false, ended: false,
+            updatedAt: Math.max(Date.now(), Number(record.updatedAt) || 0) + 1, source: 'browser' } : record;
+        local = restartCompleted(local);
+        if (local) saveLocalPlaybackRecord(content.identity, local);
+        let latest = local;
+        let sessionId;
+        try {
+            await this.bridge.ensurePlaybackBridge(true);
+            const state = await this.bridge.requestPlayback({ type: 'getPlaybackProgress', ...this.bridgeContent(content) });
+            latest = restartCompleted(newestPlaybackRecord(local, state.record));
+            if (latest) saveLocalPlaybackRecord(content.identity, latest);
+            if (generation !== this.generation || this.content?.identity !== content.identity) return media;
+            sessionId = `progress-${createBridgeRequestId().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 43)}`;
+            // An active page's latest position includes backwards and zero-second seeks.
+            const position = latest?.position ?? Number(media.time) ?? 0;
+            const started = await this.bridge.requestPlayback({ type: 'startPlaybackProgress', ...this.bridgeContent(content),
+                sessionId, pipeName: `mpv-lazy-${sessionId}`, position: Number.isFinite(position) ? position : 0,
+                duration: Number(latest?.duration) || content.duration, updatedAt: latest?.updatedAt || Date.now() }, true);
+            if (generation !== this.generation || this.content?.identity !== content.identity) {
+                this.bridge.sendJson({ type: 'stopPlaybackProgress', sessionId }); return media;
+            }
+            if (started.sessionId !== sessionId || started.identity !== content.identity || Number(started.apiVersion) < 1) throw new Error('Invalid playback bridge acknowledgement');
+            this.sessionId = sessionId; this.sequence = -1; this.record = newestPlaybackRecord(latest, started.record);
+            this.suspendBrowserUntil = Date.now() + 6000;
+            return makePlaybackLaunch(media, sessionId, content.identity, this.record?.position ?? position);
+        } catch (error) {
+            if (sessionId) this.bridge.sendJson({ type: 'stopPlaybackProgress', sessionId });
+            this.notifyUnavailable(error);
+            return latest ? { ...media, time: latest.position } : media;
+        }
+    }
+}
+const playbackProgressSync = new PlaybackProgressSync(bilibiliMediaBridge);
+// PLAYBACK_PROGRESS_HELPERS_END
+
 class BaseParser {
     constructor() {
         currentMedia = {
@@ -1792,7 +2401,9 @@ class BaseParser {
 
             media = this.prepareFullscreenLaunch(media, player);
 
-            if (!player.presetEvent.syncTime) {
+            if (typeof playbackProgressSync !== 'undefined') media = await playbackProgressSync.prepareLaunch(media, player);
+
+            if (!player.presetEvent.syncTime && !media.playbackProgressSync) {
                 media.time = undefined;
             }
             if (!isLaunchContextCurrent()) return;
@@ -1820,7 +2431,7 @@ class BaseParser {
                                 media.ytdlp.format ? `--ytdl-format="${media.ytdlp.format}"` : media.ytdlp.quality ? `--ytdl-format="bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best"` : '',
                                 media.bilibili.cid ? `--script-opts-append="cid=${media.bilibili.cid}"` : '',
                                 media.title ? `--force-media-title="${media.title}"` : '',
-                                media.time ? `--start="${media.time}"` : '',
+                                Number.isFinite(Number(media.time)) && media.time !== undefined ? `--start="${media.time}"` : '',
                             ]
                             args = args.filter(item => item !== '');
                             logLaunchArgs(args, media);
@@ -1842,7 +2453,7 @@ class BaseParser {
                                 media.ytdlp.format ? `--ytdl-format="${media.ytdlp.format}"` : media.ytdlp.quality ? `--ytdl-format="bestvideo[height<=?${media.ytdlp.quality}]+bestaudio/best"` : '',
                                 media.bilibili.cid ? `--script-opts-append="cid=${media.bilibili.cid}"` : '',
                                 media.title ? `--force-media-title="${media.title}"` : '',
-                                media.time ? `--start="${media.time}"` : '',
+                                Number.isFinite(Number(media.time)) && media.time !== undefined ? `--start="${media.time}"` : '',
                             ]
                             args = args.filter(item => item !== '');
                             logLaunchArgs(args, media);
@@ -2421,6 +3032,10 @@ const PARSER = {
             const quality = currentConfig.global.parser.bilibili.preferredQuality;
 
             currentMedia.bilibili.cid = cid;
+            currentMedia.bilibili.aid = aid;
+            currentMedia.bilibili.bvid = videoInfo.bvid;
+            currentMedia.bilibili.duration = videoInfo.duration;
+            currentMedia.bilibili.epid = epid;
             currentMedia.title = title ? title : currentMedia.title;
             if (currentConfig.global.parser.bilibili.preferredSubtitle &&
                 currentConfig.global.parser.bilibili.preferredSubtitle !== 'off') {
@@ -2497,7 +3112,9 @@ const PARSER = {
             return {
                 aid: aid,
                 cid: cid,
-                title: title
+                title: title,
+                bvid: response.data.bvid,
+                duration: response.data.pages?.[(Number(ps?.[1]) || 1) - 1]?.duration || response.data.duration
             };
         }
         async getVideoInfoByEpid() {
@@ -4199,6 +4816,8 @@ function cacheHandoffElements() {
     settingButton = handoffShadow?.querySelector('.settings-button');
     handoffDefaultPlayer = handoffShadow?.querySelector('.quick-default-player');
     handoffAutoHandoff = handoffShadow?.querySelector('.quick-auto-handoff');
+    handoffProgressSync = handoffShadow?.querySelector('.quick-progress-sync');
+    handoffHistorySync = handoffShadow?.querySelector('.quick-history-sync');
     handoffPreferredQuality = handoffShadow?.querySelector('.quick-preferred-quality');
     handoffRelayMode = handoffShadow?.querySelector('.quick-relay-mode');
     handoffEdgeHide = handoffShadow?.querySelector('.quick-edge-hide');
@@ -5037,6 +5656,8 @@ function appendButtonDiv() {
                         <label>${translation.handoffRelayMode}<select class="quick-relay-mode"><option value="auto">${translation.handoffRelayAuto}</option><option value="always">${translation.handoffRelayAlways}</option><option value="off">${translation.handoffRelayOff}</option></select></label>
                         <label>${translation.handoffPreferredQuality}<select class="quick-preferred-quality"><option value="unlimited">${translation.handoffQualityAuto}</option></select></label>
                         <label class="quick-edge-label"><input class="quick-auto-handoff" type="checkbox">${translation.handoffAutoHandoff}</label>
+                        <label class="quick-edge-label"><input class="quick-progress-sync" type="checkbox">${translation.handoffProgressSync}</label>
+                        <label class="quick-edge-label"><input class="quick-history-sync" type="checkbox">${translation.handoffHistorySync}</label>
                         <label class="quick-edge-label"><input class="quick-edge-hide" type="checkbox">${translation.handoffEdgeHide}</label>
                     </div>
                     <button class="primary-action" type="button">
@@ -5472,6 +6093,20 @@ function renderQuickSettings(enabledPlayers) {
         suppressAutomaticHandoffForCurrentPage();
         persistQuickSettings();
     };
+    if (typeof handoffProgressSync !== 'undefined' && handoffProgressSync) {
+        handoffProgressSync.checked = currentConfig.global.playbackProgressSync !== false;
+        handoffProgressSync.onchange = () => {
+            currentConfig.global.playbackProgressSync = handoffProgressSync.checked;
+            persistQuickSettings(); void playbackProgressSync.resetPage(location.href);
+        };
+    }
+    if (typeof handoffHistorySync !== 'undefined' && handoffHistorySync) {
+        handoffHistorySync.checked = currentConfig.global.bilibiliHistorySync !== false;
+        handoffHistorySync.onchange = () => {
+            currentConfig.global.bilibiliHistorySync = handoffHistorySync.checked;
+            persistQuickSettings();
+        };
+    }
     handoffDefaultPlayer.onchange = () => {
         currentConfig.global.defaultPlayer = handoffDefaultPlayer.value;
         suppressAutomaticHandoffForCurrentPage();
@@ -6885,6 +7520,7 @@ async function init(url) {
     currentConfig = loadConfig();
     translation = translations[currentConfig.global.language];
     currentParser = matchParser(currentConfig.global.parser, url) || matchParser(defaultConfig.global.parser, url);
+    if (typeof playbackProgressSync !== 'undefined') void playbackProgressSync.resetPage(url);
     if (!currentParser && self === top && currentConfig.global.resourceSniffing !== false) {
         const minimumPerformanceStartTime = previousUrl ?
             Math.max(0, performance.now() - REFRESH_INTERVAL * 2) :
@@ -6918,4 +7554,5 @@ setInterval(() => {
         } else init(url);
     }
     scheduleAutomaticHandoff();
+    if (typeof playbackProgressSync !== 'undefined') void playbackProgressSync.tick();
 }, REFRESH_INTERVAL);

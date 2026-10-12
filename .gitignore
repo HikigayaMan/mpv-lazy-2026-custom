@@ -69,5 +69,7 @@ node_modules/
 tools/telegram-web-mpv-bridge/.venv/
 tools/telegram-web-mpv-bridge/__pycache__/
 tools/telegram-web-mpv-bridge/*.log
+tools/telegram-web-mpv-bridge/playback-progress.json
+tools/telegram-web-mpv-bridge/playback-progress.json.*
 tools/telegram-web-mpv-bridge/build/
 tools/release/*.local.txt

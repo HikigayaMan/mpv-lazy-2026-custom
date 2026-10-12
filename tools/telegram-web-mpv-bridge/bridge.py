@@ -27,6 +27,7 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from bilibili_danmaku import BilibiliDanmakuManager, SessionFailure
+from playback_progress import HttpProgressTransport, PlaybackProgressManager, ProgressStore
 
 
 LOG = logging.getLogger("telegram-web-mpv-bridge")
@@ -35,7 +36,7 @@ DEFAULT_HTTP_PORT = 8999
 DEFAULT_WS_PORT = 9000
 DEFAULT_OPEN_ENDED_CHUNK = 8 * 1024 * 1024
 DEFAULT_TIMEOUT = 30.0
-BRIDGE_VERSION = "2026.10.11"
+BRIDGE_VERSION = "2026.10.12"
 DEFAULT_MPV_PATH = r"F:\mpv_2026\mpv-lazy\mpv.exe"
 
 
@@ -57,7 +58,8 @@ class PendingRequest:
 
 
 class BridgeState:
-    def __init__(self, timeout: float, open_ended_chunk: int, mpv_path: str, http_host: str, http_port: int) -> None:
+    def __init__(self, timeout: float, open_ended_chunk: int, mpv_path: str, http_host: str, http_port: int,
+                 progress_store: ProgressStore | None = None) -> None:
         self.timeout = timeout
         self.open_ended_chunk = open_ended_chunk
         self.mpv_path = mpv_path
@@ -68,6 +70,8 @@ class BridgeState:
         self.pending: dict[str, PendingRequest] = {}
         self.lock = asyncio.Lock()
         self.danmaku = BilibiliDanmakuManager()
+        self.progress = PlaybackProgressManager(progress_store)
+        self.progress_http = HttpProgressTransport(self.progress)
         self.browser_clients: set = set()
         self.browser_hello_count = 0
 
@@ -170,6 +174,23 @@ class BridgeState:
         elif msg_type in ("updateDanmakuAuth", "danmakuAuthError"):
             if payload.get("provider") == "bilibili":
                 self.danmaku.update_auth(payload, websocket)
+        elif msg_type == "startPlaybackProgress":
+            if websocket is None:
+                raise ValueError("playback progress requires a browser connection")
+            reply = await self.progress.start(payload, websocket, defer=True)
+            # Even with WebSocket backpressure, the browser receives the
+            # registration ACK before a first paused-player notification.
+            try:
+                await websocket.send(json.dumps(reply, ensure_ascii=False))
+            finally:
+                self.progress.activate(reply["sessionId"], websocket)
+        elif msg_type in ("getPlaybackProgress", "updatePlaybackProgress"):
+            if websocket is None:
+                raise ValueError("playback progress requires a browser connection")
+            method = {"getPlaybackProgress": self.progress.get, "updatePlaybackProgress": self.progress.update}[msg_type]
+            await websocket.send(json.dumps(await method(payload, websocket), ensure_ascii=False))
+        elif msg_type == "stopPlaybackProgress":
+            await self.progress.stop(str(payload.get("sessionId") or ""), websocket)
         elif msg_type == "error":
             request_id = str(payload.get("id") or "")
             pending = self.pending.get(request_id)
@@ -265,17 +286,63 @@ async def handle_http_client(reader: asyncio.StreamReader, writer: asyncio.Strea
 
         parsed = urlparse(target)
         if parsed.path == "/health":
+            # Public capability checks carry no site credentials or playback
+            # records. Keep this opt-in confined to /health; /status and all
+            # media/progress traffic retain their existing access boundaries.
+            health_headers = {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+            }
+            if method.upper() == "OPTIONS":
+                health_headers["Access-Control-Allow-Private-Network"] = "true"
+                writer.write(http_response(204, "No Content", health_headers))
+                return
+            if method.upper() != "GET":
+                writer.write(http_response(405, "Method Not Allowed", {"Allow": "GET, OPTIONS"}))
+                return
             body = json.dumps({"ok": True, "connected": state.connected, "protocol": 2,
                                "bridgeVersion": BRIDGE_VERSION,
                                "danmakuApiVersion": 2, "danmakuProviders": ["bilibili"],
+                               "playbackProgressApiVersion": 1, "playbackProgressProviders": ["bilibili", "web"],
+                               "playbackProgressHttpApiVersion": 1,
                                "browserConnected": bool(state.browser_clients),
                                "browserClients": len(state.browser_clients)}).encode("utf-8")
-            writer.write(http_response(200, "OK", {"Content-Type": "application/json"}, body))
+            writer.write(http_response(200, "OK", {"Content-Type": "application/json", **health_headers}, body))
+            return
+        if parsed.path == "/playback-progress":
+            if method.upper() != "POST":
+                writer.write(http_response(405, "Method Not Allowed", {"Allow": "POST"}))
+                return
+            status, body, activation = 200, None, None
+            try:
+                length = int(headers.get("content-length", "0"))
+                if not 0 < length <= 65536 or headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
+                    raise ValueError("invalid progress request")
+                envelope = json.loads(await asyncio.wait_for(reader.readexactly(length), 5))
+                result, owner, session = await state.progress_http.request(envelope)
+                body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+                if session:
+                    activation = (session, owner)
+            except LookupError:
+                status, body = 410, b'{"error":{"code":"playback_progress_client_expired"}}'
+            except (ValueError, TypeError, asyncio.IncompleteReadError, TimeoutError):
+                status, body = 400, b'{"error":{"code":"playback_progress_http_invalid"}}'
+            except Exception:
+                status, body = 503, b'{"error":{"code":"playback_progress_http_failed"}}'
+            try:
+                writer.write(http_response(status, HTTPStatus(status).phrase, {"Content-Type": "application/json"}, body))
+                await writer.drain()
+            except (ConnectionError, OSError):
+                return
+            finally:
+                if activation:
+                    state.progress.activate(*activation)
             return
         if parsed.path == "/status":
             body = json.dumps({"connected": state.connected, "video": state.video.__dict__,
                                "bridgeVersion": BRIDGE_VERSION,
                                "danmaku": state.danmaku.snapshots(),
+                               "playbackProgress": state.progress.snapshots(),
                                "diagnostics": {"browserConnected": bool(state.browser_clients),
                                                "browserClients": len(state.browser_clients), "helloCount": state.browser_hello_count,
                                                **state.danmaku.diagnostics()}}, ensure_ascii=False).encode("utf-8")
@@ -382,6 +449,7 @@ async def ws_handler(websocket, state: BridgeState) -> None:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await state.clear_ws(websocket)
+        state.progress.detach_owner(websocket)
         LOG.info("userscript disconnected")
 
 
@@ -414,6 +482,7 @@ async def main_async(args: argparse.Namespace) -> None:
         await stop.wait()
     finally:
         await state.danmaku.close()
+        await state.progress.close()
         http_server.close()
         ws_server.close()
         await http_server.wait_closed()

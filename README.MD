@@ -1,20 +1,20 @@
 # mpv-lazy 2026 自定义增强版
 
-这是面向 Windows 10/11 的 mpv 整合包定制版本，基于 [luoxue03/mpv-lazy-2026-custom](https://github.com/luoxue03/mpv-lazy-2026-custom)，原项目基于 [hooke007/mpv_PlayKit](https://github.com/hooke007/mpv_PlayKit)。本仓库新增并修复 Bilibili 直播弹幕、网页流品质切换、设置自动保存、普通视频与直播的弹幕一致性、网页启动全屏、缓存缩略图和自动移交播放器。
+这是面向 Windows 10/11 的 mpv 整合包定制版本，基于 [luoxue03/mpv-lazy-2026-custom](https://github.com/luoxue03/mpv-lazy-2026-custom)，原项目基于 [hooke007/mpv_PlayKit](https://github.com/hooke007/mpv_PlayKit)。本仓库新增并修复 Bilibili 直播弹幕、网页流品质切换、设置自动保存、普通视频与直播的弹幕一致性、网页启动全屏、缓存缩略图、自动移交播放器，以及网页／MPV 双向续播和 B站账号历史同步。
 
-**下载本仓库的 [2026-10-12 累计更新 Release](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.12-update)。** 已有完整安装只需覆盖这一个累计更新包，再重新导入浏览器脚本，无需依次安装此前的小补丁。
+**下载本仓库的 [2026-10-12 累计更新 Release（含双向进度）](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.12-progress-update)。** 已有完整安装只需覆盖这一个累计更新包，再重新导入浏览器脚本，无需依次安装此前的小补丁。
 
 ## 下载与版本关系
 
 | 文件或版本 | 用途 |
 |---|---|
-| [累计更新 ZIP](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/download/v2026.10.12-update/mpv-lazy-2026-custom-cumulative-update-v2026.10.12.zip) | 包含相对原仓库的全部累计修改、配套脚本、文档及新构建的 B站中继 EXE。 |
-| [SHA256SUMS](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/download/v2026.10.12-update/SHA256SUMS-v2026.10.12-update.txt) | 校验下载的 ZIP 是否完整。 |
+| [累计更新 ZIP](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/download/v2026.10.12-progress-update/mpv-lazy-2026-custom-cumulative-update-v2026.10.12-progress.zip) | 包含相对原仓库的全部累计修改、配套脚本、文档及新构建的 B站中继 EXE。 |
+| [SHA256SUMS](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/download/v2026.10.12-progress-update/SHA256SUMS-v2026.10.12-progress-update.txt) | 校验下载的 ZIP 是否完整。 |
 | [原项目可运行包](https://github.com/luoxue03/mpv-lazy-2026-custom/releases/tag/v2026.06) | 首次安装所需的 `base`、原版 `config`；使用 AI 功能时另需 `ai` 分卷。 |
-| `external_player.user.js` / `external_player.js` | 本次包内两文件内容相同，脚本版本均为 **1.2.14.15**。前者可直接导入用户脚本管理器。 |
-| `bilibili-live-bridge.exe` | 本次累计包内置的 Windows x64 B站专用中继，服务版本 **2026.10.11**，普通用户无需安装 Python 或 Node。 |
+| `external_player.user.js` / `external_player.js` | 本次包内两文件内容相同，脚本版本均为 **1.2.14.19**。前者可直接导入用户脚本管理器。 |
+| `bilibili-live-bridge.exe` | 本次累计包内置的 Windows x64 B站专用中继，服务版本 **2026.10.12**，普通用户无需安装 Python 或 Node。 |
 
-累计比较的原仓库基线为 `547e3d7f7a1aa44538ab55fdba3a36e5bcb61984`，即本分支与原仓库的共同起点。发布准备前的功能更新共 5 个提交、60 个新增或修改文件；本次还加入发布工具、校验和文档。完整差异见 [基线到本次版本的比较](https://github.com/HikigayaMan/mpv-lazy-2026-custom/compare/547e3d7f7a1aa44538ab55fdba3a36e5bcb61984...v2026.10.12-update)。`v2026.06` 是运行基础包版本，并非累计源码比较的起点。
+累计比较的原仓库基线为 `547e3d7f7a1aa44538ab55fdba3a36e5bcb61984`，即本分支与原仓库的共同起点。本次整合此前全部功能及最新双向进度修复，并加入发布工具、校验和文档。完整差异见 [基线到本次版本的比较](https://github.com/HikigayaMan/mpv-lazy-2026-custom/compare/547e3d7f7a1aa44538ab55fdba3a36e5bcb61984...v2026.10.12-progress-update)。`v2026.06` 是运行基础包版本，并非累计源码比较的起点。
 
 本仓库保存源码、配置和文档；累计更新包需要覆盖到已有可运行整合包，单独克隆仓库或单独解压累计包不能提供 `mpv.exe`、播放器依赖或 AI 模型。
 
@@ -26,14 +26,14 @@
 2. 下载累计 ZIP 和 SHA256SUMS，用以下命令核对 ZIP 哈希：
 
    ```powershell
-   Get-FileHash .\mpv-lazy-2026-custom-cumulative-update-v2026.10.12.zip -Algorithm SHA256
+   Get-FileHash .\mpv-lazy-2026-custom-cumulative-update-v2026.10.12-progress.zip -Algorithm SHA256
    ```
 
 3. 将 ZIP 内的内容直接合并到 **`mpv.exe` 所在目录**，确认覆盖同名文件。正确结构是 `mpv.exe` 与 `portable_config/`、`tools/`、`docs/` 并列；不要在播放器目录中再套一层更新包目录。
 4. 在 Tampermonkey 或 Violentmonkey 导入包内的 `external_player.user.js`，禁用重复的旧脚本，并关闭这份定制脚本的上游自动更新，避免定制功能被覆盖。
-5. 完整刷新已打开的视频或直播网页，重新启动播放器。需要 B站直播弹幕时，按下文检查 `MPV` 与 `BrowserRelay` 注册。
+5. 完整刷新已打开的视频或直播网页，重新启动播放器。需要 B站直播弹幕或双向进度时，按下文检查 `MPV` 与 `BrowserRelay` 注册。
 
-更新包不包含 `saved-props.json`、`uosc_danmaku_style.json`、RIFE 运行时偏好、Cookie、Trakt 凭证、播放历史、缓存或日志，因此不会用打包者的偏好覆盖用户的已保存设置。同名菜单和脚本配置会更新；直接手改过这些配置的用户，可从备份中合并自己的修改。
+更新包不包含 `saved-props.json`、`uosc_danmaku_style.json`、RIFE 运行时偏好、`playback-progress.json`、Cookie、Trakt 凭证、播放历史、缓存或日志，因此不会用打包者的偏好覆盖用户的已保存设置。同名菜单和脚本配置会更新；直接手改过这些配置的用户，可从备份中合并自己的修改。
 
 ### 首次安装
 
@@ -44,11 +44,11 @@
 
 本次不会重复打包未修改的 AI 模型、780+ 着色器、字体或整套运行时。已有这些依赖时无需重复下载。
 
-### 网页移交与 B站直播中继
+### 网页移交、B站直播和进度中继
 
 运行整合包中的 `url-scheme-handler.exe` 注册 `ush://`，添加应用 `MPV` 指向当前目录的 `mpv.exe`。应用名称必须与用户脚本设置一致；移动安装目录后需要更新路径。MPVNET 用户对应注册自己的程序。
 
-B站直播弹幕还需将 `BrowserRelay` 注册到：
+B站直播弹幕和双向进度都需要将 `BrowserRelay` 注册到：
 
 ```text
 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
@@ -66,9 +66,13 @@ C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\telegram-web-mpv-bridge\start_browser_relay.ps1 -Bilibili
 ```
 
+需要双向进度时也可手动运行同一启动脚本，加上 `-PlaybackProgress`。脚本会检查当前中继支持的进度 API，旧版本需要更新后重启。
+
 B站专用中继使用 HTTP `127.0.0.1:9002` 和 WebSocket `127.0.0.1:9001`，与原 Telegram／斗鱼中继的 `8999/9000` 并存。本次包含 `bilibili-live-bridge.exe`；原有 `browser-media-bridge.exe`、斗鱼 helper 和 `url-scheme-handler.exe` 继续由原项目运行包提供。
 
 ## 相比原仓库的全部功能更新
+
+**本次新增双向进度：** External Player .19 + 中继 2026.10.12 支持网页与 MPV 双向续播，并可同步 B站账号观看历史；WebSocket 受限时自动使用 HTTP 进度通道。本次累计包已整合此前 .15 Release 和后续进度功能，覆盖这一个包即可。详见 [进度同步](./docs/scripts/playback-progress.md)。
 
 ### 1. Bilibili 直播实时弹幕
 
@@ -138,17 +142,30 @@ B站不同分 P、不同直播间和 YouTube 新视频会重新识别，分享�
 
 B站中继内置会话阶段和最近失败记录，区分“浏览器已连接”与“弹幕会话已建立”。新增免依赖 EXE 构建脚本、网页脚本行为测试、Lua 保存／样式／品质／缩略图测试及真实 MPV 冒烟工具。本次累计打包工具从 Git 提交读取全部差异及配套模块，避免遗漏依赖或混入本地运行数据。
 
+### 11. 网页／MPV 双向播放进度
+
+- 网页观看后移交 MPV／MPVNET，从最近观看位置继续；播放器观看和拖动后的进度同步回原网页，并保存本机续播位置。
+- B站普通 BV／av 投稿及分 P 按 `aid + cid` 分开记录，同时通过浏览器现有登录状态写入 B站账号历史。Cookie、CSRF 和签名密钥不会发送给中继或写入播放器。
+- 支持倒退和回到零秒，按最近一次观看选择位置；看完才标记完成，手动退出不误标看完。品质切换中的临时零秒不会抹掉位置。
+- 默认开启，网页设置可分别关闭双向进度和账号历史写入。网页主动恢复播放或拖动时接管记录；后台暂停的旧网页不会覆盖播放器。
+- 关闭网页后中继仍保存本机位置；账号历史需要网页保持打开，重新进入相同视频可补同步。普通网页视频支持可读取的有限时长视频，账号历史当前专门支持 Bilibili；直播、番剧影视和互动分支不套用点播续播。
+- .18 起具备 HTTP 兜底；.19 修正 MPV 参数传递。包内 Lua 兼容已导入 .18；已经手动安装这次进度补丁的用户可继续使用 .18，其余升级用户统一导入包内 .19。
+
+真实测试已验证 MPV 的 187.5 秒回写原网页，B站历史显示 `03:07 / 06:20`，退出播放器后保留本机位置。安装和使用见 [进度同步](./docs/scripts/playback-progress.md)，验证细节见 [联机报告](./docs/reports/2026-10-12-playback-progress.md)。此功能已包含在本次累计 Release 中。
+
 ## 验证范围
 
-详细记录见 [本次发布验证报告](./docs/reports/2026-10-12-cumulative-update.md)。
+此前功能验证见 [累计功能报告](./docs/reports/2026-10-12-cumulative-update.md)，本次进度实测与回归见 [双向续播报告](./docs/reports/2026-10-12-playback-progress.md)。
 
 | 验证 | 结果与范围 |
 |---|---|
-| 自动测试 | 26 项中继 Python、46 项用户脚本、141 项发布／Lua／包完整性测试通过。 |
-| 新构建 EXE | 隔离端口的 `/health`、WebSocket hello 和会话诊断通过，原生 Brotli 解码依赖已包含。 |
+| 自动测试 | 57 项中继 Python、87 项用户脚本、150 项发布／Lua／包完整性测试通过，共 294 项。 |
+| 新构建 EXE | 隔离端口的 `/health`、WebSocket hello、匿名 HTTP 进度接口和会话诊断通过，原生 Brotli 解码依赖已包含。 |
 | 真实 B站直播 | 2026-10-11 房间 1017：网页与 MPV 均为 1920×1080，1080p → 720p → 1080p 保持同一弹幕会话并收到新消息。 |
 | 真实 B站点播品质 | BV1ju6TYHEKU P5：1920×960，四档菜单，切至 640×320 再切回，独立音轨和暂停的 20 秒位置保持。 |
 | 新版自动移交点播 | `1.2.14.15` 在真实 B站网页自动启动一次，MPV 全屏、1920×1080、普通弹幕及缓存缩略图均验证通过。 |
+| 双向进度及账号历史 | 真实 B站网页 → MPV 续播；MPV 187.5 秒回写原网页，官方账号历史显示 `03:07 / 06:20`；退出保存且不误标完成。 |
+| 进度隔离与兼容 | 实际 MPV + WebSocket／HTTP 通道：倒退及零秒、品质切换、断开网页后本机保存、重开恢复、分 P／换文件隔离，.18 旧参数与 .19 分别传参均通过。 |
 | 缓存边界 | 本地 HTTP + 真实 MPV/uosc：缓存内出图、未缓存清图、额外视频请求为 0、播放位置／暂停保持、临时文件清理。 |
 | 跨实例偏好 | 六次真实播放器启动，使用离线素材验证直播／点播开关、样式与帧率继承。 |
 
@@ -168,6 +185,7 @@ B站中继内置会话阶段和最近失败记录，区分“浏览器已连接�
 - [流品质](./docs/scripts/stream-quality.md)
 - [设置自动保存](./docs/scripts/settings-persistence.md)
 - [缓存缩略图](./docs/scripts/cached-thumbnails.md)
+- [网页／MPV 双向进度与 B站观看历史](./docs/scripts/playback-progress.md)
 - [uosc_danmaku](./docs/scripts/uosc-danmaku.md)
 - [Telegram／斗鱼中继](./docs/scripts/telegram-web-mpv-bridge.md)
 - [AI 字幕](./docs/scripts/sub-fastwhisper.md)、[Trakt](./docs/scripts/trakt-scrobble.md)

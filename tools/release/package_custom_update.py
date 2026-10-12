@@ -20,6 +20,7 @@ COUPLED = (
 BRIDGE_INPUTS = (
     "tools/telegram-web-mpv-bridge/bridge.py",
     "tools/telegram-web-mpv-bridge/bilibili_danmaku.py",
+    "tools/telegram-web-mpv-bridge/playback_progress.py",
     "tools/telegram-web-mpv-bridge/requirements.txt",
     "tools/telegram-web-mpv-bridge/requirements-build.txt",
 )
@@ -48,7 +49,7 @@ def validate_payload(name: str, data: bytes) -> None:
     parts = lower.split("/")
     if any(p in {".git", ".venv", "__pycache__", "_cache", "node_modules", "build"} for p in parts):
         raise ValueError(f"Runtime directory cannot be released: {name}")
-    runtime = ("cookies", "saved-props", "uosc_danmaku_style", "trakt_config", "trakt_history", "rife_runtime.json", "rife_sr_runtime.json")
+    runtime = ("cookies", "saved-props", "uosc_danmaku_style", "trakt_config", "trakt_history", "rife_runtime.json", "rife_sr_runtime.json", "playback-progress.json")
     if any(p.startswith(runtime) for p in parts) or parts[-1] in {"config.json", "settings.json", "viewed.json", "recent.json", "trakt_scrobble.conf"}:
         raise ValueError(f"Personal state cannot be released: {name}")
     if lower.endswith((".log", ".db", ".pyc", ".local.txt", ".zip", ".lnk")):
@@ -104,7 +105,11 @@ def build(repo: Path, baseline: str, ref: str, version: str, exe: Path, provenan
     if not binary.startswith(b"MZ") or binary[pe_offset:pe_offset + 4] != b"PE\0\0":
         raise ValueError("Bridge binary is not a Windows PE executable.")
     evidence = json.loads(provenance.read_text(encoding="utf-8"))
-    if evidence.get("exeSha256") != sha256(binary) or not evidence.get("frozenHealthPassed") or not evidence.get("frozenWebSocketPassed") or not evidence.get("brotliBinaryIncluded"):
+    if evidence.get("sourceRef") == "working-tree":
+        raise ValueError("A development build cannot be used as a committed release input.")
+    if (evidence.get("exeSha256") != sha256(binary) or not evidence.get("frozenHealthPassed")
+            or not evidence.get("frozenWebSocketPassed") or evidence.get("frozenPlaybackHttpPassed") is not True
+            or not evidence.get("brotliBinaryIncluded")):
         raise ValueError("Bridge verification does not match this executable.")
     expected_inputs = {name: sha256(entries[name]) for name in BRIDGE_INPUTS}
     if evidence.get("sourceInputs") != expected_inputs:

@@ -254,7 +254,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(health["browserConnected"])
             self.assertEqual(health["browserClients"], 1)
             status = await request("/status")
-            self.assertEqual(status["bridgeVersion"], "2026.10.11")
+            self.assertEqual(status["bridgeVersion"], BRIDGE_VERSION)
             self.assertEqual(status["danmaku"], [])
             self.assertEqual(status["diagnostics"]["helloCount"], 1)
             self.assertEqual(status["diagnostics"]["failedStarts"], 1)

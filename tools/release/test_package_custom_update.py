@@ -38,6 +38,7 @@ class PackageCustomUpdateTests(unittest.TestCase):
         self.exe.write_bytes(binary)
         self.provenance = self.root / "provenance.json"
         self.evidence = {"exeSha256": pack.sha256(binary), "frozenHealthPassed": True, "frozenWebSocketPassed": True,
+                         "frozenPlaybackHttpPassed": True,
                          "brotliBinaryIncluded": True, "sourceInputs": {name: pack.sha256((self.repo / name).read_bytes()) for name in pack.BRIDGE_INPUTS}}
         self.provenance.write_text(json.dumps(self.evidence))
         self.notices = self.root / "notices.txt"
@@ -86,6 +87,17 @@ class PackageCustomUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "verification"):
             self.build()
 
+    def test_missing_or_failed_http_progress_verification_is_rejected(self):
+        for value in (None, False, "true", 1):
+            with self.subTest(value=value):
+                if value is None:
+                    self.evidence.pop("frozenPlaybackHttpPassed", None)
+                else:
+                    self.evidence["frozenPlaybackHttpPassed"] = value
+                self.provenance.write_text(json.dumps(self.evidence))
+                with self.assertRaisesRegex(ValueError, "verification"):
+                    self.build()
+
     def test_non_pe_binary_is_rejected(self):
         self.exe.write_bytes(b"not an EXE")
         with self.assertRaisesRegex(ValueError, "Windows PE"):
@@ -101,7 +113,7 @@ class PackageCustomUpdateTests(unittest.TestCase):
         for name in ("../outside", "C:/file", "a\\b", "/absolute", "a/./b"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 pack.validate_payload(name, b"safe")
-        for name in ("portable_config/saved-props.json", "portable_config/script-opts/uosc_danmaku_style.json", "tools/.venv/file.py", "tools/cookies.txt", "tools/output.log"):
+        for name in ("portable_config/saved-props.json", "portable_config/script-opts/uosc_danmaku_style.json", "tools/.venv/file.py", "tools/cookies.txt", "tools/output.log", "tools/telegram-web-mpv-bridge/playback-progress.json"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 pack.validate_payload(name, b"personal")
         with self.assertRaisesRegex(ValueError, "Credential"):
