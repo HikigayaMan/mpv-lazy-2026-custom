@@ -154,6 +154,7 @@ local function live_start(session_id)
     end
 
     if LIVE_DANMAKU.active and LIVE_DANMAKU.session_id == session_id then return end
+    if sync_danmaku_style_defaults then sync_danmaku_style_defaults(true) end
     if LIVE_DANMAKU.active then
         clear_live_items()
     end
@@ -165,15 +166,17 @@ local function live_start(session_id)
     mp.set_property_bool(LIVE_ACTIVE_PROPERTY, true)
     mp.set_property_native(LIVE_SESSION_PROPERTY, session_id)
     mp.set_property_native(STREAM_SWITCH_ACK_PROPERTY, nil)
-    ENABLED = true
-    toggle_danmaku_switch("on")
-    show_danmaku_func(true)
+    ENABLED = get_danmaku_visibility()
+    toggle_danmaku_switch(ENABLED and "on" or "off")
+    if ENABLED then show_danmaku_func(true) else hide_danmaku_func(true) end
     msg.info("live danmaku started: " .. session_id)
 end
 
-function toggle_live_danmaku()
+function set_live_danmaku_visibility(visible, persist)
     if not LIVE_DANMAKU.active then return false end
-    ENABLED = not ENABLED
+    if type(visible) ~= "boolean" then return false end
+    ENABLED = visible
+    if persist ~= false then set_danmaku_visibility(visible) end
     if ENABLED then
         toggle_danmaku_switch("on")
         show_danmaku_func(true)
@@ -187,6 +190,10 @@ function toggle_live_danmaku()
         hide_danmaku_func(true)
     end
     return true
+end
+
+function toggle_live_danmaku()
+    return set_live_danmaku_visibility(not ENABLED)
 end
 
 local function live_batch(session_id, json)

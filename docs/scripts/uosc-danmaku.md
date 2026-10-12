@@ -60,7 +60,7 @@ history_path=~~/_cache/danmaku-history.json
 - `displayarea=0.05`：弹幕显示区域较小，避免覆盖画面过多。
 - `opacity=0.55`：弹幕透明度。
 - `history_path=~~/_cache/danmaku-history.json`：弹幕历史缓存路径，属于运行态。
-- `live_fps_mode=auto`：直播弹幕平滑模式，内置默认值；也可在菜单中选 `60 / 80 / 120 / display`。
+- `live_fps_mode=auto`：普通视频和直播共用的弹幕平滑模式，内置默认值；也可在菜单中选 `60 / 80 / 120 / display`。
 
 如要恢复更密集的弹幕区域，可以提高 `displayarea`；如觉得弹幕过快/过慢，调整 `scrolltime`。
 
@@ -70,7 +70,7 @@ history_path=~~/_cache/danmaku-history.json
 
 | 菜单项 | 对应命令 | 作用 |
 |---|---|---|
-| `BilibiliAssert 开关 (b)` | `script-binding bilibiliAssert/toggle` | 开关旧 B 站弹幕脚本。 |
+| `开关弹幕 (b)` | `script-binding bilibiliAssert/toggle` | 兼容旧入口，转交同一套弹幕开关和样式。 |
 | `搜索弹幕` | `script-message open_search_danmaku_menu` | 打开搜索弹幕菜单。 |
 | `开关弹幕 开关 (j)` | `script-message show_danmaku_keyboard` | 显示/隐藏弹幕。 |
 | `弹幕设置` | `script-message open_add_total_menu` | 打开弹幕设置总菜单。 |
@@ -121,6 +121,8 @@ portable_config/script-opts/uosc_danmaku_style.json
 ```
 
 它是本机运行时偏好，不进入 Git 和配置发布包。
+
+显示开关在普通视频与直播之间共用，并写入弹幕历史文件。没有记录时默认开启；用户明确隐藏后后续播放保持隐藏。切换文件、结束播放与清理字幕不会覆盖该选择。已运行的实例也会同步其他实例新保存的样式。`b`、旧 BilibiliAssert 菜单入口和 `j` 均使用本插件，避免普通视频再次使用独立的 Python 样式。
 
 ### 弹幕帧率与 RIFE
 

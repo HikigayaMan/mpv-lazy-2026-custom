@@ -285,7 +285,8 @@ class LiveDanmakuLuaTests(unittest.TestCase):
         self.assertFalse(self.globals.ENABLED)
         self.assertEqual(self.state.session_id, SESSION)
         self.start("bilibili-new-session")
-        self.assertTrue(self.globals.ENABLED)
+        self.assertFalse(self.globals.ENABLED)
+        self.assertFalse(self.test_state.saved_visibility)
         self.assertEqual(len(self.state["items"]), 0)
 
     def test_toggle_keeps_session_and_hidden_batches_do_not_reappear(self) -> None:
@@ -314,7 +315,7 @@ class LiveDanmakuLuaTests(unittest.TestCase):
         self.assertTrue(self.globals.ENABLED)
         self.assertEqual(len(self.state["items"]), 1)
         self.assertTrue(self.test_state.overlay_visible())
-        self.assertEqual(self.test_state.visibility_writes, 0)
+        self.assertEqual(self.test_state.visibility_writes, 2)
 
     def test_pause_discards_incoming_batches_without_replay(self) -> None:
         self.start()

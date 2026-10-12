@@ -1,6 +1,6 @@
 # 浏览器交接与 MPV 流品质
 
-External Player `1.2.14.12` 与本仓库的 `quality-menu.lua` 配合使用。浏览器会把 Bilibili 视频和直播中当前账号实际可用的品质列表一并交给 MPV，播放器的“流品质 / Video Formats”菜单可据此切换。
+External Player `1.2.14.15` 与本仓库的 `quality-menu.lua` 配合使用。浏览器会把 Bilibili 视频和直播中当前账号实际可用的品质列表一并交给 MPV，播放器的“流品质 / Video Formats”菜单可据此切换。DASH 视频及独立音轨优先使用同一品质、编码下由 API 返回的 HTTPS 标准端口备用源，避免部分 PCDN 地址无法连接。
 
 ## 更新与使用
 

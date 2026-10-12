@@ -173,8 +173,7 @@ class VideoDanmakuStyleLuaTests(unittest.TestCase):
         self.assertNotIn("Dialogue:", self.ass_path.read_text(encoding="utf-8"))
 
     def test_hidden_video_stays_hidden_after_style_changes(self):
-        self.globals.ENABLED = False
-        self.globals.hide_danmaku_func()
+        self.globals.TEST.messages["set"]("show_danmaku", "off")
         self.globals.TEST.commands = self.lua.table()
         visibility_writes = self.globals.TEST.visibility_writes
         old_ass = self.ass_path.read_bytes()

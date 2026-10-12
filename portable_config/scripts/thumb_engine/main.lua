@@ -21,6 +21,7 @@ local helper  = require "helper"
 local winapi  = require "winapi"
 local process = require "process"
 local batch   = require "batch"
+local cache_preview_module = require "cache_preview"
 
 local options = {
 
@@ -41,6 +42,7 @@ local options = {
 	spawn_first = false,
 	quit_after_inactivity = 0,
 	network = false,
+	cache_only_network = true,
 	audio = false,
 	direct_io = true,
 
@@ -165,6 +167,8 @@ local state = {
 -- OSC Preview API 状态
 local preview_draw = nil
 local preview_ass = mp.create_osd_overlay("ass-events")
+local cache_preview
+local cached_frame_data
 
 -- 初始化 process 模块
 process.init(state, options, os_name, winapi)
@@ -198,7 +202,7 @@ local function info(w, h)
 
 	state.disabled = (w or 0) == 0 or (h or 0) == 0 or
 		state.has_vid == 0 or
-		(state.properties["demuxer-via-network"] and not options.network) or
+		(state.properties["demuxer-via-network"] and not options.network and not options.cache_only_network) or
 		(albumart and not options.audio) or
 		(image and not albumart) or
 		(short_video and options.min_duration > 0)
@@ -217,6 +221,7 @@ local function info(w, h)
 	local json, err = mp.utils.format_json({
 		width=w, height=h, disabled=state.disabled, available=true,
 		socket=options.socket, tnpath=options.tnpath, overlay_id=options.overlay_id,
+		cache_only_network=options.cache_only_network,
 	})
 	mp.command_native_async({"script-message", "thumb_engine-info", json}, function() end)
 
@@ -254,6 +259,22 @@ local function draw(w, h, script)
 	end
 end
 
+cache_preview = cache_preview_module.new(options, process.cache_decoder_path, function(data, w, h)
+	if cached_frame_data ~= data then
+		local file = io.open(options.tnpath, 'wb')
+		if not file then return end
+		file:write(data)
+		file:close()
+		helper.move_file(options.tnpath, options.tnpath .. '.bgra', os_name)
+		cached_frame_data = data
+	end
+	state.real_w, state.real_h = w, h
+	draw(w, h, state.script_name)
+end, function()
+	mp.command_native({name = 'overlay-remove', id = options.overlay_id})
+	preview_ass:remove()
+end)
+
 -- =============================================================================
 -- 缩略图文件检测
 -- =============================================================================
@@ -284,6 +305,7 @@ file_timer:kill()
 local activity_timer
 
 local function clear(force_overlay_remove)
+	cache_preview:clear()
 	file_timer:kill()
 	process.kill_seek_timer()
 	if options.quit_after_inactivity > 0 then
@@ -330,6 +352,14 @@ local function thumb(time, r_x, r_y, script)
 		state.x, state.y = nil, nil
 	else
 		state.x, state.y = math.floor(r_x + 0.5), math.floor(r_y + 0.5)
+	end
+
+	if state.properties["demuxer-via-network"] and options.cache_only_network then
+		state.script_name = script
+		state.show_thumbnail = true
+		state.last_x, state.last_y = state.x, state.y
+		cache_preview:request(time, state.effective_w, state.effective_h)
+		return
 	end
 
 	local was_showing = state.show_thumbnail
@@ -417,7 +447,8 @@ local function watch_changes()
 
 	state.last_has_vid = state.has_vid
 
-	if not state.spawned and not state.disabled and options.spawn_first and resized then
+	if not state.spawned and not state.disabled and options.spawn_first and resized
+		and not (state.properties["demuxer-via-network"] and options.cache_only_network) then
 		process.spawn(mp.get_property_number("time-pos", 0))
 		file_timer:resume()
 	end
@@ -468,6 +499,8 @@ local function sync_changes(prop, val)
 end
 
 local function file_load(skip_batch_cancel)
+	cache_preview:reset()
+	cached_frame_data = nil
 	preview_draw = nil
 	clear(true)
 	if not skip_batch_cancel then
@@ -498,6 +531,8 @@ local function file_load(skip_batch_cancel)
 end
 
 local function shutdown()
+	cache_preview:reset()
+	cached_frame_data = nil
 	batch.batch_cancel(true)
 	process.run("quit")
 	helper.remove_thumbnail_files(state, options)
@@ -520,6 +555,7 @@ mp.observe_property("display-hidpi-scale", "native", update_property_dirty)
 mp.observe_property("video-params", "native", update_property_dirty)
 mp.observe_property("video-dec-params", "native", update_property_dirty)
 mp.observe_property("demuxer-via-network", "native", update_property)
+mp.observe_property("demuxer-cache-state", "native", function() cache_preview:update_cache() end)
 mp.observe_property("stream-open-filename", "native", update_property)
 mp.observe_property("path", "native", update_property)
 mp.observe_property("vid", "native", sync_changes)
@@ -536,6 +572,11 @@ mp.register_script_message("thumbnail_gen", thumb)
 mp.register_script_message("thumbnail_clr", clear)
 
 mp.register_event("file-loaded", function() file_load() end)
+mp.register_event("end-file", function()
+	cache_preview:reset()
+	cached_frame_data = nil
+	clear(true)
+end)
 mp.register_event("shutdown", shutdown)
 
 -- 广播批量配置

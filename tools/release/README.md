@@ -8,6 +8,8 @@
 - `smoke_test_stream_quality.py`：通过真实 MPV 验证品质列表、连续切流、独立音轨和弹幕会话保留；使用本地 HTTP 源，运行方式见 [流品质说明](../../docs/scripts/stream-quality.md)。
 - `smoke_test_settings_persistence.py`：使用隔离配置验证右键设置自动保存和重启恢复，运行方式见 [设置保存说明](../../docs/scripts/settings-persistence.md)。
 - `smoke_test_static_danmaku_settings.py`：在真实普通视频中检验弹幕样式修改、暂停刷新、切换视频及重启恢复，同时核对不同码率的自动画面预设。
+- `smoke_test_danmaku_handoff_preferences.py`：同一隔离配置中验证直播与新视频进程的开关、样式和帧率继承，首次不预填显示偏好；离线 XML 与全屏 CLI 参数测试不替代真实网页交接验证。
+- `smoke_test_cached_thumbnails.py`：本地 HTTP 网络视频上的真实 uosc 悬停，验证缓存内预览、未缓存清图、零新增网络请求及播放状态保持，见 [缓存缩略图说明](../../docs/scripts/cached-thumbnails.md)。
 
 打包脚本负责结构验证，播放验证脚本负责行为验证。
 

@@ -11,6 +11,8 @@
 
 普通视频和直播使用同一套弹幕样式。普通视频修改后会用已经加载的弹幕重建排布并刷新显示，暂停时也会生效；不需要重新获取弹幕或重新打开视频。显示区域、滚动速度及粗体选择会同步应用到生成的弹幕字幕，合并重复弹幕的数量标记不会强制打开粗体。菜单中的“弹幕帧率”也适用于普通视频；原有 `live_fps_mode` 保存键保持兼容。
 
+弹幕显示开关也在普通视频和直播间共用：开启后下次播放自动加载，明确关闭后下次保持关闭；退出、切换文件或清理字幕不会保存成“关闭”。首次没有开关记录时默认显示。已运行的实例会同步其他实例保存的样式，避免直播和普通视频各自保留旧值。`b` 和旧 `bilibiliAssert/toggle` 入口现在转交同一套弹幕插件，不再生成独立样式的字幕。
+
 更新后，关闭旧播放器并重新打开，以加载新的脚本和菜单。已经运行的旧播放器仍使用旧逻辑。保存文件是本机运行时数据，不包含在更新包中，更新不会覆盖已有偏好：
 
 ```text
@@ -35,6 +37,7 @@ portable_config/script-opts/uosc_danmaku_style.json
 .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe -m unittest discover -s tools/release -p "test_danmaku_style_lua.py"
 .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe tools/release/smoke_test_settings_persistence.py --mpv "<完整包路径>\mpv.exe" --output-dir tools/telegram-web-mpv-bridge/build/settings-smoke
 .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe tools/release/smoke_test_static_danmaku_settings.py --mpv "<完整包路径>\mpv.exe" --output-dir tools/telegram-web-mpv-bridge/build/static-settings-smoke
+.\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe tools/release/smoke_test_danmaku_handoff_preferences.py --mpv "<完整包路径>\mpv.exe" --fixture "<已有普通视频测试素材.mov>" --output-dir tools/telegram-web-mpv-bridge/build/handoff-preferences-smoke
 ```
 
 行为测试覆盖跨实例恢复、空列表和布尔值、多播放器写入合并、自动属性不误保存、清除、写入失败和 Windows 文件替换回滚。真实 MPV 冒烟使用隔离配置和测试自身创建的播放器，验证设置写入后非正常关闭仍可恢复，不改动日常偏好文件。

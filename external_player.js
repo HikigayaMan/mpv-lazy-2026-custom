@@ -3,7 +3,7 @@
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.14.12
+// @version                 1.2.14.15
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -39,7 +39,7 @@ const VIDEO_URL_REGEX_EXACT = /^https?:\/\/((?![^"^']*http)[^"^']+(\.|%2e)(mp4|m
 
 const defaultConfig = {
     global: {
-        version: '1.2.14.12',
+        version: '1.2.14.15',
         language: (navigator.language || navigator.userLanguage) === 'zh-CN' ? 'zh' : 'en',
         buttonXCoord: '0',
         buttonYCoord: '0',
@@ -48,6 +48,7 @@ const defaultConfig = {
         networkProxy: '',
         resourceSniffing: true,
         defaultPlayer: 'MPV',
+        autoHandoff: false,
         browserRelayMode: 'auto',
         browserRelayNotifications: false,
         edgeHide: false,
@@ -237,6 +238,7 @@ const translations = {
         ,handoffRelayReady: 'Browser relay ready'
         ,handoffTelegramBlobUnavailable: 'Telegram media was not captured. Refresh the page and try again.'
         ,handoffDefaultPlayer: 'Default player'
+        ,handoffAutoHandoff: 'Automatically hand off videos and live streams to the default player'
         ,handoffPreferredQuality: 'Preferred quality'
         ,handoffRelayMode: 'Browser relay'
         ,handoffEdgeHide: 'Hide at edge'
@@ -276,6 +278,7 @@ const translations = {
         ,handoffRelayReady: '浏览器中继已就绪'
         ,handoffTelegramBlobUnavailable: '未捕获 Telegram 媒体。请刷新页面后重试。'
         ,handoffDefaultPlayer: '默认播放器'
+        ,handoffAutoHandoff: '进入视频或直播页面后自动移交默认播放器'
         ,handoffPreferredQuality: '首选画质'
         ,handoffRelayMode: '浏览器中继'
         ,handoffEdgeHide: '贴边隐藏'
@@ -308,9 +311,14 @@ var handoffEdgeHideId;
 var handoffIsDragging = false;
 var handoffEdgeRevealUntil = 0;
 var handoffDefaultPlayer;
+var handoffAutoHandoff;
 var handoffPreferredQuality;
 var handoffRelayMode;
 var handoffEdgeHide;
+var automaticHandoffState;
+var automaticHandoffTimer;
+var handoffLaunchInFlight = false;
+var iframeListenersAttached = false;
 
 const BROWSER_RELAY_WS_URL = 'ws://127.0.0.1:9000/ws';
 const BROWSER_RELAY_CHUNK_SIZE = 256 * 1024;
@@ -1493,10 +1501,23 @@ async function prepareBilibiliLiveStreamLaunch(media, player, roomId) {
     return attachBilibiliStreamVariants(launchMedia, result.variants, result.selected);
 }
 
+function selectBilibiliDashUrl(item) {
+    const candidates = [item?.baseUrl, item?.base_url,
+        ...(Array.isArray(item?.backupUrl) ? item.backupUrl : []),
+        ...(Array.isArray(item?.backup_url) ? item.backup_url : [])
+    ].filter(value => typeof value === 'string' && isBilibiliStreamUrl(value));
+    // Some API primaries use peer CDN hosts on ports a local player cannot reach.
+    // Choose the same track's supplied HTTPS CDN alternative without editing its signature.
+    return candidates.find(value => {
+        const url = new URL(value);
+        return url.protocol === 'https:' && url.port === '' && /(^|\.)bilivideo\.com$/i.test(url.hostname);
+    }) || candidates[0];
+}
+
 function parseBilibiliDashStreams(data, preferredCodec) {
     const dash = data?.dash;
     if (!dash) return [];
-    const getUrl = item => item?.baseUrl || item?.base_url || item?.backupUrl?.[0] || item?.backup_url?.[0];
+    const getUrl = selectBilibiliDashUrl;
     const audioItems = [dash.flac?.audio, ...(dash.dolby?.audio || []), ...(dash.audio || [])].filter(Boolean);
     const audio = audioItems.find(item => isBilibiliStreamUrl(getUrl(item)));
     const byQuality = new Map();
@@ -1679,7 +1700,20 @@ class BaseParser {
             return media;
         }
     }
+    prepareFullscreenLaunch(media, player) {
+        if (!/^(MPV|MPVNET)$/i.test(String(player?.name || '').trim())) return media;
+        // Apply after every parser/relay has prepared its options, so a site
+        // cannot discard the window preference before the normal or CSP launch.
+        const mpvOptions = (media.mpvOptions || []).filter(option =>
+            !/^--(?:no-)?(?:fs|fullscreen)(?:=|$)/i.test(String(option)));
+        mpvOptions.push('--fullscreen=yes');
+        return { ...media, mpvOptions };
+    }
     async play(player) {
+        const launchPageKey = getAutoHandoffPageKey(location.href);
+        const launchContentKey = getAutomaticHandoffKey();
+        const isLaunchContextCurrent = () => getAutoHandoffPageKey(location.href) === launchPageKey &&
+            (launchContentKey === undefined || getAutomaticHandoffKey() === launchContentKey);
         try {
             updateHandoffStatus('resolving');
             const relayMode = currentConfig.global.browserRelayMode || 'auto';
@@ -1708,6 +1742,7 @@ class BaseParser {
                     }
 
                     await parser.execute();
+                    if (!isLaunchContextCurrent()) return;
                     if (await parser.check()) {
                         latestError = undefined;
                         break;
@@ -1730,6 +1765,7 @@ class BaseParser {
                 return;
             }
             media = await this.prepareLaunchMedia(player);
+            if (!isLaunchContextCurrent()) return;
 
             // The outer Bilibili room can be handed off by an iframe or a resource parser.
             // Resolve the same authenticated quality list for those routes as for the native live parser.
@@ -1742,6 +1778,10 @@ class BaseParser {
                     media, 'bilibiliLive', player, bilibiliLiveRoomId, bilibiliMediaBridge
                 );
                 media = result.media;
+                if (!isLaunchContextCurrent()) {
+                    if (result.started) bilibiliMediaBridge.stopDanmaku(result.sessionId);
+                    return;
+                }
                 if (result.error) {
                     liveDanmakuError = `${translation.handoffDanmakuUnavailable}: ${result.error.message}`;
                     console.warn(`Bilibili live danmaku unavailable: ${result.error.message}`);
@@ -1750,9 +1790,12 @@ class BaseParser {
                 }
             }
 
+            media = this.prepareFullscreenLaunch(media, player);
+
             if (!player.presetEvent.syncTime) {
                 media.time = undefined;
             }
+            if (!isLaunchContextCurrent()) return;
 
             if (player.playEvent) {
                 try {
@@ -4112,13 +4155,17 @@ async function showResourceFallbackControl(sniffer) {
     }
 }
 
-async function launchWithPlayer(player, button) {
-    if (!player || button.disabled) {
+async function launchWithPlayer(player, button, automatic = false) {
+    if (!player || button?.disabled || handoffLaunchInFlight) {
         return;
     }
+    handoffLaunchInFlight = true;
+    if (!automatic) suppressAutomaticHandoffForCurrentPage();
+    const automaticState = syncAutomaticHandoffState();
+    if (automaticState) automaticState.attempted.add(player.name);
     const launchButtons = button === handoffPrimaryButton || button === handoffDockPlayButton ?
         [handoffPrimaryButton, handoffDockPlayButton].filter(item => item) :
-        [button];
+        [button].filter(item => item);
     launchButtons.forEach(item => item.disabled = true);
     try {
         if (currentParser) {
@@ -4128,6 +4175,8 @@ async function launchWithPlayer(player, button) {
             showToast(translation.noMatchingParserFound);
         }
     } finally {
+        handoffLaunchInFlight = false;
+        scheduleAutomaticHandoff();
         setTimeout(() => {
             launchButtons.forEach(item => item.disabled = false);
         }, REFRESH_INTERVAL * 3);
@@ -4149,6 +4198,7 @@ function cacheHandoffElements() {
     handoffParserBadge = handoffShadow?.querySelector('.parser-badge');
     settingButton = handoffShadow?.querySelector('.settings-button');
     handoffDefaultPlayer = handoffShadow?.querySelector('.quick-default-player');
+    handoffAutoHandoff = handoffShadow?.querySelector('.quick-auto-handoff');
     handoffPreferredQuality = handoffShadow?.querySelector('.quick-preferred-quality');
     handoffRelayMode = handoffShadow?.querySelector('.quick-relay-mode');
     handoffEdgeHide = handoffShadow?.querySelector('.quick-edge-hide');
@@ -4986,6 +5036,7 @@ function appendButtonDiv() {
                         <label>${translation.handoffDefaultPlayer}<select class="quick-default-player"></select></label>
                         <label>${translation.handoffRelayMode}<select class="quick-relay-mode"><option value="auto">${translation.handoffRelayAuto}</option><option value="always">${translation.handoffRelayAlways}</option><option value="off">${translation.handoffRelayOff}</option></select></label>
                         <label>${translation.handoffPreferredQuality}<select class="quick-preferred-quality"><option value="unlimited">${translation.handoffQualityAuto}</option></select></label>
+                        <label class="quick-edge-label"><input class="quick-auto-handoff" type="checkbox">${translation.handoffAutoHandoff}</label>
                         <label class="quick-edge-label"><input class="quick-edge-hide" type="checkbox">${translation.handoffEdgeHide}</label>
                     </div>
                     <button class="primary-action" type="button">
@@ -5186,6 +5237,106 @@ function getEffectiveDefaultPlayer(enabledPlayers) {
         enabledPlayers[0];
 }
 
+// AUTO_HANDOFF_HELPERS_START
+function getAutoHandoffPageKey(pageUrl) {
+    try {
+        const url = new URL(pageUrl);
+        const liveRoom = getBilibiliLiveRoomId(url.href);
+        if (liveRoom) return `bilibili-live:${liveRoom}`;
+        if (url.hostname === 'www.bilibili.com' && /^\/video\/(?:BV|av)/i.test(url.pathname)) {
+            return `${url.origin}${url.pathname.replace(/\/$/, '')}?p=${Number(url.searchParams.get('p')) || 1}`;
+        }
+        if (/(^|\.)youtube\.com$/.test(url.hostname) && url.pathname === '/watch' && url.searchParams.get('v')) {
+            return `youtube:${url.searchParams.get('v')}`;
+        }
+        if (/(^|\.)douyu\.com$/.test(url.hostname)) {
+            const room = url.pathname.match(/\/(\d+)\/?$/)?.[1];
+            if (room) return `douyu-live:${room}`;
+        }
+        for (const key of [...url.searchParams.keys()]) {
+            if (/^(?:utm_.+|spm_id_from|share_source|share_medium|share_plat|share_session_id|share_tag|timestamp|t|start|vd_source|is_story_h5)$/i.test(key)) {
+                url.searchParams.delete(key);
+            }
+        }
+        url.searchParams.sort();
+        const hash = /^#(?:t|time|start)=/i.test(url.hash) ? '' : url.hash;
+        return `${url.origin}${url.pathname.replace(/\/$/, '')}${url.search}${hash}`;
+    } catch (error) { return String(pageUrl || ''); }
+}
+
+function getAutomaticHandoffKey() {
+    const pageKey = getAutoHandoffPageKey(location.href);
+    const pageUrl = new URL(location.href);
+    if (pageUrl.hostname === 'www.bilibili.com' && /^\/(?:list\/|festival\/|bangumi\/play\/ss\d+)/.test(pageUrl.pathname)) {
+        const page = typeof unsafeWindow === 'object' ? unsafeWindow : window;
+        const initial = page.__INITIAL_STATE__;
+        const video = initial?.epInfo || initial?.videoData || initial?.videoInfo;
+        const cid = initial?.p > 1 ? initial.cidMap?.[video?.aid]?.cids?.[initial.p] : video?.cid;
+        return video?.aid && cid ? `bilibili:${video.aid}:${cid}` : undefined;
+    }
+    if (isTelegramUrl()) {
+        const visibleVideo = [...document.querySelectorAll('video')].some(video => {
+            const rect = video.getBoundingClientRect();
+            return rect.width > 80 && rect.height > 80 && (video.currentSrc || video.src || video.querySelector('source')?.src);
+        });
+        const source = visibleVideo ? resolveTelegramCaptureSource() : undefined;
+        return source?.url ? `${pageKey}|${source.url}` : undefined;
+    }
+    if (isResourceFallbackParser() && !resourceSniffer?.getBestCandidate()) return undefined;
+    return pageKey;
+}
+
+function cancelAutomaticHandoff() {
+    clearTimeout(automaticHandoffTimer);
+    automaticHandoffTimer = undefined;
+}
+
+function syncAutomaticHandoffState() {
+    const key = getAutomaticHandoffKey();
+    if (!automaticHandoffState || automaticHandoffState.key !== key) {
+        cancelAutomaticHandoff();
+        automaticHandoffState = { key, attempted: new Set() };
+    }
+    return key ? automaticHandoffState : undefined;
+}
+
+function automaticHandoffPlayers() {
+    const enabled = (currentConfig?.players || []).filter(player => player.enable === true);
+    if (currentConfig?.global?.autoHandoff === true) {
+        const primary = getEffectiveDefaultPlayer(enabled);
+        return primary ? [primary] : [];
+    }
+    return enabled.filter(player => player.presetEvent?.playAuto === true);
+}
+
+function scheduleAutomaticHandoff() {
+    if (self !== top || !currentParser || handoffLaunchInFlight) return;
+    const state = syncAutomaticHandoffState();
+    if (!state || automaticHandoffTimer !== undefined ||
+        !automaticHandoffPlayers().some(player => !state.attempted.has(player.name))) return;
+    // Allow the room page and its embedded player to finish their initial handshake.
+    automaticHandoffTimer = setTimeout(async () => {
+        automaticHandoffTimer = undefined;
+        if (state !== syncAutomaticHandoffState() || self !== top || handoffLaunchInFlight || !currentParser) return;
+        const player = automaticHandoffPlayers().find(item => !state.attempted.has(item.name));
+        if (!player) return;
+        state.attempted.add(player.name);
+        try {
+            await launchWithPlayer(player, undefined, true);
+        } catch (error) {
+            updateHandoffStatus('failed');
+            showToast(`${translation.loadFail}: ${error.message}`);
+        }
+    }, REFRESH_INTERVAL * 2);
+}
+
+function suppressAutomaticHandoffForCurrentPage() {
+    cancelAutomaticHandoff();
+    const state = syncAutomaticHandoffState();
+    if (state) automaticHandoffPlayers().forEach(player => state.attempted.add(player.name));
+}
+// AUTO_HANDOFF_HELPERS_END
+
 function persistQuickSettings() {
     GM_setValue('config', currentConfig);
     if (settingIframe?.style.display === 'block') {
@@ -5315,8 +5466,15 @@ function renderQuickSettings(enabledPlayers) {
     renderQuickQualitySettings();
     handoffRelayMode.value = currentConfig.global.browserRelayMode || 'auto';
     handoffEdgeHide.checked = currentConfig.global.edgeHide === true;
+    handoffAutoHandoff.checked = currentConfig.global.autoHandoff === true;
+    handoffAutoHandoff.onchange = () => {
+        currentConfig.global.autoHandoff = handoffAutoHandoff.checked;
+        suppressAutomaticHandoffForCurrentPage();
+        persistQuickSettings();
+    };
     handoffDefaultPlayer.onchange = () => {
         currentConfig.global.defaultPlayer = handoffDefaultPlayer.value;
+        suppressAutomaticHandoffForCurrentPage();
         persistQuickSettings();
         appendPlayButton();
     };
@@ -5880,6 +6038,13 @@ async function appendSettingIframe() {
                     <label data-translate="defaultPlayer">默认播放器</label>
                     <select id="defaultPlayer"></select>
                 </div>
+                <div class="input-group">
+                    <label for="autoHandoff" data-translate="autoHandoff">进入视频或直播页面后自动移交默认播放器</label>
+                    <label class="switch">
+                        <input type="checkbox" id="autoHandoff">
+                        <span class="switch-slider"></span>
+                    </label>
+                </div>
                     <div class="input-group">
                         <label data-translate="browserRelayMode">浏览器中继</label>
                         <select id="browserRelayMode">
@@ -6045,6 +6210,7 @@ async function appendSettingIframe() {
                 networkProxy: 'Network Proxy',
             resourceSniffing: 'Resource Sniffing Fallback',
             defaultPlayer: 'Default Player',
+            autoHandoff: 'Automatically hand off videos and live streams to the default player',
             browserRelayMode: 'Browser Relay',
             browserRelayNotifications: 'Browser Relay Popup Notifications',
             edgeHide: 'Hide At Edge',
@@ -6093,6 +6259,7 @@ async function appendSettingIframe() {
                 networkProxy: '网络代理',
             resourceSniffing: '资源嗅探兜底',
             defaultPlayer: '默认播放器',
+            autoHandoff: '进入视频或直播页面后自动移交默认播放器',
             browserRelayMode: '浏览器中继',
             browserRelayNotifications: '浏览器中继弹出通知',
             edgeHide: '贴边隐藏',
@@ -6532,6 +6699,7 @@ async function appendSettingIframe() {
 function saveConfig(config) {
     // 保存配置
     currentConfig = config;
+    suppressAutomaticHandoffForCurrentPage();
     GM_setValue('config', currentConfig);
     showToast(translation.saveSuccessfully);
 
@@ -6573,15 +6741,7 @@ function startFlashing(element) {
 
 function showButtonDiv() {
     setHandoffHostDisplay('flex');
-    if (!isReloading) {
-        for (const player of currentConfig.players) {
-            if (player.presetEvent.playAuto === true) {
-                setTimeout(() => {
-                    currentParser.play(player);
-                }, REFRESH_INTERVAL);
-            }
-        }
-    }
+    if (!isReloading) scheduleAutomaticHandoff();
     isReloading = false;
     // INITIAL_EDGE_HIDE_SCHEDULE_START
     scheduleHandoffInitialEdgeHide();
@@ -6682,6 +6842,8 @@ function initIframe() {
             isReloading = false;
         }, REFRESH_INTERVAL);
 
+        if (iframeListenersAttached) return;
+        iframeListenersAttached = true;
         // 监听父页面事件
         window.addEventListener("message", async function (event) {
             const data = event.data;
@@ -6713,6 +6875,9 @@ function initIframe() {
 }
 
 async function init(url) {
+    const previousUrl = currentUrl;
+    currentUrl = url;
+    cancelAutomaticHandoff();
     installTelegramPageCapture();
     resourceSniffer?.stop();
     resourceSniffer = undefined;
@@ -6721,7 +6886,7 @@ async function init(url) {
     translation = translations[currentConfig.global.language];
     currentParser = matchParser(currentConfig.global.parser, url) || matchParser(defaultConfig.global.parser, url);
     if (!currentParser && self === top && currentConfig.global.resourceSniffing !== false) {
-        const minimumPerformanceStartTime = currentUrl ?
+        const minimumPerformanceStartTime = previousUrl ?
             Math.max(0, performance.now() - REFRESH_INTERVAL * 2) :
             0;
         const sniffer = new PassiveResourceSniffer((candidate, hasVideoElement) => {
@@ -6742,18 +6907,15 @@ async function init(url) {
     } else {
         initIframe();
     }
-    currentUrl = url;
 }
 
 setInterval(() => {
     const url = location.href;
     if (currentUrl !== url) {
         console.log(`current url update: ${currentUrl ? currentUrl + ' => ' : ''}${url}`);
-        if (currentUrl && currentUrl.indexOf('?') > -1 &&
-            url.replace(/\/\?/, '?').startsWith(currentUrl.replace(/\/\?/, '?'))) {
+        if (currentUrl && getAutoHandoffPageKey(currentUrl) === getAutoHandoffPageKey(url)) {
             currentUrl = url;
-            return;
-        }
-        init(url);
+        } else init(url);
     }
+    scheduleAutomaticHandoff();
 }, REFRESH_INTERVAL);

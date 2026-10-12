@@ -75,38 +75,59 @@ local rebuild_convert_timer = nil
 
 function get_danmaku_visibility()
     local history_json = read_file(HISTORY_PATH)
-    local history
-    if history_json ~= nil then
-        history = utils.parse_json(history_json) or {}
-        local flag = history["show_danmaku"]
-        if flag == nil then
-            history["show_danmaku"] = false
-            write_json_file(HISTORY_PATH, history)
-        else
-            return flag
-        end
-    else
-        history = {}
-        history["show_danmaku"] = false
-        write_json_file(HISTORY_PATH, history)
-    end
-    return false
+    local history = history_json and utils.parse_json(history_json)
+    local flag
+    if type(history) == "table" then flag = history.show_danmaku end
+    -- Reading the preference must not manufacture a persisted "off" choice.
+    -- Preserve every existing boolean, including legacy explicit false values.
+    if type(flag) ~= "boolean" then flag = true end
+    mp.set_property_bool("user-data/uosc_danmaku/preferred-visible", flag)
+    return flag
 end
 
 function set_danmaku_visibility(flag)
-    local history = {}
+    if type(flag) ~= "boolean" then return false end
     local history_json = read_file(HISTORY_PATH)
-    if history_json ~= nil then
-        history = utils.parse_json(history_json) or {}
+    local history = {}
+    if history_json then history = utils.parse_json(history_json) end
+    if type(history) ~= "table" then
+        msg.error("cannot save danmaku visibility: invalid history JSON")
+        return false
     end
     history["show_danmaku"] = flag
     write_json_file(HISTORY_PATH, history)
+    local written = read_file(HISTORY_PATH)
+    local decoded = written and utils.parse_json(written)
+    local saved = type(decoded) == "table" and decoded.show_danmaku == flag
+    mp.set_property_bool("user-data/uosc_danmaku/preferred-visible", flag)
+    if not saved then msg.error("cannot save danmaku visibility: file write failed") end
+    return saved
 end
 
 function set_danmaku_button()
-    if get_danmaku_visibility() then
-        toggle_danmaku_switch("on")
+    toggle_danmaku_switch(ENABLED and "on" or "off")
+end
+
+local last_observed_visibility = get_danmaku_visibility()
+
+function sync_danmaku_visibility()
+    local visible = get_danmaku_visibility()
+    if visible == last_observed_visibility then return false end
+    last_observed_visibility = visible
+    if is_live_danmaku_active and is_live_danmaku_active() then
+        return set_live_danmaku_visibility(visible, false)
     end
+    local path = mp.get_property("path")
+    local video = mp.get_property_native("current-tracks/video")
+    if not path or not video or video.image or video.albumart then return false end
+    ENABLED = visible
+    toggle_danmaku_switch(visible and "on" or "off")
+    if visible then
+        if COMMENTS == nil then init(path) else show_danmaku_func() end
+    else
+        hide_danmaku_func()
+    end
+    return true
 end
 
 function show_loaded(init)
@@ -520,6 +541,7 @@ end
 -- 加载弹幕
 function load_danmaku(from_menu, no_osd)
     if not ENABLED then return end
+    if sync_danmaku_style_defaults then sync_danmaku_style_defaults(true) end
     if is_live_danmaku_active and is_live_danmaku_active() then
         refresh_live_danmaku_style()
         return
@@ -529,7 +551,9 @@ function load_danmaku(from_menu, no_osd)
 end
 
 function load_danmaku_for_url(path)
-    if path:find('bilibili.com') or path:find('bilivideo.c[nom]+') then
+    local cid = mp.get_opt("cid")
+    local has_cid = type(cid) == "string" and #cid <= 20 and cid:match("^%d+$") and tonumber(cid) > 0
+    if has_cid or path:find('bilibili.com') or path:find('bilivideo.c[nom]+') then
         load_danmaku_for_bilibili(path)
         return
     end
@@ -617,11 +641,11 @@ end
 
 function init(path)
     if not path then return end
+    if sync_danmaku_style_defaults then sync_danmaku_style_defaults(true) end
     local dir = get_parent_directory(path)
     local filename = mp.get_property('filename/no-ext')
     local video = mp.get_property_native("current-tracks/video")
-    local duration = mp.get_property_number("duration", 0)
-    if not video or video["image"] or video["albumart"] or duration < 60 then
+    if not video or video["image"] or video["albumart"] then
         msg.info("不支持的播放内容（非视频）")
         return
     end
@@ -640,22 +664,23 @@ function init(path)
 end
 
 mp.register_event("file-loaded", function()
+    if sync_danmaku_style_defaults then sync_danmaku_style_defaults(true) end
     if is_live_danmaku_active and is_live_danmaku_active() then
         return
     end
+    ENABLED = get_danmaku_visibility()
+    toggle_danmaku_switch(ENABLED and "on" or "off")
     local path = mp.get_property("path")
     local dir = get_parent_directory(path)
     local filename = mp.get_property('filename/no-ext')
     local video = mp.get_property_native("current-tracks/video")
-    local fps = mp.get_property_number("container-fps", 0)
-    local duration = mp.get_property_number("duration", 0)
-    if not video or video["image"] or video["albumart"] or fps < 23 or duration < 60 then
+    if not video or video["image"] or video["albumart"] then
         return
     end
 
     read_danmaku_source_record(path)
 
-    if not get_danmaku_visibility() then
+    if not ENABLED then
         return
     end
 
@@ -719,12 +744,12 @@ mp.register_script_message("show_danmaku_keyboard", function()
         return
     end
     ENABLED = not ENABLED
+    set_danmaku_visibility(ENABLED)
     if ENABLED then
         toggle_danmaku_switch("on")
 
         if COMMENTS == nil then
             show_message("加载弹幕初始化...", 3)
-            set_danmaku_visibility(true)
             local path = mp.get_property("path")
             init(path)
         else
@@ -745,3 +770,7 @@ mp.register_script_message("open_source_delay_menu", open_delay_menu)
 mp.register_script_message("open_search_danmaku_menu", open_input_menu)
 mp.register_script_message("open_add_source_menu", open_add_menu)
 mp.register_script_message("open_add_total_menu", open_add_total_menu)
+
+if mp.add_periodic_timer then
+    mp.add_periodic_timer(1, sync_danmaku_visibility)
+end

@@ -765,6 +765,7 @@ mp.observe_property('demuxer-via-network', 'native', create_state_setter('is_str
 	Elements:trigger('dispositions')
 end))
 mp.observe_property('demuxer-cache-state', 'native', function(prop, cache_state)
+	set_state('thumbnail_cached_ranges', cache_state and cache_state['seekable-ranges'] or {})
 	local cached_ranges, bof, eof, uncached_ranges = nil, nil, nil, nil
 	if cache_state then
 		cached_ranges, bof, eof = cache_state['seekable-ranges'], cache_state['bof-cached'], cache_state['eof-cached']

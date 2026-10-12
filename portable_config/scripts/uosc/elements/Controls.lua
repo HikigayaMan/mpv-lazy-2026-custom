@@ -71,7 +71,7 @@ function Controls:init_options()
 		['shot-vid']       = 'command:screenshot:screenshot video?' .. ulang._button_ext11,
 
 		['ST-stats_tog']   = 'command:info_outline:script-binding display-stats-toggle?' .. ulang._button_ext12,
-		['ST-thumb_tog']   = 'command:panorama:script-binding thumb_toggle?' .. ulang._button_ext13,
+		['ST-thumb_tog']   = 'command:panorama:script-binding ' .. options.thumbnail_provider .. '/thumb_toggle?' .. ulang._button_ext13,
 
 	}
 

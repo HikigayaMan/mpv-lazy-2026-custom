@@ -80,12 +80,22 @@ function M.init(_state, _options, _os_name, _winapi)
 				end
 			else
 				mpv_path = "mpv"
+				if os_name == "windows" then
+					local bundled = mp.command_native({"expand-path", "~~/../mpv.exe"})
+					if bundled and mp.utils.file_info(bundled) then mpv_path = bundled end
+				end
 			end
 		end
 	else
 
 		ffmpeg_path = options.binpath == "default" and "ffmpeg" or options.binpath
 	end
+end
+
+function M.cache_decoder_path()
+	if mpv_path then return mpv_path end
+	local bundled = mp.command_native({"expand-path", "~~/../mpv.exe"})
+	return bundled and mp.utils.file_info(bundled) and bundled or "mpv"
 end
 
 function M.subprocess(args, async, callback)

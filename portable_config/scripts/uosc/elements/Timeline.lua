@@ -468,6 +468,15 @@ function Timeline:render()
 	if (self.proximity_raw <= 0 or self.pressed or hovered_chapter) and not Elements:v('speed', 'dragging') then
 		local cursor_x = hovered_chapter and t2x(hovered_chapter.time) or cursor.x
 		local hovered_seconds = hovered_chapter and hovered_chapter.time or self:get_time_at_x(cursor.x)
+		local hover_cached = not state.is_stream
+		if state.is_stream then
+			for _, range in ipairs(state.thumbnail_cached_ranges or {}) do
+				if range.start and range['end'] and range.start <= hovered_seconds and hovered_seconds < range['end'] then
+					hover_cached = true
+					break
+				end
+			end
+		end
 
 		-- Cursor line
 		-- 0.5 to switch when the pixel is half filled in
@@ -481,11 +490,13 @@ function Timeline:render()
 			size = self.font_size, offset = timestamp_gap, margin = tooltip_gap, timestamp = options.time_precision > 0,
 		}
 		local hovered_time_human = format_time(hovered_seconds, state.duration)
+		if not hover_cached then hovered_time_human = hovered_time_human .. ' · 未缓存' end
 		opts.width_overwrite = timestamp_width(hovered_time_human, opts)
 		tooltip_anchor = ass:tooltip(tooltip_anchor, hovered_time_human, opts)
 
 		-- Thumbnail
 		local show_thumb = not thumbnail.disabled
+			and hover_cached
 			and thumbnail.width ~= 0
 			and thumbnail.height ~= 0
 		if show_thumb and options.thumbnail_mode == 'natural' then

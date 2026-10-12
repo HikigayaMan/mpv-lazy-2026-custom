@@ -969,6 +969,8 @@ function open_style_menu_uosc(actived, status)
 end
 
 function open_style_menu(actived, status)
+    if status == nil and sync_danmaku_style_defaults then sync_danmaku_style_defaults(false) end
+    for key, config in pairs(menu_items_config) do config.hint = options[key] end
     if uosc_available then
         open_style_menu_uosc(actived, status)
     elseif input_loaded then
@@ -1384,22 +1386,17 @@ mp.register_script_message("set", function(prop, value)
     if prop ~= "show_danmaku" then
         return
     end
+    if value ~= "on" and value ~= "off" then return end
 
     if is_live_danmaku_active and is_live_danmaku_active() then
-        if value == "on" then
-            ENABLED = true
-            show_danmaku_func(true)
-        else
-            stop_live_danmaku(nil)
-        end
-        toggle_danmaku_switch(value)
+        set_live_danmaku_visibility(value == "on")
         return
     end
 
+    set_danmaku_visibility(value == "on")
     if value == "on" then
         ENABLED = true
         if COMMENTS == nil then
-            set_danmaku_visibility(true)
             local path = mp.get_property("path")
             init(path)
         else
@@ -1439,6 +1436,7 @@ end)
 
 mp.register_script_message("load-danmaku", function(animeTitle, episodeTitle, episodeId, api_server)
     ENABLED = true
+    set_danmaku_visibility(true)
     DANMAKU.anime = animeTitle
     DANMAKU.episode = episodeTitle
     set_episode_id(episodeId, true, api_server)
@@ -1449,6 +1447,7 @@ mp.register_script_message("add-source-event", function(query)
         mp.commandv("script-message-to", "uosc", "close-menu", "menu_source")
     end
     ENABLED = true
+    set_danmaku_visibility(true)
     add_danmaku_source(query, true)
 end)
 

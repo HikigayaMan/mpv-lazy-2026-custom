@@ -100,6 +100,74 @@ test('DASH variants sort shuffled tiers, keep the preferred codec per tier and c
     assert.equal(variants[0].fps, 60000 / 1001);
 });
 
+test('DASH keeps the same highest-quality codec and prefers API-provided official 443 backups for video and audio', () => {
+    const context = sandbox();
+    const signature = '?deadline=123456&upsig=Exact%2FCase%3D&uipk=abc+123&mid=42';
+    const videoBackup = `https://upos-sz-mirrorcos.bilivideo.com/4k-hevc.m4s${signature}`;
+    const audioBackup = `https://upos-sz-mirrorcos.bilivideo.com/audio.m4s${signature}`;
+    const variants = context.parseBilibiliDashStreams({ dash: {
+        video: [
+            { id: 120, codecid: 7, baseUrl: 'https://cdn.test/4k-avc.m4s', height: 2160, codecs: 'avc1' },
+            { id: 120, codecid: 12, baseUrl: `https://b-peer.edge.mountaintoys.cn:4483/4k-hevc.m4s${signature}`,
+                backupUrl: [videoBackup], height: 2160, width: 3840, codecs: 'hev1' },
+            { id: 64, codecid: 7, baseUrl: 'https://cdn.test/720.m4s', height: 720, codecs: 'avc1' }
+        ], audio: [{ base_url: `https://b-peer.edge.mountaintoys.cn:4483/audio.m4s${signature}`,
+            backup_url: [audioBackup] }]
+    } }, 12);
+    const selected = context.selectBilibiliStreamVariant(variants, '127');
+    assert.equal(selected.quality, 120);
+    assert.equal(selected.codec, 'hev1');
+    assert.equal(selected.height, 2160);
+    assert.equal(selected.url, videoBackup);
+    assert.equal(selected.audio_url, audioBackup);
+    assert.ok(selected.url.endsWith(signature));
+    const media = context.attachBilibiliStreamVariants({ video: selected.url, audio: selected.audio_url,
+        mpvOptions: [], bilibili: {} }, variants, selected);
+    const option = media.mpvOptions.find(item => item.includes('quality-menu-stream_variants='));
+    const exported = JSON.parse(decodeURIComponent(encodedScriptOptionValue(option)));
+    assert.equal(exported[0].url, videoBackup);
+    assert.equal(exported[0].audio_url, audioBackup);
+    assert.ok(option.length <= 20480 + 100);
+});
+
+test('DASH URL selection retains a valid primary when no preferred backup exists, and searches all fields for valid backups', () => {
+    const context = sandbox();
+    const primary = 'https://b-peer.edge.mountaintoys.cn:4483/video.m4s?sig=private';
+    assert.equal(context.selectBilibiliDashUrl({ baseUrl: primary }), primary);
+    assert.equal(context.selectBilibiliDashUrl({ baseUrl: primary, backupUrl: ['https://unknown.test/backup.m4s'] }), primary);
+    assert.equal(context.selectBilibiliDashUrl({ baseUrl: 'javascript:bad', base_url: 'not a url',
+        backupUrl: ['file:///local', 'https://unknown.test/first.m4s'],
+        backup_url: ['https://unknown.test/second.m4s'] }), 'https://unknown.test/first.m4s');
+    const preferred = 'https://upos-sz-mirrorali.bilivideo.com:443/backup.m4s?sig=%2fKeep+Exact';
+    assert.equal(context.selectBilibiliDashUrl({ baseUrl: primary,
+        backupUrl: ['https://upos-sz-mirrorali.bilivideo.com:4483/backup.m4s', 'https://p2p.mcdn.bilivideo.cn/video.m4s'],
+        backup_url: ['http://upos-sz-mirrorali.bilivideo.com/backup.m4s', preferred] }), preferred);
+    assert.equal(context.selectBilibiliDashUrl({ baseUrl: primary,
+        backup_url: ['https://bilivideo.com.attacker.test/backup.m4s'] }), primary);
+    assert.equal(context.selectBilibiliDashUrl({ baseUrl: 'not a URL', backupUrl: ['file:///bad'] }), undefined);
+});
+
+test('DASH backup selection still respects the total command-line metadata budget for long video/audio signatures', () => {
+    const context = sandbox();
+    const variants = context.parseBilibiliDashStreams({ dash: {
+        video: Array.from({ length: 8 }, (_, index) => ({ id: 120 - index, codecid: 12,
+            baseUrl: `https://b-peer.edge.mountaintoys.cn:4483/${index}.m4s`,
+            backup_url: [`https://upos-sz-mirrorcos.bilivideo.com/${index}.m4s?sig=${'a'.repeat(2400)}`], codecs: 'hev1' })),
+        audio: [{ baseUrl: 'https://b-peer.edge.mountaintoys.cn:4483/audio.m4s',
+            backupUrl: [`https://upos-sz-mirrorcos.bilivideo.com/audio.m4s?sig=${'b'.repeat(2000)}`] }]
+    } }, 12);
+    const selected = variants[0];
+    const media = context.attachBilibiliStreamVariants({ video: selected.url, audio: selected.audio_url,
+        mpvOptions: ['--fullscreen=yes'], bilibili: {} }, variants, selected);
+    const option = media.mpvOptions.find(item => item.includes('quality-menu-stream_variants='));
+    assert.ok(option, 'highest selected track and its official audio backup must fit');
+    assert.ok(media.video.length + media.audio.length + option.length < 30000);
+    const exported = JSON.parse(decodeURIComponent(encodedScriptOptionValue(option)));
+    assert.equal(exported[0].url, selected.url);
+    assert.equal(exported[0].audio_url, selected.audio_url);
+    assert.ok(exported.every(item => new URL(item.url).hostname.endsWith('.bilivideo.com')));
+});
+
 test('VOD uses a signed WBI playurl request and browser credentials, preserving the server-returned authorized formats', async () => {
     const calls = [];
     const context = sandbox({ fetch: async (url, options) => {

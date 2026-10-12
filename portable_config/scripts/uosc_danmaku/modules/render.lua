@@ -111,7 +111,7 @@ function sync_smooth_fps_filter(skip_history_lookup)
     elseif is_live_danmaku_active and is_live_danmaku_active() then
         visible = ENABLED == true
     else
-        visible = get_danmaku_visibility()
+        visible = ENABLED == true and COMMENTS ~= nil and get_danmaku_visibility()
     end
     local should_enable = options.vf_fps and visible
     if should_enable then
@@ -467,10 +467,10 @@ function render_danmaku(from_menu, no_osd)
 end
 
 local function filter_state(label, name)
-    local filters = mp.get_property_native("vf")
+    local filters = mp.get_property_native("vf") or {}
     for _, filter in pairs(filters) do
         if filter.label == label or filter.name == name
-        or filter.params[name] ~= nil then
+        or (filter.params and name and filter.params[name] ~= nil) then
             return true
         end
     end
@@ -479,9 +479,6 @@ end
 
 function show_danmaku_func(live)
     mp.set_property_bool(HAS_DANMAKU, true)
-    if not live then
-        set_danmaku_visibility(true)
-    end
     if is_ass_render_mode() then
         overlay_low:remove()
         overlay_high:remove()
@@ -498,9 +495,6 @@ end
 function hide_danmaku_func(live)
     stop_time_observer()
     mp.set_property_bool(HAS_DANMAKU, false)
-    if not live then
-        set_danmaku_visibility(false)
-    end
     overlay_low:remove()
     overlay_high:remove()
     remove_ass_subtitle()

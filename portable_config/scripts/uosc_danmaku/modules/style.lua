@@ -27,6 +27,9 @@ local LIVE_FPS_MODES = {
 }
 
 local last_saved_values = nil
+local last_loaded_content = nil
+local configured_style_values = {}
+for _, key in ipairs(STYLE_KEYS) do configured_style_values[key] = options[key] end
 
 local function same_style(left, right)
     if not left or not right then return false end
@@ -85,15 +88,21 @@ local function normalized_style_value(key, value)
     return tonumber(value)
 end
 
-function load_danmaku_style_defaults()
+function load_danmaku_style_defaults(reset_when_missing)
     local path = style_path()
     local file = io.open(path, "r")
     if not file then
+        last_loaded_content = nil
+        last_saved_values = nil
+        if reset_when_missing then
+            for _, key in ipairs(STYLE_KEYS) do options[key] = configured_style_values[key] end
+        end
         publish_style_state("missing")
         return false
     end
     local content = file:read("*a")
     file:close()
+    last_loaded_content = content
     local decoded = utils.parse_json(content)
     if type(decoded) ~= "table" then
         msg.warn("danmaku style defaults ignored: invalid JSON")
@@ -115,6 +124,21 @@ function load_danmaku_style_defaults()
     last_saved_values = complete and loaded_values or nil
     publish_style_state("loaded")
     return true
+end
+
+function sync_danmaku_style_defaults(force)
+    local file = io.open(style_path(), "r")
+    local content = file and file:read("*a") or nil
+    if file then file:close() end
+    if not force and content == last_loaded_content then return false end
+    local previous = {}
+    for _, key in ipairs(STYLE_KEYS) do previous[key] = options[key] end
+    load_danmaku_style_defaults(true)
+    local current = {}
+    for _, key in ipairs(STYLE_KEYS) do current[key] = options[key] end
+    local changed = not same_style(previous, current)
+    if changed and refresh_danmaku_style then refresh_danmaku_style() end
+    return changed
 end
 
 function save_danmaku_style_defaults(force)
@@ -178,6 +202,7 @@ function save_danmaku_style_defaults(force)
         return false
     end
     last_saved_values = values
+    last_loaded_content = encoded
     publish_style_state("saved")
     return true
 end
@@ -194,6 +219,7 @@ function clear_danmaku_style_defaults()
         end
     end
     last_saved_values = nil
+    last_loaded_content = nil
     publish_style_state("cleared")
     return true
 end
@@ -245,3 +271,8 @@ mp.register_script_message("set-live-fps-mode", function(mode)
 end)
 
 load_danmaku_style_defaults()
+-- A second MPV instance may save live styles while this one plays a video.
+-- Compare the small preference file before refreshing; never write on reload.
+if mp.add_periodic_timer then
+    mp.add_periodic_timer(1, function() sync_danmaku_style_defaults(false) end)
+end
