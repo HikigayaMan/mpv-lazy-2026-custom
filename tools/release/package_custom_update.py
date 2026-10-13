@@ -21,6 +21,7 @@ BRIDGE_INPUTS = (
     "tools/telegram-web-mpv-bridge/bridge.py",
     "tools/telegram-web-mpv-bridge/bilibili_danmaku.py",
     "tools/telegram-web-mpv-bridge/playback_progress.py",
+    "tools/telegram-web-mpv-bridge/web_playlist.py",
     "tools/telegram-web-mpv-bridge/requirements.txt",
     "tools/telegram-web-mpv-bridge/requirements-build.txt",
 )
@@ -109,6 +110,8 @@ def build(repo: Path, baseline: str, ref: str, version: str, exe: Path, provenan
         raise ValueError("A development build cannot be used as a committed release input.")
     if (evidence.get("exeSha256") != sha256(binary) or not evidence.get("frozenHealthPassed")
             or not evidence.get("frozenWebSocketPassed") or evidence.get("frozenPlaybackHttpPassed") is not True
+            or evidence.get("frozenWebPlaylistPassed") is not True
+            or evidence.get("frozenWebPlaylistHierarchyPassed") is not True
             or not evidence.get("brotliBinaryIncluded")):
         raise ValueError("Bridge verification does not match this executable.")
     expected_inputs = {name: sha256(entries[name]) for name in BRIDGE_INPUTS}

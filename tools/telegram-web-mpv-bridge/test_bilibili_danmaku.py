@@ -2,6 +2,7 @@
 
 import asyncio
 from collections import deque
+import errno
 import json
 import os
 import struct
@@ -16,7 +17,7 @@ import brotli
 
 from bilibili_danmaku import (
     AuthRejected, BilibiliDanmakuManager, BilibiliSession, HEADER, MAX_PENDING,
-    MpvPipe, SessionFailure, safe_failure, decode_packets, make_packet, normalize_danmaku, validate_auth, validate_start,
+    MpvPipe, SessionFailure, _write_pipe_request, safe_failure, decode_packets, make_packet, normalize_danmaku, validate_auth, validate_start,
 )
 from bridge import BRIDGE_VERSION, BridgeState, handle_http_client, ws_handler
 
@@ -37,6 +38,108 @@ def event(text="你好，直播", cmd="DANMU_MSG"):
 
 def json_packet(operation, payload, version=0):
     return make_packet(operation, json.dumps(payload, ensure_ascii=False).encode(), version)
+
+
+class NonblockingPipeWriteTests(unittest.TestCase):
+    """Win32-free backpressure fixtures for the production write loop."""
+    class Clock:
+        def __init__(self):
+            self.value, self.sleeps = 0, []
+
+        def monotonic(self):
+            return self.value
+
+        def sleep(self, duration):
+            self.sleeps.append(duration)
+            self.value += duration
+
+    class Pipe:
+        def __init__(self, actions=(), capacity=4096):
+            self.actions, self.capacity = deque(actions), capacity
+            self.received, self.calls = bytearray(), []
+
+        def write(self, block):
+            data = bytes(block)
+            self.calls.append(data)
+            result = self.actions.popleft() if self.actions else min(len(data), self.capacity)
+            if isinstance(result, Exception):
+                partial = getattr(result, "characters_written", 0)
+                if partial:
+                    self.received.extend(data[:partial])
+                raise result
+            if type(result) is int and 0 < result <= len(data):
+                self.received.extend(data[:result])
+            return result
+
+    def write(self, pipe, request, deadline=2):
+        clock = self.Clock()
+        with patch("bilibili_danmaku.time.monotonic", clock.monotonic), patch("bilibili_danmaku.time.sleep", clock.sleep):
+            _write_pipe_request(pipe, request, deadline)
+        return clock
+
+    def test_large_json_command_uses_4k_chunks_without_repeating_or_losing_bytes(self):
+        for size in (4096, 8192, 32768):
+            with self.subTest(size=size):
+                request = json.dumps({"command": ["script-message-to", "web_playlist", "web-playlist-resolved", "x" * size], "request_id": 1}).encode() + b"\n"
+                pipe = self.Pipe(capacity=4096)
+                self.write(pipe, request)
+                self.assertEqual(bytes(pipe.received), request)
+                self.assertGreater(len(pipe.calls), 1)
+                self.assertTrue(all(len(call) <= 4096 for call in pipe.calls))
+
+    def test_partial_none_zero_and_eagain_preserve_exact_offset_and_yield_on_backpressure(self):
+        request = b"a" * 14000 + b"\n"
+        pipe = self.Pipe([128, None, BlockingIOError(errno.EAGAIN, "fixture input buffer full"), 512, 0], capacity=1024)
+        clock = self.write(pipe, request)
+        self.assertEqual(bytes(pipe.received), request)
+        self.assertEqual(pipe.calls[1], request[128:128 + 4096])
+        self.assertEqual(pipe.calls[1], pipe.calls[2])
+        self.assertEqual(len(clock.sleeps), 3)
+        self.assertTrue(all(duration > 0 for duration in clock.sleeps))
+
+    def test_blocking_error_with_partial_bytes_continues_after_the_accepted_prefix(self):
+        blocked = BlockingIOError(errno.EAGAIN, "fixture partially accepted write")
+        blocked.characters_written = 17
+        request = b"b" * 8192 + b"\n"
+        pipe = self.Pipe([blocked])
+        self.write(pipe, request)
+        self.assertEqual(bytes(pipe.received), request)
+        self.assertEqual(pipe.calls[1], request[17:17 + 4096])
+
+    def test_utf8_command_is_reassembled_even_when_a_multibyte_character_crosses_chunks(self):
+        request = json.dumps({"command": ["script-message", "标题" * 6000], "request_id": 1}, ensure_ascii=False).encode() + b"\n"
+        pipe = self.Pipe(capacity=997)
+        self.write(pipe, request)
+        self.assertEqual(bytes(pipe.received), request)
+        self.assertEqual(json.loads(pipe.received.decode())["command"][1], "标题" * 6000)
+
+    def test_non_draining_pipe_expires_with_a_bounded_number_of_yielding_retries(self):
+        clock, pipe = self.Clock(), self.Pipe(capacity=0)
+        with patch("bilibili_danmaku.time.monotonic", clock.monotonic), patch("bilibili_danmaku.time.sleep", clock.sleep):
+            with self.assertRaisesRegex(TimeoutError, "MPV IPC write timed out"):
+                _write_pipe_request(pipe, b"not drained\n", 2)
+        self.assertLessEqual(len(pipe.calls), 201)
+        self.assertEqual(len(pipe.calls), len(clock.sleeps))
+        self.assertTrue(all(duration > 0 for duration in clock.sleeps))
+        self.assertGreaterEqual(clock.value, 2)
+
+    def test_broken_pipe_is_propagated_and_oversized_command_is_rejected_before_writing(self):
+        pipe = self.Pipe([BrokenPipeError(errno.EPIPE, "fixture pipe disconnected")])
+        with self.assertRaises(BrokenPipeError):
+            self.write(pipe, b"small\n")
+        pipe = self.Pipe()
+        with self.assertRaisesRegex(ValueError, "oversized MPV command"):
+            self.write(pipe, b"x" * 65537)
+        self.assertEqual(pipe.calls, [])
+
+    def test_invalid_writer_count_is_rejected_and_expired_deadline_does_not_write(self):
+        for value in (-1, 99999, True):
+            with self.subTest(value=value), self.assertRaisesRegex(OSError, "invalid MPV IPC write result"):
+                self.write(self.Pipe([value]), b"small\n")
+        pipe = self.Pipe()
+        with self.assertRaises(TimeoutError):
+            self.write(pipe, b"small\n", deadline=0)
+        self.assertEqual(pipe.calls, [])
 
 
 class ProtocolTests(unittest.TestCase):

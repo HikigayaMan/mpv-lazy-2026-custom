@@ -19,6 +19,12 @@ if not valid_identity or #opts.session_id > 64
 
 local PROPERTY = 'user-data/mpv-lazy/playback-progress'
 local SWITCH = 'user-data/mpv-lazy/progress-stream-switch'
+local PLAYLIST_CURRENT = 'user-data/mpv-lazy/web-playlist/current'
+local PLAYLIST_SWITCH = 'user-data/mpv-lazy/web-playlist/quality-switch'
+local FINALS = 'user-data/mpv-lazy/playback-progress-finals'
+local playlist_id = mp.get_opt and mp.get_opt('web_playlist-id') or ''
+local playlist_mode = type(playlist_id) == 'string' and #playlist_id == 41 and playlist_id:match('^playlist%-%x+$')
+local playlist_generation, final_sequence, finals = nil, 0, {}
 local first_file = true
 local active, ready, ended, completed = true, false, false, false
 local last_path, position, duration = nil, 0, 0
@@ -27,6 +33,46 @@ local waiting_resume = nil
 
 local function finite(value)
     return type(value) == 'number' and value == value and value >= 0 and value < math.huge
+end
+
+local function playlist_context()
+    local context = mp.get_property_native(PLAYLIST_CURRENT)
+    if not playlist_mode or type(context) ~= 'table' or context.playlistId ~= playlist_id
+        or context.sessionId ~= opts.session_id or context.path ~= mp.get_property('path')
+        or type(context.itemId) ~= 'string' or not context.itemId:match('^%d+:%d+$')
+        or context.identity ~= 'bilibili:' .. context.itemId then return nil end
+    return context
+end
+local function playlist_switch()
+    local marker = mp.get_property_native(PLAYLIST_SWITCH)
+    return playlist_mode and type(marker) == 'table' and marker.playlistId == playlist_id
+        and marker.identity == opts.identity and finite(marker.expiresAt) and marker.expiresAt >= mp.get_time()
+end
+local function snapshot()
+    return {apiVersion = 1, identity = opts.identity, sessionId = opts.session_id,
+        playlistId = playlist_mode and playlist_id or nil,
+        active = active, ready = ready and duration > 0, position = position, duration = duration,
+        paused = mp.get_property_bool('pause', false), ended = ended, completed = completed}
+end
+local function queue_final()
+    if not playlist_mode or not active or not ready or duration <= 0 or playlist_switch() then return end
+    final_sequence = final_sequence + 1
+    finals[#finals + 1] = {finalSequence = final_sequence, snapshot = snapshot()}
+    if #finals > 32 then table.remove(finals, 1) end
+    mp.set_property_native(FINALS, finals)
+end
+local function adopt_playlist_context()
+    local context = playlist_context()
+    if not context then return false end
+    if playlist_generation ~= context.generation or opts.identity ~= context.identity then
+        opts.identity, playlist_generation = context.identity, context.generation
+        position = finite(tonumber(context.position)) and tonumber(context.position) or 0
+        duration = finite(tonumber(context.duration)) and tonumber(context.duration) or 0
+        last_path, ended, completed = context.path, false, false
+        waiting_resume = position > 0 and {position = position, expiresAt = mp.get_time() + 15} or nil
+    end
+    active = true
+    return true
 end
 
 local function switch_allowed(path)
@@ -51,16 +97,17 @@ local function publish(sample)
         if finite(pos) then position = pos end
         if finite(dur) then duration = dur end
     end
-    mp.set_property_native(PROPERTY, {
-        apiVersion = 1, identity = opts.identity, sessionId = opts.session_id,
-        active = active, ready = ready and duration > 0,
-        position = position, duration = duration,
-        paused = mp.get_property_bool('pause', false), ended = ended, completed = completed,
-    })
+    mp.set_property_native(PROPERTY, snapshot())
 end
 
 mp.register_event('start-file', function()
     local path = mp.get_property('path')
+    if playlist_mode then
+        local id = path and path:match('^http://127%.0%.0%.1:%d+/web%-playlist/(playlist%-%x+)/')
+        active, ready, ended, completed = id == playlist_id, false, false, false
+        publish(false)
+        return
+    end
     local allowed = first_file or (active and (path == last_path or switch_allowed(path)))
     waiting_switch = not first_file and allowed and path or nil
     active, ready, ended, completed = allowed == true, false, false, false
@@ -68,6 +115,12 @@ mp.register_event('start-file', function()
 end)
 
 mp.register_event('file-loaded', function()
+    if playlist_mode then
+        ready = adopt_playlist_context()
+        if waiting_resume then ready = false end
+        publish(true)
+        return
+    end
     local path = mp.get_property('path')
     local authorized_switch = not first_file and active and switch_allowed(path)
     local marker = authorized_switch and mp.get_property_native(SWITCH) or nil
@@ -90,6 +143,17 @@ mp.register_event('file-loaded', function()
 end)
 
 mp.register_event('end-file', function(event)
+    if playlist_mode then
+        if playlist_switch() then ready = false; publish(false); return end
+        if active and ready then
+            ended = true
+            completed = event and event.reason == 'eof' or false
+            if completed and duration > 0 then position = duration end
+            publish(false)
+            queue_final()
+        end
+        return
+    end
     -- A quality replacement emits end-file before the new stream loads. Keep
     -- the old timestamp while loading, so a temporary zero cannot erase it.
     local marker = mp.get_property_native(SWITCH)
@@ -104,6 +168,19 @@ mp.register_event('end-file', function(event)
     end
     publish(false)
 end)
+
+if playlist_mode then
+    mp.set_property_native(FINALS, {})
+    mp.observe_property(PLAYLIST_CURRENT, 'native', function()
+        local old_generation, old_identity = playlist_generation, opts.identity
+        if adopt_playlist_context() and (old_generation ~= playlist_generation or old_identity ~= opts.identity) then ready = false end
+        publish(false)
+    end)
+    mp.add_hook('on_unload', 50, function()
+        publish(true)
+        queue_final()
+    end)
+end
 
 mp.observe_property('pause', 'bool', function() publish(true) end)
 mp.register_event('seek', function() publish(true) end)

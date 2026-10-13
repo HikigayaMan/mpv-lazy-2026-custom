@@ -39,6 +39,8 @@ class PackageCustomUpdateTests(unittest.TestCase):
         self.provenance = self.root / "provenance.json"
         self.evidence = {"exeSha256": pack.sha256(binary), "frozenHealthPassed": True, "frozenWebSocketPassed": True,
                          "frozenPlaybackHttpPassed": True,
+                         "frozenWebPlaylistPassed": True,
+                         "frozenWebPlaylistHierarchyPassed": True,
                          "brotliBinaryIncluded": True, "sourceInputs": {name: pack.sha256((self.repo / name).read_bytes()) for name in pack.BRIDGE_INPUTS}}
         self.provenance.write_text(json.dumps(self.evidence))
         self.notices = self.root / "notices.txt"
@@ -94,6 +96,28 @@ class PackageCustomUpdateTests(unittest.TestCase):
                     self.evidence.pop("frozenPlaybackHttpPassed", None)
                 else:
                     self.evidence["frozenPlaybackHttpPassed"] = value
+                self.provenance.write_text(json.dumps(self.evidence))
+                with self.assertRaisesRegex(ValueError, "verification"):
+                    self.build()
+
+    def test_missing_or_failed_frozen_playlist_verification_is_rejected(self):
+        for value in (None, False, "true", 1):
+            with self.subTest(value=value):
+                if value is None:
+                    self.evidence.pop("frozenWebPlaylistPassed", None)
+                else:
+                    self.evidence["frozenWebPlaylistPassed"] = value
+                self.provenance.write_text(json.dumps(self.evidence))
+                with self.assertRaisesRegex(ValueError, "verification"):
+                    self.build()
+
+    def test_missing_or_failed_frozen_hierarchy_verification_is_rejected(self):
+        for value in (None, False, "true", 1):
+            with self.subTest(value=value):
+                if value is None:
+                    self.evidence.pop("frozenWebPlaylistHierarchyPassed", None)
+                else:
+                    self.evidence["frozenWebPlaylistHierarchyPassed"] = value
                 self.provenance.write_text(json.dumps(self.evidence))
                 with self.assertRaisesRegex(ValueError, "verification"):
                     self.build()

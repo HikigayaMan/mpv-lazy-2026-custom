@@ -48,11 +48,16 @@ class Ipc:
         self.value = snapshot()
         self.commands = []
         self.closed = False
+        self.errors = {}
 
     async def command(self, command):
         self.commands.append(command)
         if self.closed:
-            raise OSError("fixture IPC closed")
+            raise FileNotFoundError(2, "fixture named pipe missing")
+        if self.errors.get(command[1]):
+            raise self.errors[command[1]].pop(0)
+        if command == ["get_property", "pid"]:
+            return 12345
         return copy.deepcopy(self.value)
 
 

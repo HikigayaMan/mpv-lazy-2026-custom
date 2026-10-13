@@ -552,6 +552,8 @@ end
 
 function load_danmaku_for_url(path)
     local cid = mp.get_opt("cid")
+    local playlist = mp.get_property_native('user-data/mpv-lazy/web-playlist/current')
+    if type(playlist) == 'table' and playlist.path == path then cid = tostring(playlist.cid or '') end
     local has_cid = type(cid) == "string" and #cid <= 20 and cid:match("^%d+$") and tonumber(cid) > 0
     if has_cid or path:find('bilibili.com') or path:find('bilivideo.c[nom]+') then
         load_danmaku_for_bilibili(path)

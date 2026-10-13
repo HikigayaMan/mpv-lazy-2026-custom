@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
 
 from PyInstaller.archive.readers import CArchiveReader
 from websockets.asyncio.client import connect
@@ -28,6 +29,79 @@ def free_port() -> int:
 def request(port: int, endpoint: str) -> dict:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/{endpoint}", timeout=2) as response:
         return json.load(response)
+
+
+def verify_frozen_web_playlist(http_port: int) -> None:
+    """Exercise the frozen HTTP registry and standard M3U without site auth."""
+    nonce = uuid.uuid4().hex
+    client_id, playlist_id = "progress-http-" + nonce, "playlist-" + nonce
+    session_id = "progress-frozen-" + nonce[:16]
+    base = f"http://127.0.0.1:{http_port}"
+
+    def action(kind: str, **payload) -> dict:
+        probe = urllib.request.Request(base + "/playback-progress",
+            data=json.dumps({"clientId": client_id, "request": {"type": kind, **payload}}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(probe, timeout=3) as response:
+            assert response.status == 200 and "Access-Control-Allow-Origin" not in response.headers
+            return json.load(response)["reply"]
+
+    items = [{"itemId": "1001:2002", "aid": "1001", "cid": "2002", "bvid": "BV1fixture", "p": 1,
+              "title": "Frozen fixture part 1", "duration": 120,
+              "pageUrl": "https://www.bilibili.com/video/BV1fixture?p=1"},
+             {"itemId": "1001:2003", "aid": "1001", "cid": "2003", "bvid": "BV1fixture", "p": 2,
+              "title": "Frozen fixture part 2", "duration": 180,
+              "pageUrl": "https://www.bilibili.com/video/BV1fixture?p=2"}]
+    registered = False
+    try:
+        reply = action("registerWebPlaylist", requestId="frozen-playlist-register", playlistId=playlist_id,
+            sessionId=session_id, pipeName="mpv-lazy-" + session_id, items=items,
+            selectedItemId="1001:2003", initialPosition=12.5)
+        registered = True
+        assert reply["type"] == "webPlaylistRegistered" and reply["requestId"] == "frozen-playlist-register"
+        assert reply["playlistId"] == playlist_id and reply["sessionId"] == session_id and reply["selectedIndex"] == 1
+        assert len(reply["items"]) == 2 and [item["itemId"] for item in reply["items"]] == ["1001:2002", "1001:2003"]
+        playlist_url = f"{base}/web-playlist/{playlist_id}/list.m3u"
+        assert reply["playlistUrl"] == playlist_url
+        expected = ("#EXTM3U\n#EXTINF:120,Frozen fixture part 1\n" +
+            f"{base}/web-playlist/{playlist_id}/item/1001:2002\n" +
+            "#EXTINF:180,Frozen fixture part 2\n" + f"{base}/web-playlist/{playlist_id}/item/1001:2003\n").encode()
+        for method in ("GET", "HEAD"):
+            with urllib.request.urlopen(urllib.request.Request(playlist_url, method=method), timeout=3) as response:
+                assert response.status == 200
+                assert response.headers.get_content_type() == "application/vnd.apple.mpegurl"
+                assert response.headers.get("Cache-Control") == "no-store"
+                assert "Access-Control-Allow-Origin" not in response.headers
+                assert int(response.headers["Content-Length"]) == len(expected)
+                assert response.read() == (expected if method == "GET" else b"")
+        stopped = action("stopWebPlaylist", playlistId=playlist_id)
+        assert stopped["playlistId"] == playlist_id
+        registered = False
+        for index, item in enumerate(items):
+            item.update({"sectionId": "main", "sectionTitle": "Collection section", "videoId": "1001",
+                "videoTitle": "Frozen multipart video", "partTitle": f"P{index + 1}", "partCount": 2, "order": index})
+        begun = action("registerWebPlaylist", requestId="frozen-hierarchy-begin", chunked=True,
+            playlistId=playlist_id, sessionId=session_id, pipeName="mpv-lazy-" + session_id,
+            selectedItemId="1001:2003", collectionId="fixture-season", collectionTitle="Frozen collection")
+        registered = True
+        assert begun["type"] == "webPlaylistUploadStarted" and begun["nextChunkIndex"] == 0
+        for index, item in enumerate(items):
+            appended = action("appendWebPlaylistItems", playlistId=playlist_id, chunkIndex=index, items=[item])
+            assert appended["nextChunkIndex"] == index + 1 and appended["itemCount"] == index + 1
+        committed = action("commitWebPlaylist", playlistId=playlist_id, expectedItemCount=2)
+        assert committed["type"] == "webPlaylistRegistered" and committed["itemCount"] == 2
+        assert "items" not in committed and committed["collectionTitle"] == "Frozen collection"
+        page = action("getWebPlaylistItems", playlistId=playlist_id, offset=0, limit=1)
+        assert page["nextOffset"] == 1 and page["items"][0]["videoTitle"] == "Frozen multipart video"
+        page = action("getWebPlaylistItems", playlistId=playlist_id, offset=1, limit=1)
+        assert page["nextOffset"] is None and page["items"][0]["partCount"] == 2
+        with urllib.request.urlopen(playlist_url, timeout=3) as response:
+            assert response.read() == expected
+    finally:
+        if registered:
+            stopped = action("stopWebPlaylist", requestId="frozen-playlist-stop", playlistId=playlist_id)
+            assert stopped["type"] == "webPlaylistStopped" and stopped["playlistId"] == playlist_id
+            assert all(entry["playlistId"] != playlist_id for entry in request(http_port, "status")["webPlaylists"])
 
 
 async def verify_websocket(http_port: int, ws_port: int) -> None:
@@ -107,6 +181,9 @@ def main() -> None:
             assert type(health.get("playbackProgressApiVersion")) is int and health["playbackProgressApiVersion"] == 1
             assert type(health.get("playbackProgressHttpApiVersion")) is int and health["playbackProgressHttpApiVersion"] == 1
             assert health["playbackProgressProviders"] == ["bilibili", "web"]
+            assert type(health.get("webPlaylistApiVersion")) is int and health["webPlaylistApiVersion"] == 1
+            assert type(health.get("webPlaylistHierarchyApiVersion")) is int and health["webPlaylistHierarchyApiVersion"] == 1
+            assert type(health.get("webPlaylistChunkApiVersion")) is int and health["webPlaylistChunkApiVersion"] == 1
             probe = urllib.request.Request(f"http://127.0.0.1:{http_port}/playback-progress",
                 data=json.dumps({"clientId": "progress-http-" + "a" * 32, "request": {
                     "type": "getPlaybackProgress", "requestId": "frozen-http-test", "provider": "bilibili",
@@ -117,6 +194,7 @@ def main() -> None:
                 reply = json.load(response)["reply"]
                 assert reply["type"] == "playbackProgressState" and reply["requestId"] == "frozen-http-test"
                 assert reply["apiVersion"] == 1 and reply["provider"] == "bilibili" and reply["identity"] == "bilibili:1001:2002"
+            verify_frozen_web_playlist(http_port)
             asyncio.run(verify_websocket(http_port, ws_port))
         finally:
             if process.poll() is None:
@@ -133,6 +211,8 @@ def main() -> None:
                 process.wait(timeout=5)
     evidence = {"exeSha256": sha256(binary), "frozenHealthPassed": True, "frozenWebSocketPassed": True,
                 "frozenPlaybackHttpPassed": True,
+                "frozenWebPlaylistPassed": True,
+                "frozenWebPlaylistHierarchyPassed": True,
                 "brotliBinaryIncluded": brotli_included, "python": sys.version.split()[0],
                 "packages": {name: importlib.metadata.version(name) for name in ("websockets", "Brotli", "pyinstaller")},
                 "sourceInputs": source_inputs, "compiledSourceInputs": compiled_inputs,

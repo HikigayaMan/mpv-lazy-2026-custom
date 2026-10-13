@@ -3,7 +3,7 @@
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.14.19
+// @version                 1.2.14.21
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -255,6 +255,8 @@ const translations = {
         ,handoffRelayOff: 'Off'
         ,handoffQualityAuto: 'Best available'
         ,handoffDanmakuUnavailable: 'Danmaku unavailable; playing video only'
+        ,handoffPlaylistUnavailable: 'Playlist unavailable; playing the selected video'
+        ,handoffPlaylistUpdateRequired: 'Update the local bridge to enable webpage playlists'
     },
     zh: {
         loadSuccessfully: '加载成功',
@@ -300,6 +302,8 @@ const translations = {
         ,handoffRelayOff: '关闭'
         ,handoffQualityAuto: '最高可用'
         ,handoffDanmakuUnavailable: '弹幕不可用，仍将播放视频'
+        ,handoffPlaylistUnavailable: '播放列表暂不可用，仍将播放当前视频'
+        ,handoffPlaylistUpdateRequired: '请更新本地中继以启用网页播放列表'
     }
 };
 
@@ -624,6 +628,7 @@ class BrowserMediaBridge {
         this.bootstrapPromise = undefined;
         this.playbackTransport = undefined;
         this.httpPlaybackSessions = new Set();
+        this.httpWebPlaylists = new Set();
         this.httpNeedsRebind = true;
         this.httpReboundIdentities = new Set();
         document.addEventListener(TELEGRAM_RESPONSE_EVENT, event => this.handleTelegramResponse(event.detail));
@@ -708,9 +713,10 @@ class BrowserMediaBridge {
             const deadline = Date.now() + BROWSER_RELAY_BOOTSTRAP_TIMEOUT;
             while (Date.now() < deadline) {
                 try {
-                    if (command.endsWith(' -PlaybackProgress')) {
+                    if (command.endsWith(' -PlaybackProgress') || command.endsWith(' -WebPlaylist')) {
                         const health = await fetchPlaybackBridgeHealth();
-                        if (health?.ok === true && health.playbackProgressApiVersion >= 1) return;
+                        if (health?.ok === true && health.playbackProgressApiVersion >= 1 &&
+                            (!command.endsWith(' -WebPlaylist') || health.webPlaylistApiVersion === 1)) return;
                     }
                     await this.ensureConnected();
                     return;
@@ -774,9 +780,17 @@ class BrowserMediaBridge {
                 this.httpNeedsRebind = false;
                 this.httpReboundIdentities.add(message.identity);
                 if (result.reply.activeSessionId) this.httpPlaybackSessions.add(result.reply.activeSessionId);
+                if (result.reply.playlist?.playlistId) this.httpWebPlaylists.add(result.reply.playlist.playlistId);
             }
             if (message.type === 'startPlaybackProgress') this.httpPlaybackSessions.add(result.reply.sessionId);
             if (message.type === 'stopPlaybackProgress') this.httpPlaybackSessions.delete(message.sessionId);
+            if (['registerWebPlaylist', 'commitWebPlaylist', 'getWebPlaylist'].includes(message.type)) {
+                const playlist = result.reply.playlist || result.reply;
+                if (playlist.playlistId) this.httpWebPlaylists.add(playlist.playlistId);
+                if (typeof bilibiliWebPlaylists !== 'undefined') bilibiliWebPlaylists.adopt(playlist);
+            }
+            if (result.reply.playlist && typeof bilibiliWebPlaylists !== 'undefined') bilibiliWebPlaylists.adopt(result.reply.playlist);
+            if (message.type === 'stopWebPlaylist') this.httpWebPlaylists.delete(message.playlistId);
             this.dispatchPlaybackHttpEvents(result.events);
             this.schedulePlaybackHttpPoll();
             return result.reply;
@@ -816,6 +830,7 @@ class BrowserMediaBridge {
             const finish = response => {
                 if (settled) return;
                 if (response?.status === 410) { fail('playback_progress_client_expired'); return; }
+                if (response?.status === 400) { fail('playback_http_invalid_request'); return; }
                 try {
                     const result = JSON.parse(response?.responseText || '');
                     if (response?.status !== 200 || !Array.isArray(result.events)) { fail(); return; }
@@ -835,13 +850,15 @@ class BrowserMediaBridge {
     dispatchPlaybackHttpEvents(events) {
         for (const message of events) {
             if (message?.type === 'playbackProgressStopped') this.httpPlaybackSessions.delete(message.sessionId);
-            if (message?.type === 'playbackProgress' || message?.type === 'playbackProgressStopped') {
+            if (message?.type === 'webPlaylistStopped') this.httpWebPlaylists.delete(message.playlistId);
+            if (['playbackProgress', 'playbackProgressStopped', 'resolveWebPlaylistItem', 'webPlaylistStopped'].includes(message?.type)) {
                 this.handleMessage({ data: JSON.stringify(message) });
             }
         }
     }
     schedulePlaybackHttpPoll() {
-        if (this.httpPlaybackPollTimer || this.httpPlaybackPolling || !this.httpPlaybackSessions.size) return;
+        if (this.playbackTransport !== 'http' || this.httpPlaybackPollTimer || this.httpPlaybackPolling ||
+            (!this.httpPlaybackSessions.size && !this.httpWebPlaylists.size)) return;
         this.httpPlaybackPollTimer = setTimeout(async () => {
             this.httpPlaybackPollTimer = undefined;
             this.httpPlaybackPolling = true;
@@ -855,6 +872,7 @@ class BrowserMediaBridge {
     detachPlaybackHttp() {
         clearTimeout(this.httpPlaybackPollTimer); this.httpPlaybackPollTimer = undefined;
         this.httpPlaybackSessions.clear();
+        this.httpWebPlaylists.clear();
         if (this.playbackTransport === 'http' && this.httpPlaybackClientId) {
             void this.requestPlaybackHttp({ type: 'detachPlaybackProgress' }).catch(() => undefined);
         }
@@ -921,9 +939,17 @@ class BrowserMediaBridge {
         }
         let message;
         try { message = JSON.parse(event.data); } catch (error) { return; }
-        if (['playbackProgressState', 'playbackProgressSaved', 'playbackProgressStarted'].includes(message.type)) {
+        if (['playbackProgressState', 'playbackProgressSaved', 'playbackProgressStarted', 'webPlaylistRegistered',
+            'webPlaylistUploadStarted', 'webPlaylistItemsAppended', 'webPlaylistItems',
+            'webPlaylistState', 'webPlaylistItemSubmitted', 'webPlaylistItemSaved', 'webPlaylistStopped'].includes(message.type) && message.requestId) {
+            if (typeof bilibiliWebPlaylists !== 'undefined' && (message.playlist ||
+                message.type === 'webPlaylistRegistered' || message.type === 'webPlaylistState')) {
+                bilibiliWebPlaylists.adopt(message.playlist || message);
+            }
             const pending = this.pendingPlaybackRequests.get(message.requestId);
             if (pending) { this.pendingPlaybackRequests.delete(message.requestId); pending.resolve(message); }
+        } else if (message.type === 'resolveWebPlaylistItem' || message.type === 'webPlaylistStopped') {
+            if (typeof bilibiliWebPlaylists !== 'undefined') bilibiliWebPlaylists.handleMessage(message);
         } else if (message.type === 'playbackProgress' || message.type === 'playbackProgressStopped') {
             if (typeof playbackProgressSync !== 'undefined') playbackProgressSync.handleBridgeMessage(message);
         } else if (message.type === 'sourceRegistered') {
@@ -967,6 +993,14 @@ class BrowserMediaBridge {
         }
     }
     sendJson(message) {
+        if (message.type === 'stopWebPlaylist' && typeof bilibiliWebPlaylists !== 'undefined') {
+            bilibiliWebPlaylists.handleMessage({ type: 'webPlaylistStopped', playlistId: message.playlistId, reason: 'browser_stop' });
+        }
+        if (message.type === 'stopWebPlaylist' && this.playbackTransport === 'http') {
+            this.httpWebPlaylists.delete(message.playlistId);
+            void this.requestPlayback(message).catch(() => undefined);
+            return;
+        }
         if (message.type === 'stopPlaybackProgress' && this.playbackTransport === 'http') {
             this.httpPlaybackSessions.delete(message.sessionId);
             void this.requestPlayback(message).catch(() => undefined);
@@ -1724,6 +1758,433 @@ async function fetchBilibiliVideoPlayInfo(aid, cid, epid, fnval = 4048) {
 }
 // BILIBILI_STREAM_QUALITY_HELPERS_END
 
+// BILIBILI_WEB_PLAYLIST_HELPERS_START
+const BILIBILI_WEB_PLAYLIST_CHUNK_ITEMS = 100;
+const BILIBILI_WEB_PLAYLIST_CHUNK_BYTES = 48 * 1024;
+function bilibiliPlaylistText(value, fallback = '') {
+    const text = String(value || fallback).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    let title = '', bytes = 0;
+    const encoder = new TextEncoder();
+    for (const character of text) {
+        bytes += encoder.encode(character).length;
+        if (bytes > 360) break;
+        title += character;
+    }
+    return title || fallback;
+}
+function bilibiliPlaylistItem(aid, bvid, page, fallbackTitle, number = 1, hierarchy = {}) {
+    const cid = String(page?.cid || '');
+    if (!/^[1-9]\d{0,19}$/.test(String(aid || '')) || !/^[1-9]\d{0,19}$/.test(cid) ||
+        !/^BV[a-zA-Z0-9]{1,30}$/.test(String(bvid || ''))) return undefined;
+    const p = Number.isInteger(Number(page?.page)) && Number(page.page) > 0 ? Number(page.page) : number;
+    if (p > 999999) return undefined;
+    const title = bilibiliPlaylistText(page?.part, fallbackTitle || `P${p}`);
+    return { itemId: `${aid}:${cid}`, aid: String(aid), cid, bvid: String(bvid), p,
+        title: title || `P${p}`, duration: Number.isFinite(Number(page?.duration)) && Number(page.duration) > 0 ? Number(page.duration) : 0,
+        pageUrl: `https://www.bilibili.com/video/${bvid}?p=${p}`, ...hierarchy };
+}
+function discoverBilibiliWebPlaylist(data, pageUrl, selectedCid) {
+    const url = new URL(pageUrl);
+    if (url.hostname !== 'www.bilibili.com' || !/^\/video\/(?:BV[a-zA-Z0-9]+|av\d+)\/?$/.test(url.pathname)) return undefined;
+    const pages = Array.isArray(data?.pages) ? data.pages : [];
+    const selectedPage = Math.max(1, Number(url.searchParams.get('p')) || 1);
+    const selectedItemId = `${data?.aid}:${selectedCid || pages[selectedPage - 1]?.cid || data?.cid}`;
+    let candidates = [];
+    const season = data?.ugc_season;
+    const hasCollection = Array.isArray(season?.sections) && season.sections.some(section => section?.episodes?.length);
+    const collectionId = hasCollection ? `season-${season.id || data.aid}` : `video-${data.aid}`;
+    const collectionTitle = bilibiliPlaylistText(hasCollection ? season.title : data.title, '播放列表');
+    const addPages = (aid, bvid, videoTitle, videoPages, sectionId, sectionTitle) => {
+        for (let index = 0; index < videoPages.length; index++) {
+            const page = videoPages[index], partTitle = bilibiliPlaylistText(page?.part, `P${index + 1}`);
+            candidates.push(bilibiliPlaylistItem(aid, bvid,
+                { ...page, part: videoPages.length > 1 ? `${videoTitle} / ${partTitle}` : videoTitle }, videoTitle, index + 1,
+                { sectionId: String(sectionId), sectionTitle: bilibiliPlaylistText(sectionTitle, '合集'),
+                    videoId: String(aid), videoTitle: bilibiliPlaylistText(videoTitle, '视频'), partTitle,
+                    partCount: videoPages.length, order: candidates.length }));
+        }
+    };
+    if (hasCollection) {
+        for (let sectionIndex = 0; sectionIndex < season.sections.length; sectionIndex++) {
+            const section = season.sections[sectionIndex];
+            for (const episode of section?.episodes || []) {
+                const archive = episode.arc || episode.archive || {};
+                const aid = episode.aid || archive.aid, bvid = episode.bvid || archive.bvid;
+                const episodePages = Array.isArray(episode._playlistPages) ? episode._playlistPages :
+                    String(aid) === String(data.aid) && pages.length ? pages :
+                    Array.isArray(episode.pages) ? episode.pages : Array.isArray(archive.pages) ? archive.pages :
+                    [episode.page || { cid: episode.cid || archive.cid, duration: archive.duration || episode.duration }];
+                addPages(aid, bvid, episode.title || archive.title || data.title, episodePages,
+                    section.id || `section-${sectionIndex + 1}`, section.title);
+            }
+        }
+    } else if (pages.length > 1) {
+        addPages(data.aid, data.bvid, data.title, pages, 'section-1', data.title);
+    }
+    // Invalid entries must not become arbitrary pages or media URLs.
+    const seen = new Set();
+    const items = candidates.filter(item => {
+        if (!item || seen.has(item.itemId)) return false;
+        seen.add(item.itemId); return true;
+    });
+    if (items.length < 2 || !seen.has(selectedItemId)) return undefined;
+    items.forEach((item, index) => { item.order = index; });
+    return { items, selectedItemId, selectedIndex: items.findIndex(item => item.itemId === selectedItemId), collectionId, collectionTitle };
+}
+async function completeBilibiliPlaylistData(data, pageUrl, isCurrent = () => true) {
+    const season = data?.ugc_season;
+    if (!Array.isArray(season?.sections)) return data;
+    const sections = season.sections.map(section => ({ ...section, episodes: (section.episodes || []).map(episode => ({ ...episode })) }));
+    const episodes = sections.flatMap(section => section.episodes);
+    if (Number(season.ep_count) > episodes.length) throw new Error('Incomplete Bilibili collection metadata');
+    const cache = new Map([[String(data.aid), Promise.resolve(data)]]);
+    let cursor = 0, failed = false;
+    const worker = async () => {
+        try { while (cursor < episodes.length && !failed) {
+            if (!isCurrent()) throw new Error('Bilibili collection page changed');
+            const episode = episodes[cursor++], archive = episode.arc || episode.archive || {};
+            const aid = String(episode.aid || archive.aid || ''), bvid = String(episode.bvid || archive.bvid || '');
+            if (!/^[1-9]\d{0,19}$/.test(aid) || !/^BV[a-zA-Z0-9]{1,30}$/.test(bvid)) continue;
+            const explicit = Array.isArray(episode.pages) ? episode.pages : Array.isArray(archive.pages) ? archive.pages : undefined;
+            const count = Number(archive.videos || episode.videos);
+            if (aid !== String(data.aid) && (explicit?.length && Number.isInteger(count) && count > 0 && explicit.length >= count ||
+                count === 1 && (episode.page?.cid || episode.cid || archive.cid))) continue;
+            if (!cache.has(aid)) cache.set(aid, (async () => {
+                const response = await fetchBilibiliLiveJson(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`);
+                if (response.code !== 0 || String(response.data?.aid) !== aid || response.data?.bvid !== bvid ||
+                    !Array.isArray(response.data.pages) || !response.data.pages.length) throw new Error('Bilibili part metadata unavailable');
+                if (Number(response.data.videos) > response.data.pages.length) throw new Error('Incomplete Bilibili part metadata');
+                // Each view response can repeat the entire collection. Cache
+                // only public part metadata rather than N copies of that tree.
+                return { aid: response.data.aid, bvid: response.data.bvid, pages: response.data.pages };
+            })());
+            const detail = await cache.get(aid);
+            if (!isCurrent()) throw new Error('Bilibili collection page changed');
+            if (Number.isInteger(count) && count > detail.pages.length) throw new Error('Incomplete Bilibili part metadata');
+            episode._playlistPages = detail.pages;
+        } } catch (error) { failed = true; throw error; }
+    };
+    const outcomes = await Promise.allSettled(Array.from({ length: Math.min(3, episodes.length) }, worker));
+    const failure = outcomes.find(outcome => outcome.status === 'rejected');
+    if (failure) throw failure.reason;
+    return { ...data, ugc_season: { ...season, sections } };
+}
+function debugBilibiliPlaylistData(data) {
+    const season = data?.ugc_season;
+    if (!season) return;
+    const sections = Array.isArray(season.sections) ? season.sections : [];
+    const episodes = sections.flatMap(section => Array.isArray(section.episodes) ? section.episodes : []);
+    const sample = episodes.slice(0, 10);
+    const current = episodes.find(episode => String(episode.aid || episode.arc?.aid || episode.archive?.aid) === String(data.aid));
+    if (current && !sample.includes(current)) sample.push(current);
+    // Public schema diagnostics only: no account, cookie, source URL or signature.
+    console.debug?.('External Player: playlist_metadata', JSON.stringify({
+        episodeCount: Number(season.ep_count) || 0, sectionCount: sections.length, listedVideos: episodes.length,
+        samples: sample.map(episode => ({ keys: Object.keys(episode).sort(),
+            archiveVideos: Number(episode.arc?.videos || episode.archive?.videos || episode.videos) || 0,
+            pageCount: Array.isArray(episode.pages) ? episode.pages.length : Array.isArray(episode.arc?.pages) ? episode.arc.pages.length :
+                Array.isArray(episode.archive?.pages) ? episode.archive.pages.length : 0,
+            hasPage: Boolean(episode.page?.cid), current: episode === current })) }));
+}
+function bilibiliPlaylistChunks(items) {
+    const chunks = [], encoder = new TextEncoder();
+    let chunk = [], bytes = 2;
+    for (const item of items) {
+        const size = encoder.encode(JSON.stringify(item)).length;
+        if (size + 2 > BILIBILI_WEB_PLAYLIST_CHUNK_BYTES) throw new Error('Bilibili playlist item metadata too large');
+        if (chunk.length >= BILIBILI_WEB_PLAYLIST_CHUNK_ITEMS || bytes + size + (chunk.length ? 1 : 0) > BILIBILI_WEB_PLAYLIST_CHUNK_BYTES) {
+            chunks.push(chunk); chunk = []; bytes = 2;
+        }
+        bytes += size + (chunk.length ? 1 : 0); chunk.push(item);
+    }
+    if (chunk.length) chunks.push(chunk);
+    return chunks;
+}
+function normalizeBilibiliPlaylistEntry(raw, order = 0) {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const item = bilibiliPlaylistItem(raw.aid, raw.bvid, { cid: raw.cid, page: raw.p, part: raw.title, duration: raw.duration }, raw.title, raw.p,
+        { sectionId: String(raw.sectionId || 'section-1'), sectionTitle: bilibiliPlaylistText(raw.sectionTitle, '合集'),
+            videoId: String(raw.videoId || raw.aid), videoTitle: bilibiliPlaylistText(raw.videoTitle, raw.title || '视频'),
+            partTitle: bilibiliPlaylistText(raw.partTitle, raw.title || '视频'),
+            partCount: Number.isInteger(raw.partCount) && raw.partCount > 0 ? raw.partCount : 1,
+            order: Number.isInteger(raw.order) && raw.order >= 0 ? raw.order : order });
+    return item && (!raw.itemId || item.itemId === raw.itemId) ? item : undefined;
+}
+function bilibiliPlaylistContent(item) {
+    return { provider: 'bilibili', identity: `bilibili:${item.itemId}`, aid: item.aid, cid: item.cid,
+        bvid: item.bvid, page: item.p, pageUrl: item.pageUrl, duration: item.duration };
+}
+function bilibiliPlaylistVariants(variants, selected) {
+    const encoded = encodeBilibiliStreamVariants(variants, selected);
+    return (encoded?.variants || []).map(variant => {
+        const original = variants.find(item => item.url === variant.url);
+        const quality = Number(original?.quality);
+        return { ...variant, ...(Number.isInteger(quality) && quality > 0 && quality <= 100000 ? { quality } : {}) };
+    });
+}
+async function bilibiliPlaylistSubtitle(aid, cid) {
+    let timer;
+    try {
+        return await Promise.race([
+            PARSER.BILIBILI.prototype.getSubtitle.call({}, aid, cid).catch(() => undefined),
+            new Promise(resolve => { timer = setTimeout(() => resolve(undefined), 3000); })
+        ]);
+    } finally { clearTimeout(timer); }
+}
+class BilibiliWebPlaylists {
+    constructor(bridge) { this.bridge = bridge; this.playlists = new Map(); this.restoring = false; this.lastRestore = 0; }
+    adopt(value) {
+        const playlist = value?.playlist || value;
+        if (!/^playlist-[a-f0-9]{32}$/.test(String(playlist?.playlistId || '')) ||
+            !/^progress-[a-zA-Z0-9_-]{1,43}$/.test(String(playlist?.sessionId || ''))) return undefined;
+        const itemCount = Number(playlist.itemCount ?? playlist.items?.length);
+        if (!Number.isSafeInteger(itemCount) || itemCount < 2) return undefined;
+        const items = (Array.isArray(playlist.items) ? playlist.items : playlist.currentItem ? [playlist.currentItem] : [])
+            .map((item, index) => normalizeBilibiliPlaylistEntry(item, index));
+        if (items.some(item => !item) || new Set(items.map(item => item.itemId)).size !== items.length) return undefined;
+        const previous = this.playlists.get(playlist.playlistId);
+        const state = Object.assign(previous || { items: [], itemMap: new Map(), sequences: new Map(), resolving: new Map() },
+            { ...playlist, items: previous?.items || [], itemCount });
+        for (const item of items) this.addItem(state, item);
+        state.completeManifest = state.itemMap.size === itemCount;
+        if (state.completeManifest) state.items = [...state.itemMap.values()].sort((left, right) => left.order - right.order);
+        this.playlists.set(state.playlistId, state);
+        if (this.bridge.playbackTransport === 'http') {
+            this.bridge.httpWebPlaylists?.add(state.playlistId);
+            this.bridge.schedulePlaybackHttpPoll?.();
+        }
+        if (!state.completeManifest) void this.hydrate(state);
+        return state;
+    }
+    addItem(state, item) {
+        if (!state.itemMap.has(item.itemId)) state.items.push(item);
+        state.itemMap.set(item.itemId, item);
+    }
+    async hydrate(state) {
+        if (state.hydrating || this.playlists.get(state.playlistId) !== state) return;
+        state.hydrating = true; state.lastHydrate = Date.now();
+        try {
+            let offset = 0;
+            while (offset < state.itemCount) {
+                const page = await this.bridge.requestPlayback({ type: 'getWebPlaylistItems', playlistId: state.playlistId,
+                    offset, limit: BILIBILI_WEB_PLAYLIST_CHUNK_ITEMS });
+                if (this.playlists.get(state.playlistId) !== state) return;
+                if (page.type !== 'webPlaylistItems' || page.playlistId !== state.playlistId || page.itemCount !== state.itemCount ||
+                    state.revision !== undefined && page.revision !== state.revision || !Array.isArray(page.items) ||
+                    !page.items.length || page.items.length > BILIBILI_WEB_PLAYLIST_CHUNK_ITEMS) throw new Error('Invalid web playlist metadata page');
+                const entries = page.items.map((item, index) => normalizeBilibiliPlaylistEntry(item, offset + index));
+                if (entries.some(item => !item)) throw new Error('Invalid web playlist metadata item');
+                for (const item of entries) this.addItem(state, item);
+                const expected = offset + entries.length;
+                if (expected > state.itemCount || page.nextOffset !== (expected === state.itemCount ? null : expected)) {
+                    throw new Error('Invalid web playlist metadata cursor');
+                }
+                offset = expected;
+            }
+            state.items = [...state.itemMap.values()].sort((left, right) => left.order - right.order);
+            state.completeManifest = state.itemMap.size === state.itemCount;
+        } catch (error) { state.hydrationFailed = true; }
+        finally { state.hydrating = false; }
+    }
+    async ensureBridge() {
+        let health;
+        try { health = await fetchPlaybackBridgeHealth(); } catch (error) {
+            await this.bridge.bootstrapLocalBridge(`${this.bridge.bootstrapCommand} -WebPlaylist`);
+            health = await fetchPlaybackBridgeHealth();
+        }
+        if (health?.ok !== true || health.webPlaylistApiVersion !== 1 ||
+            health.webPlaylistHierarchyApiVersion !== 1 || health.webPlaylistChunkApiVersion !== 1) {
+            const error = new Error('Web playlist bridge update required'); error.code = 'web_playlist_update_required'; throw error;
+        }
+        await this.bridge.ensurePlaybackBridge(false);
+    }
+    async register(media, player, data, pageUrl) {
+        const found = discoverBilibiliWebPlaylist(data, pageUrl, media.bilibili?.cid);
+        if (!found) return media;
+        await this.ensureBridge();
+        this.reboundPageKey = undefined;
+        const selected = found.items[found.selectedIndex];
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        const playlistId = `playlist-${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+        const sessionId = `progress-${createBridgeRequestId().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 43)}`;
+        if (typeof playbackProgressSync !== 'undefined' && typeof progressEnabled === 'function' && progressEnabled()) playbackProgressSync.saveBrowser(true);
+        const latest = typeof newestPlaybackRecord === 'function' && typeof progressEnabled === 'function' && progressEnabled() ?
+            newestPlaybackRecord(playbackProgressSync.content?.identity === `bilibili:${selected.itemId}` ? playbackProgressSync.record : undefined,
+                readLocalPlaybackRecord(`bilibili:${selected.itemId}`)) : undefined;
+        const initialPosition = latest?.completed ? 0 : latest?.position ??
+            (typeof progressEnabled === 'function' && progressEnabled() || player.presetEvent?.syncTime ? Number(media.time) || 0 : 0);
+        let reply;
+        try {
+            const begin = await this.bridge.requestPlayback({ type: 'registerWebPlaylist', chunked: true, playlistId, sessionId,
+                pipeName: `mpv-lazy-${sessionId}`, selectedItemId: found.selectedItemId, initialPosition,
+                collectionId: found.collectionId, collectionTitle: found.collectionTitle }, true);
+            if (begin.type !== 'webPlaylistUploadStarted' || begin.playlistId !== playlistId || begin.sessionId !== sessionId || begin.nextChunkIndex !== 0) {
+                throw new Error('Invalid web playlist upload acknowledgement');
+            }
+            const chunks = bilibiliPlaylistChunks(found.items);
+            let itemCount = 0;
+            for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+                const appended = await this.bridge.requestPlayback({ type: 'appendWebPlaylistItems', playlistId, chunkIndex, items: chunks[chunkIndex] });
+                itemCount += chunks[chunkIndex].length;
+                if (appended.type !== 'webPlaylistItemsAppended' || appended.playlistId !== playlistId ||
+                    appended.nextChunkIndex !== chunkIndex + 1 || appended.itemCount !== itemCount) throw new Error('Invalid web playlist upload cursor');
+            }
+            reply = await this.bridge.requestPlayback({ type: 'commitWebPlaylist', playlistId, expectedItemCount: found.items.length });
+        } catch (error) {
+            this.bridge.sendJson({ type: 'stopWebPlaylist', playlistId }); throw error;
+        }
+        const expectedUrl = `http://127.0.0.1:9002/web-playlist/${playlistId}/list.m3u`;
+        if (reply.type !== 'webPlaylistRegistered' || reply.playlistId !== playlistId || reply.sessionId !== sessionId ||
+            reply.playlistUrl !== expectedUrl || Number(reply.selectedIndex ?? reply.currentIndex) !== found.selectedIndex) {
+            this.bridge.sendJson({ type: 'stopWebPlaylist', playlistId }); throw new Error('Invalid web playlist acknowledgement');
+        }
+        const state = this.adopt({ ...reply, items: found.items, initialPosition });
+        if (!state) throw new Error('Invalid web playlist manifest');
+        const options = (media.mpvOptions || []).filter(option => !/^--(?:audio-file|sub-file|force-media-title|start|input-ipc-server|playlist-start)(?:=|$)/i.test(String(option)) &&
+            !/(?:quality-menu-(?:stream|hls)_variants=|web_(?:progress|playlist)-|(?:^|[",])cid=)/.test(String(option)));
+        options.push('--no-ytdl', `--playlist-start=${found.selectedIndex}`,
+            `--input-ipc-server="\\\\.\\pipe\\mpv-lazy-${sessionId}"`,
+            `--script-opts-append="web_playlist-id=${playlistId}"`,
+            `--script-opts-append="web_playlist-session_id=${sessionId}"`);
+        return { ...media, video: expectedUrl, audio: undefined, subtitle: undefined, title: undefined,
+            origin: undefined, referer: undefined, cookie: undefined, disableBrowserRelay: true, sensitiveUrl: true,
+            bilibili: { ...media.bilibili, cid: undefined }, time: initialPosition, mpvOptions: [...new Set(options)],
+            webPlaylist: { playlistId, sessionId, selected, items: found.items, initialPosition } };
+    }
+    async restore(pageUrl = location.href) {
+        if (this.restoring || self !== top) return;
+        this.lastRestore = Date.now(); this.restoring = true;
+        const pageKey = getAutoHandoffPageKey(pageUrl);
+        try {
+            if (this.reboundPageKey === pageKey) return;
+            const content = await resolvePlaybackContent({}, pageUrl);
+            if (!content || content.provider !== 'bilibili' || getAutoHandoffPageKey(location.href) !== pageKey) return;
+            const reply = await this.bridge.requestPlayback({ type: 'getWebPlaylist', identity: content.identity, rebind: true });
+            if (getAutoHandoffPageKey(location.href) !== pageKey) return;
+            this.adopt(reply.playlist || (reply.playlistId ? reply : undefined));
+        } catch (error) { /* An old or stopped bridge must not interrupt webpage playback. */ }
+        finally { this.restoring = false; }
+    }
+    tick() {
+        if (self !== top || !/^https:\/\/www\.bilibili\.com\/video\//.test(location.href)) return;
+        for (const state of this.playlists.values()) {
+            if (!state.completeManifest && !state.hydrating && Date.now() - (state.lastHydrate || 0) >= 5000) void this.hydrate(state);
+        }
+        if (Date.now() - this.lastRestore >= 10000 && (!this.playlists.size || !this.bridge.isPlaybackConnected?.())) void this.restore();
+    }
+    handleMessage(message) {
+        const state = this.playlists.get(message.playlistId);
+        if (!state) return;
+        if (message.type === 'webPlaylistStopped') {
+            if (message.reason === 'browser_rebound') {
+                this.reboundPageKey = getAutoHandoffPageKey(location.href);
+                // This tab may display P1 while the player is on P2. Revoke
+                // every item reporter before discarding the ownership manifest.
+                if (typeof playbackProgressSync !== 'undefined') {
+                    for (const item of state.items) playbackProgressSync.reporter.cancel(`bilibili:${item.itemId}`);
+                    if (playbackProgressSync.sessionId === state.sessionId) {
+                        playbackProgressSync.sessionId = undefined;
+                        playbackProgressSync.sequence = -1;
+                    }
+                }
+            }
+            this.playlists.delete(state.playlistId); this.bridge.httpWebPlaylists?.delete(state.playlistId); return;
+        }
+        let item = state.itemMap.get(message.itemId);
+        if (!item && message.item && (!message.sessionId || message.sessionId === state.sessionId)) {
+            item = normalizeBilibiliPlaylistEntry(message.item);
+            if (item?.itemId === message.itemId) this.addItem(state, item);
+            else item = undefined;
+        }
+        if (message.type !== 'resolveWebPlaylistItem' || !item || !Number.isInteger(message.generation) || message.generation < 1) return;
+        if (Number(state.resolving.get(item.itemId) || 0) >= message.generation) return;
+        state.resolving.set(item.itemId, message.generation);
+        void this.resolveItem(state, item, message);
+    }
+    async resolveItem(state, item, message) {
+        let media, error;
+        try {
+            const settings = currentConfig.global.parser.bilibili;
+            const data = await fetchBilibiliVideoPlayInfo(item.aid, item.cid);
+            const variants = parseBilibiliDashStreams(data, settings.preferredCodec);
+            const selected = selectBilibiliStreamVariant(variants, settings.preferredQuality);
+            if (!selected) throw new Error('No available playlist stream');
+            let subtitle;
+            if (settings.preferredSubtitle && settings.preferredSubtitle !== 'off') {
+                subtitle = await bilibiliPlaylistSubtitle(item.aid, item.cid);
+            }
+            // Completed EOF snapshots restart loops at zero. Returning to an
+            // unfinished part resumes its own position rather than the previous CID.
+            const remembered = typeof newestPlaybackRecord === 'function' && progressEnabled() ?
+                newestPlaybackRecord(message.resumeRecord, readLocalPlaybackRecord(`bilibili:${item.itemId}`)) : undefined;
+            const position = remembered?.completed ? 0 : remembered?.position ??
+                (message.first === true ? message.initialPosition ?? state.initialPosition ?? 0 : 0);
+            media = { video: selected.url, audio: selected.audio_url, subtitle, title: item.title, aid: item.aid, cid: item.cid,
+                bvid: item.bvid, pageUrl: item.pageUrl, identity: `bilibili:${item.itemId}`, duration: item.duration,
+                position: Number.isFinite(Number(position)) && Number(position) >= 0 ? Number(position) : 0,
+                variants: bilibiliPlaylistVariants(variants, selected) };
+        } catch (failure) { error = 'playlist_resolve_failed'; }
+        if (this.playlists.get(state.playlistId) !== state || state.resolving.get(item.itemId) !== message.generation) return;
+        const submission = { type: 'submitWebPlaylistItem', playlistId: state.playlistId,
+            itemId: item.itemId, generation: message.generation, media: media || null, ...(error ? { error } : {}) };
+        for (let attempt = 0; attempt < 2; attempt++) {
+            if (this.playlists.get(state.playlistId) !== state || state.resolving.get(item.itemId) !== message.generation) return;
+            try { await this.bridge.requestPlayback(submission); return; }
+            catch (failure) {
+                const disconnected = failure?.message === 'Playback bridge disconnected';
+                const expired = failure?.code === 'playback_progress_client_expired';
+                const retryable = disconnected || expired || ['playback_request_timeout', 'playback_http_unavailable'].includes(failure?.code);
+                if (attempt > 0 || !retryable) break;
+                if (disconnected || expired) {
+                    try {
+                        const owned = await this.bridge.requestPlayback({ type: 'getWebPlaylist', playlistId: state.playlistId,
+                            identity: `bilibili:${item.itemId}`, rebind: true });
+                        const playlist = owned.playlist || owned;
+                        if (playlist.playlistId !== state.playlistId || playlist.sessionId !== state.sessionId) break;
+                    } catch (rebindFailure) { break; }
+                }
+            }
+        }
+        // Rebinding can resend the same pending generation after a failed
+        // delivery. Keep newer selections protected, but allow that retry.
+        if (this.playlists.get(state.playlistId) === state && state.resolving.get(item.itemId) === message.generation) {
+            state.resolving.delete(item.itemId);
+        }
+    }
+    progressState(message) {
+        for (const state of this.playlists.values()) {
+            const item = state.itemMap.get(String(message.identity || '').replace(/^bilibili:/, ''));
+            if (item && message.sessionId === state.sessionId && (!message.playlistId || message.playlistId === state.playlistId)) return { state, item };
+        }
+        return undefined;
+    }
+}
+const bilibiliWebPlaylists = new BilibiliWebPlaylists(bilibiliMediaBridge);
+async function prepareBilibiliPlaylistLaunch(media, player) {
+    const pageUrl = location.href, url = new URL(pageUrl), pageKey = getAutoHandoffPageKey(pageUrl);
+    if (!isRelayPlayer(player) || self !== top || url.hostname !== 'www.bilibili.com' ||
+        !/^\/video\/(?:BV[a-zA-Z0-9]+|av\d+)\/?$/.test(url.pathname) || media.webPlaylist) return media;
+    try {
+        let data = currentParser?.bilibiliVideoData;
+        if (!data || String(data.aid) !== String(media.bilibili?.aid)) {
+            const id = url.pathname.match(/\/(BV[a-zA-Z0-9]+|av\d+)/)[1];
+            const response = await fetchBilibiliLiveJson(`https://api.bilibili.com/x/web-interface/view?${id.startsWith('BV') ? `bvid=${id}` : `aid=${id.slice(2)}`}`);
+            if (response.code !== 0) return media;
+            data = response.data;
+        }
+        debugBilibiliPlaylistData(data);
+        data = await completeBilibiliPlaylistData(data, pageUrl, () => getAutoHandoffPageKey(location.href) === pageKey);
+        if (getAutoHandoffPageKey(location.href) !== pageKey) return media;
+        return await bilibiliWebPlaylists.register(media, player, data, pageUrl);
+    } catch (error) {
+        if (getAutoHandoffPageKey(location.href) !== pageKey) return media;
+        console.warn('External Player: web_playlist_unavailable');
+        showToast(error?.code === 'web_playlist_update_required' ? translation.handoffPlaylistUpdateRequired : translation.handoffPlaylistUnavailable);
+        return media;
+    }
+}
+// BILIBILI_WEB_PLAYLIST_HELPERS_END
+
 // PLAYBACK_PROGRESS_HELPERS_START
 const PLAYBACK_PROGRESS_STORAGE = 'playback-progress-v1';
 function progressEnabled() { return currentConfig?.global?.playbackProgressSync !== false; }
@@ -1782,6 +2243,9 @@ async function resolvePlaybackContent(media = {}, pageUrl = location.href) {
     const video = playbackVideoElement();
     if (isProgressLivePage(pageUrl, currentParser?.parserKey, video)) return undefined;
     const page = typeof unsafeWindow === 'object' ? unsafeWindow : window;
+    if (media.webPlaylist?.selected && typeof bilibiliPlaylistContent === 'function') {
+        return bilibiliPlaylistContent(media.webPlaylist.selected);
+    }
     if (url.hostname === 'www.bilibili.com') {
         // PGC and interactive branches require their own history semantics; never reuse a UGC CID.
         if (/^\/bangumi\//.test(url.pathname)) return undefined;
@@ -2002,6 +2466,7 @@ class PlaybackProgressSync {
             const bridge = await this.bridge.requestPlayback({ type: 'getPlaybackProgress', ...this.bridgeContent(content) }).catch(() => undefined);
             if (generation !== this.generation || this.content?.identity !== content.identity) return;
             this.sessionId = this.browserTouched ? undefined : bridge?.activeSessionId;
+            if (bridge?.playlist && typeof bilibiliWebPlaylists !== 'undefined') bilibiliWebPlaylists.adopt(bridge.playlist);
             this.record = newestPlaybackRecord(this.record, readLocalPlaybackRecord(content.identity), bridge?.record);
             if (this.browserTouched) this.saveBrowser(true, true, true);
             const account = await accountPromise;
@@ -2098,7 +2563,25 @@ class PlaybackProgressSync {
         }
     }
     handleBridgeMessage(message) {
-        if (!progressEnabled() || !this.content || message.identity !== this.content.identity ||
+        if (!progressEnabled()) return;
+        const playlistProgress = typeof bilibiliWebPlaylists !== 'undefined' && bilibiliWebPlaylists.progressState(message);
+        if (playlistProgress && message.type === 'playbackProgress' && message.identity !== this.content?.identity) {
+            const { state, item } = playlistProgress;
+            if (message.source !== 'mpv' || !Number.isInteger(message.sequence) ||
+                message.sequence <= (state.sequences.get(item.itemId) ?? -1) || !validPlaybackRecord(message)) return;
+            const content = bilibiliPlaylistContent(item);
+            const previous = readLocalPlaybackRecord(content.identity);
+            const record = { position: Number(message.position), duration: Number(message.duration) || content.duration,
+                updatedAt: Number(message.updatedAt), paused: message.paused === true, ended: message.ended === true,
+                completed: message.completed === true, source: 'mpv' };
+            state.sequences.set(item.itemId, message.sequence);
+            if (newestPlaybackRecord(previous, record) !== record) return;
+            saveLocalPlaybackRecord(content.identity, record);
+            this.reporter.enqueue(content, record, record.ended || record.paused && !previous?.paused ||
+                previous && record.position < previous.position - 2);
+            return;
+        }
+        if (!this.content || message.identity !== this.content.identity ||
             !this.sessionId || message.sessionId !== this.sessionId) return;
         if (getAutoHandoffPageKey(this.content.pageUrl) !== getAutoHandoffPageKey(location.href) ||
             typeof getAutomaticHandoffKey === 'function' && this.boundAutomaticKey !== getAutomaticHandoffKey()) return;
@@ -2139,12 +2622,13 @@ class PlaybackProgressSync {
             latest = restartCompleted(newestPlaybackRecord(local, state.record));
             if (latest) saveLocalPlaybackRecord(content.identity, latest);
             if (generation !== this.generation || this.content?.identity !== content.identity) return media;
-            sessionId = `progress-${createBridgeRequestId().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 43)}`;
+            sessionId = media.webPlaylist?.sessionId || `progress-${createBridgeRequestId().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 43)}`;
             // An active page's latest position includes backwards and zero-second seeks.
             const position = latest?.position ?? Number(media.time) ?? 0;
             const started = await this.bridge.requestPlayback({ type: 'startPlaybackProgress', ...this.bridgeContent(content),
                 sessionId, pipeName: `mpv-lazy-${sessionId}`, position: Number.isFinite(position) ? position : 0,
-                duration: Number(latest?.duration) || content.duration, updatedAt: latest?.updatedAt || Date.now() }, true);
+                duration: Number(latest?.duration) || content.duration, updatedAt: latest?.updatedAt || Date.now(),
+                ...(media.webPlaylist ? { playlistId: media.webPlaylist.playlistId } : {}) }, true);
             if (generation !== this.generation || this.content?.identity !== content.identity) {
                 this.bridge.sendJson({ type: 'stopPlaybackProgress', sessionId }); return media;
             }
@@ -2321,6 +2805,12 @@ class BaseParser {
     async play(player) {
         const launchPageKey = getAutoHandoffPageKey(location.href);
         const launchContentKey = getAutomaticHandoffKey();
+        let registeredPlaylistId;
+        const cancelRegisteredPlaylist = () => {
+            if (!registeredPlaylistId) return;
+            bilibiliMediaBridge.sendJson({ type: 'stopWebPlaylist', playlistId: registeredPlaylistId });
+            registeredPlaylistId = undefined;
+        };
         const isLaunchContextCurrent = () => getAutoHandoffPageKey(location.href) === launchPageKey &&
             (launchContentKey === undefined || getAutomaticHandoffKey() === launchContentKey);
         try {
@@ -2401,12 +2891,23 @@ class BaseParser {
 
             media = this.prepareFullscreenLaunch(media, player);
 
+            if (typeof prepareBilibiliPlaylistLaunch === 'function') media = await prepareBilibiliPlaylistLaunch(media, player);
+            registeredPlaylistId = media.webPlaylist?.playlistId;
+            if (!isLaunchContextCurrent()) {
+                cancelRegisteredPlaylist();
+                return;
+            }
+
             if (typeof playbackProgressSync !== 'undefined') media = await playbackProgressSync.prepareLaunch(media, player);
+
+            // Saved custom play events can predate playlists. Clear their global
+            // start option after progress preparation; every item has its own start.
+            if (media.webPlaylist) media.time = undefined;
 
             if (!player.presetEvent.syncTime && !media.playbackProgressSync) {
                 media.time = undefined;
             }
-            if (!isLaunchContextCurrent()) return;
+            if (!isLaunchContextCurrent()) { cancelRegisteredPlaylist(); return; }
 
             if (player.playEvent) {
                 try {
@@ -2502,6 +3003,7 @@ class BaseParser {
                 parser.pause();
             }
         } catch (error) {
+            cancelRegisteredPlaylist();
             updateHandoffStatus('failed');
             showToast(translation.loadFail + ': ' + error.message);
         } finally {
@@ -3095,6 +3597,7 @@ const PARSER = {
                 method: 'GET',
                 credentials: 'include'
             })).json();
+            this.bilibiliVideoData = response.data;
 
             let aid = response.data.aid;
             let cid = response.data.cid;
@@ -7521,6 +8024,7 @@ async function init(url) {
     translation = translations[currentConfig.global.language];
     currentParser = matchParser(currentConfig.global.parser, url) || matchParser(defaultConfig.global.parser, url);
     if (typeof playbackProgressSync !== 'undefined') void playbackProgressSync.resetPage(url);
+    if (typeof bilibiliWebPlaylists !== 'undefined') void bilibiliWebPlaylists.restore(url);
     if (!currentParser && self === top && currentConfig.global.resourceSniffing !== false) {
         const minimumPerformanceStartTime = previousUrl ?
             Math.max(0, performance.now() - REFRESH_INTERVAL * 2) :
@@ -7555,4 +8059,5 @@ setInterval(() => {
     }
     scheduleAutomaticHandoff();
     if (typeof playbackProgressSync !== 'undefined') void playbackProgressSync.tick();
+    if (typeof bilibiliWebPlaylists !== 'undefined') bilibiliWebPlaylists.tick();
 }, REFRESH_INTERVAL);

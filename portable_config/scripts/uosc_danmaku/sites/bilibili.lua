@@ -179,10 +179,24 @@ end
 
 local function download_bilibili_danmaku(path, cid, from_menu, callback)
     callback = callback or function() end
+    local playlist = mp.get_property_native('user-data/mpv-lazy/web-playlist/current')
+    if type(playlist) ~= 'table' or playlist.path ~= path then playlist = nil end
     local url = "https://comment.bilibili.com/" .. cid .. ".xml"
     local args = build_curl_args(url)
 
     call_cmd_async(args, function(error, out)
+        if mp.get_property('path') ~= path then
+            callback(false)
+            return
+        end
+        if playlist then
+            local current = mp.get_property_native('user-data/mpv-lazy/web-playlist/current')
+            if type(current) ~= 'table' or current.playlistId ~= playlist.playlistId
+                or current.generation ~= playlist.generation or current.itemId ~= playlist.itemId then
+                callback(false)
+                return
+            end
+        end
         if error then
             show_message("HTTP request failed, see console for details", 5)
             msg.error(error)
@@ -202,6 +216,9 @@ end
 -- 为 bilibli 网站的视频播放加载弹幕
 function load_danmaku_for_bilibili(path, callback)
     local cid, danmaku_id = get_cid()
+    local playlist = mp.get_property_native('user-data/mpv-lazy/web-playlist/current')
+    if type(playlist) == 'table' and playlist.path == path
+        and tostring(playlist.cid or ''):match('^%d+$') then cid = tostring(playlist.cid) end
     if danmaku_id ~= nil then
         mp.commandv('sub-remove', danmaku_id)
     end

@@ -11,6 +11,8 @@
 - `smoke_test_danmaku_handoff_preferences.py`：同一隔离配置中验证直播与新视频进程的开关、样式和帧率继承，首次不预填显示偏好；离线 XML 与全屏 CLI 参数测试不替代真实网页交接验证。
 - `smoke_test_cached_thumbnails.py`：本地 HTTP 网络视频上的真实 uosc 悬停，验证缓存内预览、未缓存清图、零新增网络请求及播放状态保持，见 [缓存缩略图说明](../../docs/scripts/cached-thumbnails.md)。
 - `smoke_test_web_progress.py`：真实 MPV／Windows IPC／WebSocket 或 HTTP 进度兜底／本地 HTTP，验证双向续播、倒退及零秒、品质切换、网页断开后保存和分 P／换文件隔离，见 [进度同步](../../docs/scripts/playback-progress.md)。
+- `smoke_test_web_playlist.py`：真实 MPV 原生条目、选集、乱序、单曲／列表循环及品质切换保留列表的离线冒烟验证。
+- `smoke_test_web_playlist_hierarchy.py`：真实 MPV/uosc 上的 1001 条目完整合集层级验证，包含 3 P／4 P、单 P、分块交接、展开／折叠和乱序后点选。
 
 打包脚本负责结构验证，播放验证脚本负责行为验证。
 
@@ -250,7 +252,37 @@ python tools\release\smoke_test_mpv.py --no-window
 - `--ignore-warning <text>`：忽略某类 warning，可重复传入。
 - `--extra-arg <arg>`：追加任意 mpv 参数，可重复传入。
 
+## 完整合集层级与 1001 条目验证
+
+External Player **1.2.14.21** 的源码／本机更新使用完整合集、视频、分 P 层级菜单，尚未包含在上述 `.19` 累计 Release 中。完整分 P 不设两条或 500 条硬限；清单公开元数据预算为 32 MiB，通过分块注册、分页恢复和分块 IPC 传递，超过预算明确拒绝，避免输出被静默截断的合集。
+
+在 Windows 仓库根目录、已安装中继 Python 开发依赖的环境运行：
+
+```powershell
+& .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe tools/release/smoke_test_web_playlist_hierarchy.py --mpv 'C:/mpv/mpv.exe' --fixture 'C:/fixtures/video.mp4' --output-dir 'tools/telegram-web-mpv-bridge/build/web-playlist-hierarchy-smoke'
+```
+
+`--mpv` 指向可运行的 `mpv.exe`，`--fixture` 为可解码、至少 20 秒的本地视频。输出目录必须在仓库 `build` 目录内。工具创建隔离的媒体、进度文件和随机本机服务端口，使用模拟浏览器解析与真实 Windows IPC，结束后关闭自己创建的播放器与服务。结果写入 `result.json`，具体 MPV 日志保留在输出目录的 `run-*` 子目录。
+
+该工具实际注册 **1001 个原生条目、996 个视频**，其中两个视频分别含 3 P 和 4 P；检查全部条目保留、单 P 直接呈现、当前项祖先展开、同面板折叠不改变原生数量、乱序后仍点选正确 P，以及下一条导航和长媒体地址。循环与画质切换继续由既有 `smoke_test_web_playlist.py` 检查。树菜单只是原生列表的显示视图，组行不成为可播放条目。
+
+纯 Lua 回归覆盖分块重复提交、旧 revision、不完整清单和重复 CID 拒绝，以及层级构建、焦点保留、原生条目 ID 重扫和观察者清理：
+
+```powershell
+& .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe -m unittest discover -s tools/release -p 'test_web_playlist*_lua.py'
+```
+
+这两项真实 MPV 冒烟使用本地媒体和模拟浏览器，不代替真实 B站账号与网页联机测试。本次层级功能的实际验证范围见 [报告](../../docs/reports/2026-10-13-web-playlist-hierarchy.md)。
+
 ## 推荐发布前流程
+
+列表功能另用 `smoke_test_web_playlist.py` 验证实际 MPV／Windows IPC、匿名 HTTP 中继与模拟浏览器解析：
+
+```powershell
+python tools/release/smoke_test_web_playlist.py --mpv 'C:/mpv/mpv.exe' --fixture 'C:/fixtures/video.mp4' --output-dir 'tools/telegram-web-mpv-bridge/build/web-playlist-smoke'
+```
+
+测试检查第二项启动、手动选集、UOSC 乱序及下一条、单曲／列表循环、画质切换保留列表与位置、各项进度和媒体参数。只使用本地媒体，不验证真实 B站鉴权。冻结 EXE 烟测额外验证 `webPlaylistApiVersion: 1` 与两项 M3U 的 GET／HEAD；未来累计打包要求 `frozenWebPlaylistPassed` 为布尔 `true`。
 
 1. 在 `mpv-lazy-26_github` 中完成配置或脚本修改。
 2. 运行 `python tools\release\package_release.py` 生成并解压验证分类包。

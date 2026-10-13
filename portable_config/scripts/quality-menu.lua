@@ -695,13 +695,13 @@ local function is_valid_stream_url(url)
         and not url:find('[%c%s]') and url:match('^https?://[^/?#]+/.+') ~= nil
 end
 
-local function parse_stream_variants(value)
+local function parse_stream_variants(value, raw_json)
     if value == '' then return nil end
     if type(value) ~= 'string' or #value > 24576 + OPTION_LENGTH_PREFIX_LIMIT then
         msg.warn('ignoring stream_variants: encoded list is too large')
         return nil
     end
-    local decoded = percent_decode(value, 24576)
+    local decoded = raw_json and value or percent_decode(value, 24576)
     local parsed = decoded and utils.parse_json(decoded)
     if type(parsed) ~= 'table' or #parsed < 1 or #parsed > 16 then
         msg.warn('ignoring stream_variants: invalid variant list')
@@ -746,6 +746,13 @@ local function parse_stream_variants(value)
 end
 
 local stream_variants = parse_stream_variants(opts.stream_variants)
+local launch_stream_variants = stream_variants
+local function playlist_media(url)
+    local media = mp.get_property_native('user-data/mpv-lazy/web-playlist/current')
+    if type(media) ~= 'table' or media.path ~= url or type(media.identity) ~= 'string'
+        or not media.identity:match('^bilibili:%d+:%d+$') then return nil end
+    return media
+end
 
 local function is_direct_hls_url(url)
     if not url then return false end
@@ -1118,6 +1125,14 @@ end
 ---@param url string | nil
 ---@return Data | nil
 local function refresh_hls_data(url)
+    local media = playlist_media(url)
+    if media then
+        stream_variants = parse_stream_variants(utils.format_json(media.variants or {}), true)
+        local data = stream_variants and create_hls_data_from_url_variants(media.video, stream_variants, true)
+        if data then data.playlist_stream = true; url_data[url] = data; return data end
+        return nil
+    end
+    stream_variants = launch_stream_variants
     local stream_data = stream_variants and create_hls_data_from_url_variants(url, stream_variants, true)
     if stream_data then
         stream_data.switch_failed = url_data[url] and url_data[url].switch_failed
@@ -1373,6 +1388,15 @@ local function set_format(url, video_format, audio_format)
     end
     local data = url_data[url]
     if not data then return end
+
+    if data.playlist_stream then
+        if data.video_active_id == video_format then return end
+        local media = playlist_media(url)
+        local variants = media and parse_stream_variants(utils.format_json(media.variants or {}), true)
+        if not variants or not find_hls_variant(video_format, variants) then return end
+        mp.commandv('script-message-to', 'web_playlist', 'web-playlist-quality', video_format)
+        return
+    end
 
     if data.hls and data.hls_mode == 'url' then
         if video_format == '' or (data.video_active_id == video_format and url == loaded_url) then return end
@@ -1927,6 +1951,7 @@ end)
 -- run before ytdl_hook, which uses a priority of 10
 mp.add_hook('on_load', 9, function()
     local path = mp.get_property('path')
+    if playlist_media(path) then refresh_hls_data(path); return end
     local data = url_data[path]
     local browser_variant = stream_variants and find_hls_variant(path, stream_variants)
     if browser_variant then

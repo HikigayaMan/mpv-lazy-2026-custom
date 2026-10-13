@@ -910,7 +910,7 @@ bind_command('audio', create_select_tracklist_type_menu_opener({
 bind_command('video', create_select_tracklist_type_menu_opener({
 	title = ulang._vid_submenu_title, type = 'video', prop = 'vid', load_command = 'script-binding uosc/load-video',
 }))
-bind_command('playlist', create_self_updating_menu_opener({
+local flat_playlist_opener = create_self_updating_menu_opener({
 	title = ulang._playlist_submenu_title,
 	type = 'playlist',
 	list_prop = 'playlist',
@@ -943,7 +943,11 @@ bind_command('playlist', create_self_updating_menu_opener({
 		mp.commandv('playlist-move', tostring(from - 1), tostring(to - (to > from and 0 or 1)))
 	end,
 	on_remove = function(event) mp.commandv('playlist-remove', tostring(event.value - 1)) end,
-}))
+})
+local web_playlist_menu = require('lib/web_playlist_menu')
+bind_command('playlist', function()
+	if not web_playlist_menu.open() then flat_playlist_opener() end
+end)
 bind_command('chapters', create_self_updating_menu_opener({
 	title = ulang._chapter_list_submenu_title,
 	type = 'chapters',

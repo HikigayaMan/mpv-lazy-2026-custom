@@ -343,7 +343,8 @@ function Menu:update_content_dimensions()
 			item.hint_width = text_width(item.hint, hint_opts)
 			local spacings_in_item = 1 + (item.title_width > 0 and 1 or 0)
 				+ (item.hint_width > 0 and 1 or 0) + (icon_width > 0 and 1 or 0)
-			local estimated_width = item.title_width + item.hint_width + icon_width
+			local indent = clamp(0, tonumber(item.depth) or 0, 8) * self.font_size * 1.3
+			local estimated_width = item.title_width + item.hint_width + icon_width + indent
 				+ (self.item_padding * spacings_in_item)
 			if estimated_width > max_width then max_width = estimated_width end
 		end
@@ -1474,7 +1475,8 @@ function Menu:render()
 			local item_by = item_ay + self.item_height
 			local item_center_y = item_ay + (self.item_height / 2)
 			local item_clip = (item_ay < content_rect.ay or item_by > content_rect.by) and scroll_clip or nil
-			local content_ax, content_bx = content_rect.ax + self.item_padding,
+			local indent = clamp(0, tonumber(item.depth) or 0, 8) * self.font_size * 1.3
+			local content_ax, content_bx = content_rect.ax + self.item_padding + indent,
 				content_rect.bx - self.item_padding
 			local is_selected = menu.selected_index == index
 			local item_rect_hitbox = {
@@ -1630,17 +1632,26 @@ function Menu:render()
 			end
 
 			local hint_clip_bx = title_clip_bx
-			if item.hint_width > 0 then
-				-- controls title & hint clipping proportional to the ratio of their widths
-				-- both title and hint get at least 50% of the width, unless they are smaller then that
-				local width = content_bx - content_ax - self.item_padding
-				local title_min = math.min(item.title_width, width * 0.5)
-				local hint_min = math.min(item.hint_width, width * 0.5)
-				local title_ratio = item.title_width / (item.title_width + item.hint_width)
-				title_clip_bx = math.min(
-					title_clip_bx,
-					round(content_ax + clamp(title_min, width * title_ratio, width - hint_min))
-				)
+			if item.hint_width > 0 or (item.reserve_hint and item.hint and item.hint ~= '') then
+				if item.reserve_hint then
+					-- Keep short counts and durations readable beside long collection titles.
+					-- Font fallback can render wider than the estimated text width.
+					local width = math.max(0, content_bx - content_ax - self.item_padding)
+					local hint_width = math.min(math.max(item.hint_width, utf8_length(item.hint or '') * self.font_size_hint * 0.7)
+						+ self.font_size, width * 0.5)
+					title_clip_bx = math.min(title_clip_bx, round(content_bx - hint_width - self.item_padding))
+				else
+					-- controls title & hint clipping proportional to the ratio of their widths
+					-- both title and hint get at least 50% of the width, unless they are smaller then that
+					local width = content_bx - content_ax - self.item_padding
+					local title_min = math.min(item.title_width, width * 0.5)
+					local hint_min = math.min(item.hint_width, width * 0.5)
+					local title_ratio = item.title_width / (item.title_width + item.hint_width)
+					title_clip_bx = math.min(
+						title_clip_bx,
+						round(content_ax + clamp(title_min, width * title_ratio, width - hint_min))
+					)
+				end
 			end
 
 			-- Hint

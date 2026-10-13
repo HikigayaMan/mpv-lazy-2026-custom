@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 import contextlib
+import errno
 import json
 import logging
 import math
@@ -280,6 +281,41 @@ def validate_start(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, An
     return room_id, session_id, pipe_name, validate_auth(payload.get("auth"))
 
 
+def _write_pipe_request(pipe, request: bytes, deadline: float) -> None:
+    """Write one complete newline-delimited command to a nonblocking pipe.
+
+    MPV's named-pipe buffer can be only 4 KiB. A large signed DASH quality
+    envelope must be split into chunks, including when the pipe is a message
+    pipe that cannot accept the whole remaining request in one WriteFile call.
+    """
+    if len(request) > 65536:
+        raise ValueError("oversized MPV command")
+    offset = 0
+    while offset < len(request):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("MPV IPC write timed out")
+        block = memoryview(request)[offset:offset + 4096]
+        try:
+            written = pipe.write(block)
+        except BlockingIOError as error:
+            written = getattr(error, "characters_written", 0)
+        except OSError as error:
+            if error.errno not in (errno.EAGAIN, errno.EWOULDBLOCK) and getattr(error, "winerror", None) not in (231, 232):
+                raise
+            written = 0
+        if written is None:
+            written = 0
+        if type(written) is not int or not 0 <= written <= len(block):
+            raise OSError("invalid MPV IPC write result")
+        offset += written
+        if written == 0:
+            # Never spin on PIPE_NOWAIT backpressure. The deadline also bounds
+            # a pipe whose server is alive but never drains its input buffer.
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(.01, remaining))
+
+
 class MpvPipe:
     """Small request/response client with bounded Windows pipe reads.
 
@@ -316,9 +352,7 @@ class MpvPipe:
             mode = wintypes.DWORD(1)  # PIPE_READMODE_BYTE | PIPE_NOWAIT
             if not kernel.SetNamedPipeHandleState(handle, ctypes.byref(mode), None, None):
                 raise ctypes.WinError(ctypes.get_last_error())
-            written = pipe.write(request)
-            if written != len(request):
-                raise OSError("incomplete MPV IPC command")
+            _write_pipe_request(pipe, request, time.monotonic() + 2.0)
             deadline = time.monotonic() + 2.0
             response = b""
             while time.monotonic() < deadline:

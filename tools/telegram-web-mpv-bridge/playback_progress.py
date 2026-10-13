@@ -27,6 +27,7 @@ from bilibili_danmaku import MpvPipe
 LOG = logging.getLogger("playback-progress")
 API_VERSION = 1
 SNAPSHOT_PROPERTY = "user-data/mpv-lazy/playback-progress"
+FINALS_PROPERTY = "user-data/mpv-lazy/playback-progress-finals"
 MAX_RECORDS = 1000
 MAX_STORE_BYTES = 2 * 1024 * 1024
 MAX_SECONDS = 366 * 24 * 60 * 60
@@ -39,6 +40,68 @@ IDENTITIES = {
 
 def now_ms() -> int:
     return time.time_ns() // 1_000_000
+
+
+def ipc_error_summary(error: Exception) -> dict[str, Any]:
+    """Fixed diagnostics only; IPC exceptions may include a signed media URL."""
+    error_number = getattr(error, "errno", None)
+    windows_number = getattr(error, "winerror", None)
+    missing = isinstance(error, FileNotFoundError) or error_number == 2 or windows_number in (2, 3)
+    if missing:
+        kind = "pipe_missing"
+    elif isinstance(error, TimeoutError):
+        kind = "write_timeout" if str(error) == "MPV IPC write timed out" else "response_timeout"
+    elif windows_number == 231 or error_number == 16:
+        kind = "pipe_busy"
+    elif windows_number in (109, 232, 233) or error_number == 32:
+        kind = "pipe_disconnected"
+    elif isinstance(error, RuntimeError):
+        kind = "property_unavailable" if str(error).startswith("MPV IPC command failed: property") else "command_unavailable"
+    elif isinstance(error, ValueError):
+        kind = "invalid_response"
+    else:
+        kind = "pipe_error"
+    return {"kind": kind, "errno": error_number if type(error_number) is int else None,
+            "winerror": windows_number if type(windows_number) is int else None}
+
+
+class MpvIpcAvailability:
+    """Bound retries while distinguishing a missing pipe from transient IPC."""
+    def __init__(self, retry_timeout: float = 6) -> None:
+        self.retry_timeout = retry_timeout
+        self.failures = 0
+        self.failure_started = None
+        self.last_error = None
+
+    async def failure(self, error: Exception, ipc) -> str:
+        self.failures += 1
+        self.last_error = ipc_error_summary(error)
+        if self.last_error["kind"] == "pipe_missing":
+            return "missing"
+        if self.failure_started is None:
+            self.failure_started = time.monotonic()
+        try:
+            # A script property can disappear temporarily during on_load. A
+            # successful core-property read proves the player is still alive.
+            pid = await ipc.command(["get_property", "pid"])
+        except (OSError, RuntimeError, ValueError, TimeoutError) as probe_error:
+            probe = ipc_error_summary(probe_error)
+            if probe["kind"] == "pipe_missing":
+                self.last_error = probe
+                return "missing"
+        else:
+            if type(pid) is int and pid > 0:
+                self.failure_started = None
+                return "alive"
+        return "exhausted" if time.monotonic() - self.failure_started >= self.retry_timeout else "retry"
+
+    def success(self) -> int:
+        failures = self.failures
+        self.failures, self.failure_started = 0, None
+        return failures
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"failureCount": self.failures, "lastError": self.last_error}
 
 
 def default_store_path() -> Path:
@@ -210,6 +273,12 @@ class PlaybackProgressSession:
         self.session_id = payload["sessionId"]
         self.pipe_name = payload["pipeName"]
         self.page_url = canonical_page_url(self.provider, payload["pageUrl"])
+        # Only PlaybackProgressManager can inject this manifest, after consulting
+        # the live browser-owned registry. Never trust a caller-provided mapping.
+        self.playlist_id = payload.get("playlistId")
+        self.playlist_entries = payload.get("_playlistEntries", {})
+        self.playlist = payload.get("_playlist")
+        self.final_sequence = 0
         self.owner = owner
         self.store = store
         self.ipc = ipc or MpvPipe(self.pipe_name)
@@ -224,6 +293,8 @@ class PlaybackProgressSession:
         self.last_state = None
         self.last_flush = 0.0
         self.attached = False
+        self.sample_lock = asyncio.Lock()
+        self.ipc_availability = MpvIpcAvailability()
 
     def start(self) -> None:
         self.task = asyncio.create_task(self.run())
@@ -237,7 +308,8 @@ class PlaybackProgressSession:
         if self.phase != "stopped":
             self.phase = "stopped"
             await self.send({"type": "playbackProgressStopped", "provider": self.provider,
-                             "identity": self.identity, "sessionId": self.session_id, "reason": self.reason})
+                             "identity": self.identity, "sessionId": self.session_id, "reason": self.reason,
+                             **({"playlistId": self.playlist_id} if self.playlist_id else {})})
 
     async def send(self, message: dict[str, Any]) -> None:
         owner = self.owner
@@ -251,20 +323,32 @@ class PlaybackProgressSession:
     def notification(self) -> dict[str, Any] | None:
         if self.record is None:
             return None
-        return {"type": "playbackProgress", **self.record, "sessionId": self.session_id, "sequence": self.sequence}
+        return {"type": "playbackProgress", **self.record, "sessionId": self.session_id, "sequence": self.sequence,
+                **({"playlistId": self.playlist_id} if self.playlist_id else {})}
 
     async def accept_snapshot(self, snapshot: Any) -> str:
         if not isinstance(snapshot, dict) or isinstance(snapshot.get("apiVersion"), bool) or snapshot.get("apiVersion") != API_VERSION:
             return "invalid" if self.attached else "waiting"
-        if snapshot.get("sessionId") != self.session_id or snapshot.get("identity") != self.identity:
+        if snapshot.get("sessionId") != self.session_id:
             return "changed" if self.attached else "waiting"
+        identity = snapshot.get("identity")
+        if not isinstance(identity, str):
+            return "invalid" if self.attached else "waiting"
+        if self.playlist_id:
+            if snapshot.get("playlistId") != self.playlist_id or identity not in self.playlist_entries:
+                return "changed" if self.attached else "waiting"
+            page_url = self.playlist_entries[identity]["pageUrl"]
+        else:
+            if identity != self.identity:
+                return "changed" if self.attached else "waiting"
+            page_url = self.page_url
         if snapshot.get("active") is not True:
             return "inactive" if self.attached else "waiting"
         if snapshot.get("ready") is not True:
             return "waiting"
         try:
-            record = make_record({**snapshot, "provider": self.provider, "identity": self.identity,
-                                  "pageUrl": self.page_url, "updatedAt": now_ms()}, "mpv")
+            record = make_record({**snapshot, "provider": self.provider, "identity": identity,
+                                  "pageUrl": page_url, "updatedAt": now_ms()}, "mpv")
         except ValueError:
             return "invalid" if self.attached else "waiting"
         # Missing/zero duration may be a loading state or a live stream. This
@@ -273,7 +357,10 @@ class PlaybackProgressSession:
             return "waiting"
         self.attached = True
         self.phase = "player-progress"
+        self.identity, self.page_url = identity, page_url
         state = tuple(record[key] for key in ("position", "duration", "paused", "ended", "completed"))
+        if self.playlist_id:
+            state = (identity,) + state
         changed = state != self.last_state
         old_state = self.last_state
         if changed:
@@ -281,25 +368,68 @@ class PlaybackProgressSession:
             self.record = self.store.put(record)
             self.sequence += 1
             await self.send(self.notification())
-        immediate = old_state is None or (changed and (state[2:] != old_state[2:] or abs(state[0] - old_state[0]) > 3))
+        position_index = 1 if self.playlist_id else 0
+        immediate = old_state is None or (changed and (
+            (self.playlist_id and state[0] != old_state[0]) or
+            state[position_index + 2:] != old_state[position_index + 2:] or
+            abs(state[position_index] - old_state[position_index]) > 3))
         if immediate or time.monotonic() - self.last_flush >= self.flush_interval:
             await asyncio.to_thread(self.store.flush)
 
             self.last_flush = time.monotonic()
-        return "ended" if record["ended"] else "ok"
+        # EOF closes this item, while the same IPC pipe continues with another
+        # native playlist entry (or loops the current one).
+        return "ended" if record["ended"] and not self.playlist_id else "ok"
+
+    async def accept_finals(self, finals: Any) -> None:
+        if not self.playlist_id or not isinstance(finals, list) or len(finals) > 32:
+            return
+        pending = []
+        for item in finals:
+            if not isinstance(item, dict):
+                continue
+            sequence = item.get("finalSequence")
+            if isinstance(sequence, bool) or not isinstance(sequence, int) or not self.final_sequence < sequence <= 2**53 - 1:
+                continue
+            pending.append((sequence, item.get("snapshot")))
+        for sequence, snapshot in sorted(pending, key=lambda item: item[0]):
+            if sequence <= self.final_sequence:
+                continue
+            # Invalid or foreign final snapshots cannot advance the watermark.
+            if await self.accept_snapshot(snapshot) == "ok":
+                self.final_sequence = sequence
+
+    async def sample_progress(self) -> str:
+        # A new on_load request may precede the periodic poll. The lazy resolver
+        # uses this same lock to consume EOF finals before choosing resume time.
+        async with self.sample_lock:
+            if self.playlist_id:
+                await self.accept_finals(await self.ipc.command(["get_property", FINALS_PROPERTY]))
+            return await self.accept_snapshot(await self.ipc.command(["get_property", SNAPSHOT_PROPERTY]))
 
     async def run(self) -> None:
         deadline = time.monotonic() + self.attach_timeout
         try:
             while True:
                 try:
-                    snapshot = await self.ipc.command(["get_property", SNAPSHOT_PROPERTY])
-                except (OSError, RuntimeError, TimeoutError, ValueError):
+                    outcome = await self.sample_progress()
+                    recovered = self.ipc_availability.success()
+                    if recovered:
+                        LOG.info("playback progress IPC recovered: session=%s attempts=%s", self.session_id, recovered)
+                        if self.reason.startswith("ipc_retry_"):
+                            self.reason = ""
+                except (OSError, RuntimeError, TimeoutError, ValueError) as error:
                     if self.attached:
-                        self.reason = "player_closed"
-                        return
-                    snapshot = None
-                outcome = await self.accept_snapshot(snapshot)
+                        availability = await self.ipc_availability.failure(error, self.ipc)
+                        diagnostic = self.ipc_availability.last_error
+                        if self.ipc_availability.failures == 1 or availability in ("missing", "exhausted"):
+                            LOG.warning("playback progress IPC unavailable: session=%s kind=%s errno=%s winerror=%s state=%s",
+                                        self.session_id, diagnostic["kind"], diagnostic["errno"], diagnostic["winerror"], availability)
+                        if availability in ("missing", "exhausted"):
+                            self.reason = "player_closed" if availability == "missing" else "player_ipc_unresponsive"
+                            return
+                        self.reason = "ipc_retry_" + diagnostic["kind"]
+                    outcome = "waiting"
                 if outcome not in ("ok", "waiting"):
                     self.reason = {"changed": "player_file_changed", "inactive": "player_file_changed",
                                    "invalid": "player_snapshot_invalid", "ended": "playback_ended"}[outcome]
@@ -319,12 +449,16 @@ class PlaybackProgressSession:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(self.store.flush)
             await self.send({"type": "playbackProgressStopped", "provider": self.provider,
-                             "identity": self.identity, "sessionId": self.session_id, "reason": self.reason})
+                             "identity": self.identity, "sessionId": self.session_id, "reason": self.reason,
+                             **({"playlistId": self.playlist_id} if self.playlist_id else {}),
+                             **({"ipcError": self.ipc_availability.last_error} if self.ipc_availability.last_error else {})})
 
     def snapshot(self) -> dict[str, Any]:
         return {"provider": self.provider, "identity": self.identity, "sessionId": self.session_id,
                 "phase": self.phase, "browserConnected": self.owner is not None,
-                "position": self.record.get("position") if self.record else None}
+                "position": self.record.get("position") if self.record else None,
+                **({"playlistId": self.playlist_id} if self.playlist_id else {}),
+                "reason": self.reason, "ipc": self.ipc_availability.snapshot()}
 
 
 class PlaybackProgressManager:
@@ -333,10 +467,11 @@ class PlaybackProgressManager:
         self.session_factory = session_factory
         self.sessions: dict[str, PlaybackProgressSession] = {}
         self.lock = asyncio.Lock()
+        self.playlist_registry = None
 
     def _active(self, identity: str) -> list[PlaybackProgressSession]:
         return [session for session in self.sessions.values()
-                if session.identity == identity and session.phase != "stopped"
+                if (session.identity == identity or identity in session.playlist_entries) and session.phase != "stopped"
                 and (session.task is None or not session.task.done())]
 
     async def get(self, payload: dict[str, Any], owner) -> dict[str, Any]:
@@ -347,11 +482,20 @@ class PlaybackProgressManager:
         for session in active:
             if session.owner is None:
                 session.owner = owner
+                if session.playlist_id and self.playlist_registry is not None:
+                    await self.playlist_registry.rebind(session.playlist_id, owner)
             if session.owner is owner:
                 session_id = session.session_id
+        session = self.sessions.get(session_id) if session_id else None
+        playlist = None
+        if session and session.playlist_id and self.playlist_registry is not None:
+            registered = self.playlist_registry.sessions.get(session.playlist_id)
+            if registered is not None and registered.owner is owner:
+                playlist = registered.description()
         return {"type": "playbackProgressState", "requestId": payload.get("requestId"), "apiVersion": API_VERSION,
                 "provider": provider, "identity": identity, "record": self.store.get(identity),
-                **({"activeSessionId": session_id} if session_id else {})}
+                **({"activeSessionId": session_id} if session_id else {}),
+                **({"playlistId": session.playlist_id, "playlist": playlist} if playlist else {})}
 
     async def update(self, payload: dict[str, Any], owner) -> dict[str, Any]:
         record = make_record(payload, "web")
@@ -373,6 +517,13 @@ class PlaybackProgressManager:
                 "provider": record["provider"], "identity": record["identity"], "record": saved}
 
     async def start(self, payload: dict[str, Any], owner, *, defer: bool = False) -> dict[str, Any]:
+        payload = {key: value for key, value in payload.items() if not key.startswith("_")}
+        if payload.get("playlistId") is not None:
+            if self.playlist_registry is None:
+                raise ValueError("unregistered web playlist progress session")
+            entries, description = self.playlist_registry.progress_entries(payload, owner)
+            payload = {**payload, "_playlistEntries": entries, "_playlist": description,
+                       "pageUrl": entries[payload["identity"]]["pageUrl"]}
         record = make_record(payload, "web")
         session_id, pipe_name = payload.get("sessionId"), payload.get("pipeName")
         if not isinstance(session_id, str) or not SAFE_SESSION.fullmatch(session_id) or pipe_name != "mpv-lazy-" + session_id:
@@ -380,7 +531,7 @@ class PlaybackProgressManager:
         async with self.lock:
             existing = self.sessions.get(session_id)
             if existing and existing.phase != "stopped" and (existing.task is None or not existing.task.done()):
-                if existing.owner not in (None, owner) or existing.identity != record["identity"]:
+                if existing.owner not in (None, owner) or (existing.identity != record["identity"] and record["identity"] not in existing.playlist_entries) or existing.playlist_id != payload.get("playlistId"):
                     raise ValueError("playback progress session already exists")
                 existing.owner = owner
                 return {"type": "playbackProgressStarted", "requestId": payload.get("requestId"),
@@ -417,6 +568,14 @@ class PlaybackProgressManager:
                 self.sessions.pop(session_id, None)
                 await session.stop("browser_stop")
 
+    async def stop_playlist(self, playlist_id: str, reason: str) -> None:
+        """Called only by the trusted registry when its player/relay ends."""
+        async with self.lock:
+            sessions = [session for session in self.sessions.values() if session.playlist_id == playlist_id]
+            for session in sessions:
+                self.sessions.pop(session.session_id, None)
+                await session.stop(reason)
+
     def detach_owner(self, owner) -> None:
         for session in self.sessions.values():
             if session.owner is owner:
@@ -444,7 +603,8 @@ class HttpProgressOwner:
         message = json.loads(raw)
         if message.get("type") == "playbackProgress":
             self.events = deque((item for item in self.events if not (
-                item.get("type") == "playbackProgress" and item.get("sessionId") == message.get("sessionId"))), maxlen=64)
+                item.get("type") == "playbackProgress" and item.get("sessionId") == message.get("sessionId")
+                and item.get("identity") == message.get("identity"))), maxlen=64)
         self.events.append(message)
 
     def drain(self) -> list[dict]:
@@ -455,14 +615,17 @@ class HttpProgressOwner:
 
 class HttpProgressTransport:
     """Private, bounded per-client queues for privileged userscript HTTP polling."""
-    def __init__(self, manager: PlaybackProgressManager) -> None:
+    def __init__(self, manager: PlaybackProgressManager, playlist_manager=None) -> None:
         self.manager = manager
+        self.playlist_manager = playlist_manager
         self.clients: dict[str, HttpProgressOwner] = {}
 
     def sweep(self) -> None:
         for key, owner in list(self.clients.items()):
             if time.monotonic() - owner.last_seen > 120:
                 self.manager.detach_owner(owner)
+                if self.playlist_manager is not None:
+                    self.playlist_manager.detach_owner(owner)
                 self.clients.pop(key, None)
 
     async def request(self, envelope: Any) -> tuple[dict, HttpProgressOwner, str | None]:
@@ -472,24 +635,37 @@ class HttpProgressTransport:
         request = envelope.get("request")
         if not isinstance(request, dict) or request.get("type") not in {
             "getPlaybackProgress", "updatePlaybackProgress", "startPlaybackProgress", "stopPlaybackProgress",
-            "pollPlaybackProgress", "detachPlaybackProgress"}:
+            "pollPlaybackProgress", "detachPlaybackProgress",
+            "registerWebPlaylist", "submitWebPlaylistItem", "getWebPlaylist", "stopWebPlaylist",
+            "appendWebPlaylistItems", "commitWebPlaylist", "getWebPlaylistItems"}:
             raise ValueError("invalid HTTP progress action")
         client_id, action = envelope["clientId"], request["type"]
         owner = self.clients.get(client_id)
         if owner is None:
-            if action in {"pollPlaybackProgress", "stopPlaybackProgress", "detachPlaybackProgress"}:
+            if action in {"pollPlaybackProgress", "stopPlaybackProgress", "detachPlaybackProgress", "submitWebPlaylistItem", "stopWebPlaylist", "appendWebPlaylistItems", "commitWebPlaylist"}:
                 raise LookupError("expired HTTP progress client")
             if len(self.clients) >= 32:
                 raise ValueError("too many HTTP progress clients")
             owner = self.clients[client_id] = HttpProgressOwner()
         owner.last_seen = time.monotonic()
         reply, activate = None, None
-        if action == "getPlaybackProgress":
+        if action in {"registerWebPlaylist", "submitWebPlaylistItem", "getWebPlaylist", "stopWebPlaylist", "appendWebPlaylistItems", "commitWebPlaylist", "getWebPlaylistItems"}:
+            if self.playlist_manager is None:
+                raise ValueError("web playlist is unavailable")
+            method = {"registerWebPlaylist": self.playlist_manager.register, "submitWebPlaylistItem": self.playlist_manager.submit,
+                      "getWebPlaylist": self.playlist_manager.get, "stopWebPlaylist": self.playlist_manager.stop,
+                      "appendWebPlaylistItems": self.playlist_manager.append_items, "commitWebPlaylist": self.playlist_manager.commit_upload,
+                      "getWebPlaylistItems": self.playlist_manager.get_items}[action]
+            reply = await method(request, owner)
+        elif action == "getPlaybackProgress":
             provider, identity = validate_identity(request)
             canonical_page_url(provider, request.get("pageUrl"))
             if request.get("rebind") is True:
                 for session in self.manager._active(identity):
                     if isinstance(session.owner, HttpProgressOwner) and session.owner is not owner:
+                        if session.playlist_id and self.playlist_manager is not None:
+                            await self.playlist_manager.rebind(session.playlist_id, owner)
+                            continue
                         await session.owner.send(json.dumps({"type": "playbackProgressStopped", "provider": provider,
                             "identity": identity, "sessionId": session.session_id, "reason": "browser_rebound"}))
                         session.owner = owner
@@ -504,5 +680,7 @@ class HttpProgressTransport:
             reply = {"type": "playbackProgressStopped", "requestId": request.get("requestId"), "sessionId": request.get("sessionId")}
         elif action == "detachPlaybackProgress":
             self.manager.detach_owner(owner)
+            if self.playlist_manager is not None:
+                self.playlist_manager.detach_owner(owner)
             self.clients.pop(client_id, None)
         return {"reply": reply, "events": owner.drain()}, owner, activate

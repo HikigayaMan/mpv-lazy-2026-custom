@@ -28,6 +28,7 @@ from websockets.exceptions import ConnectionClosed
 
 from bilibili_danmaku import BilibiliDanmakuManager, SessionFailure
 from playback_progress import HttpProgressTransport, PlaybackProgressManager, ProgressStore
+from web_playlist import WebPlaylistManager
 
 
 LOG = logging.getLogger("telegram-web-mpv-bridge")
@@ -71,7 +72,9 @@ class BridgeState:
         self.lock = asyncio.Lock()
         self.danmaku = BilibiliDanmakuManager()
         self.progress = PlaybackProgressManager(progress_store)
-        self.progress_http = HttpProgressTransport(self.progress)
+        self.playlists = WebPlaylistManager(self.progress, http_port)
+        self.progress.playlist_registry = self.playlists
+        self.progress_http = HttpProgressTransport(self.progress, self.playlists)
         self.browser_clients: set = set()
         self.browser_hello_count = 0
 
@@ -191,6 +194,14 @@ class BridgeState:
             await websocket.send(json.dumps(await method(payload, websocket), ensure_ascii=False))
         elif msg_type == "stopPlaybackProgress":
             await self.progress.stop(str(payload.get("sessionId") or ""), websocket)
+        elif msg_type in ("registerWebPlaylist", "submitWebPlaylistItem", "getWebPlaylist", "stopWebPlaylist", "appendWebPlaylistItems", "commitWebPlaylist", "getWebPlaylistItems"):
+            if websocket is None:
+                raise ValueError("web playlist requires a browser connection")
+            method = {"registerWebPlaylist": self.playlists.register, "submitWebPlaylistItem": self.playlists.submit,
+                      "getWebPlaylist": self.playlists.get, "stopWebPlaylist": self.playlists.stop,
+                      "appendWebPlaylistItems": self.playlists.append_items, "commitWebPlaylist": self.playlists.commit_upload,
+                      "getWebPlaylistItems": self.playlists.get_items}[msg_type]
+            await websocket.send(json.dumps(await method(payload, websocket), ensure_ascii=False))
         elif msg_type == "error":
             request_id = str(payload.get("id") or "")
             pending = self.pending.get(request_id)
@@ -305,6 +316,8 @@ async def handle_http_client(reader: asyncio.StreamReader, writer: asyncio.Strea
                                "danmakuApiVersion": 2, "danmakuProviders": ["bilibili"],
                                "playbackProgressApiVersion": 1, "playbackProgressProviders": ["bilibili", "web"],
                                "playbackProgressHttpApiVersion": 1,
+                               "webPlaylistApiVersion": 1,
+                               "webPlaylistHierarchyApiVersion": 1, "webPlaylistChunkApiVersion": 1,
                                "browserConnected": bool(state.browser_clients),
                                "browserClients": len(state.browser_clients)}).encode("utf-8")
             writer.write(http_response(200, "OK", {"Content-Type": "application/json", **health_headers}, body))
@@ -316,7 +329,7 @@ async def handle_http_client(reader: asyncio.StreamReader, writer: asyncio.Strea
             status, body, activation = 200, None, None
             try:
                 length = int(headers.get("content-length", "0"))
-                if not 0 < length <= 65536 or headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
+                if not 0 < length <= 256 * 1024 or headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
                     raise ValueError("invalid progress request")
                 envelope = json.loads(await asyncio.wait_for(reader.readexactly(length), 5))
                 result, owner, session = await state.progress_http.request(envelope)
@@ -338,11 +351,30 @@ async def handle_http_client(reader: asyncio.StreamReader, writer: asyncio.Strea
                 if activation:
                     state.progress.activate(*activation)
             return
+        if parsed.path.startswith("/web-playlist/"):
+            if method.upper() not in ("GET", "HEAD"):
+                writer.write(http_response(405, "Method Not Allowed", {"Allow": "GET, HEAD"}))
+                return
+            components = parsed.path.split("/")
+            if len(components) == 4 and components[3] == "list.m3u":
+                try:
+                    body = state.playlists.m3u(components[2])
+                    response_headers = {"Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+                                        "Content-Length": str(len(body)), "Cache-Control": "no-store"}
+                    writer.write(http_response(200, "OK", response_headers, body if method.upper() == "GET" else b""))
+                except LookupError:
+                    writer.write(http_response(404, "Not Found", body=b"web playlist unavailable"))
+            else:
+                # Stable item URLs are resolved exclusively by the installed
+                # Lua on_load hook, never redirected to credentials or media.
+                writer.write(http_response(410, "Gone", body=b"web playlist item requires MPV lazy resolution"))
+            return
         if parsed.path == "/status":
             body = json.dumps({"connected": state.connected, "video": state.video.__dict__,
                                "bridgeVersion": BRIDGE_VERSION,
                                "danmaku": state.danmaku.snapshots(),
                                "playbackProgress": state.progress.snapshots(),
+                               "webPlaylists": state.playlists.snapshots(),
                                "diagnostics": {"browserConnected": bool(state.browser_clients),
                                                "browserClients": len(state.browser_clients), "helloCount": state.browser_hello_count,
                                                **state.danmaku.diagnostics()}}, ensure_ascii=False).encode("utf-8")
@@ -450,6 +482,7 @@ async def ws_handler(websocket, state: BridgeState) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
         await state.clear_ws(websocket)
         state.progress.detach_owner(websocket)
+        state.playlists.detach_owner(websocket)
         LOG.info("userscript disconnected")
 
 
@@ -482,6 +515,7 @@ async def main_async(args: argparse.Namespace) -> None:
         await stop.wait()
     finally:
         await state.danmaku.close()
+        await state.playlists.close()
         await state.progress.close()
         http_server.close()
         ws_server.close()

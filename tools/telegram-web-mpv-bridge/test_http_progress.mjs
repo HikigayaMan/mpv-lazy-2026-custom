@@ -111,6 +111,13 @@ test('HTTP timeout and malformed replies fail with fixed codes, without retainin
     assert.equal(f.timers.size, 0);
 });
 
+test('HTTP validation failures have a distinct fixed code so stale generations are never retried as network failures', async () => {
+    const f = fixture(); await f.bridge.ensurePlaybackBridge(false);
+    f.response = { status: 400, responseText: '{"error":{"code":"playback_progress_http_invalid"}}' };
+    await assert.rejects(f.bridge.requestPlaybackHttp({ type: 'submitWebPlaylistItem' }), error => error.code === 'playback_http_invalid_request');
+    assert.equal(f.timers.size, 0);
+});
+
 test('playback bootstrap succeeds on HTTP health even when browser sockets are blocked', async () => {
     const f = fixture();
     await f.bridge.bootstrapLocalBridge('start-relay -PlaybackProgress');
@@ -136,4 +143,93 @@ test('a delayed browser takeover completes before a newer player starts, and a f
     assert.deepEqual(order, ['updatePlaybackProgress', 'startPlaybackProgress']);
     await assert.rejects(f.bridge.requestPlayback({ type: 'fail' }));
     assert.equal((await f.bridge.requestPlayback(get)).type, 'getPlaybackProgress');
+});
+
+test('playlist-only sessions keep HTTP resolution polling active when progress sync is disabled or stopped', async () => {
+    const f = fixture();
+    const playlistId = `playlist-${'a'.repeat(32)}`;
+    f.response = { status: 200, responseText: JSON.stringify({ reply: {
+        type: 'webPlaylistRegistered', requestId: 'req-3', playlistId }, events: [] }) };
+    // The response derives the request ID at runtime so the transport's correlation check is real.
+    f.context.GM.xmlHttpRequest = options => {
+        f.requests.push(options);
+        const request = JSON.parse(options.data).request;
+        options.onload({ status: 200, responseText: JSON.stringify({ reply: { type: request.type === 'registerWebPlaylist' ?
+            'webPlaylistRegistered' : 'playbackProgressStopped', requestId: request.requestId, playlistId }, events: [] }) });
+    };
+    await f.bridge.requestPlayback({ type: 'registerWebPlaylist', playlistId, sessionId: 'progress-playlist' });
+    assert.ok(f.bridge.httpWebPlaylists.has(playlistId));
+    assert.equal(f.bridge.httpPlaybackSessions.size, 0);
+    const timer = [...f.timers.values()].find(value => value.delay === 1000);
+    assert.ok(timer);
+    await f.bridge.requestPlayback({ type: 'stopPlaybackProgress', sessionId: 'progress-playlist' });
+    assert.ok(f.bridge.httpWebPlaylists.has(playlistId));
+    f.context.GM.xmlHttpRequest = options => {
+        f.requests.push(options);
+        options.onload({ status: 200, responseText: JSON.stringify({ reply: null, events: [
+            { type: 'resolveWebPlaylistItem', playlistId, itemId: '11:22', generation: 1 }
+        ] }) });
+    };
+    await timer.callback();
+    assert.equal(f.messages.at(-1).type, 'resolveWebPlaylistItem');
+    f.bridge.detachPlaybackHttp();
+    assert.equal(f.bridge.httpWebPlaylists.size, 0);
+});
+
+test('playlist bootstrap uses its capability-aware HTTP health and does not require a working WebSocket', async () => {
+    const f = fixture(); f.health.webPlaylistApiVersion = 1;
+    await f.bridge.bootstrapLocalBridge('start-relay -WebPlaylist');
+    assert.equal(f.connections(), 0); assert.equal(f.launches.length, 1);
+});
+
+test('WebSocket playlist acknowledgements resolve their pending request and do not start a competing HTTP owner', async () => {
+    const f = fixture();
+    let sent;
+    f.bridge.ensureConnected = async () => {
+        f.bridge.socket = { readyState: 1, send: raw => { sent = JSON.parse(raw); } };
+    };
+    const pending = f.bridge.requestPlayback({ type: 'submitWebPlaylistItem', playlistId: `playlist-${'a'.repeat(32)}` });
+    for (let index = 0; index < 12; index++) await Promise.resolve();
+    assert.ok(sent);
+    f.context.Bridge.prototype.handleMessage.call(f.bridge, { data: JSON.stringify({
+        type: 'webPlaylistItemSubmitted', requestId: sent.requestId, playlistId: sent.playlistId }) });
+    assert.equal((await pending).type, 'webPlaylistItemSubmitted');
+    f.bridge.httpWebPlaylists.add(sent.playlistId);
+    f.bridge.schedulePlaybackHttpPoll();
+    assert.equal(f.requests.length, 0);
+    assert.equal([...f.timers.values()].filter(value => value.delay === 1000).length, 0);
+});
+
+test('every chunked-upload and paginated-manifest acknowledgement is correlated on a real WebSocket dispatch path', async () => {
+    const f = fixture(), playlistId = `playlist-${'a'.repeat(32)}`;
+    const acknowledgements = { registerWebPlaylist: 'webPlaylistUploadStarted', appendWebPlaylistItems: 'webPlaylistItemsAppended',
+        commitWebPlaylist: 'webPlaylistRegistered', getWebPlaylistItems: 'webPlaylistItems' };
+    f.bridge.ensureConnected = async () => {
+        f.bridge.socket = { readyState: 1, send: raw => {
+            const request = JSON.parse(raw);
+            queueMicrotask(() => f.context.Bridge.prototype.handleMessage.call(f.bridge, { data: JSON.stringify({
+                type: acknowledgements[request.type], requestId: request.requestId, playlistId }) }));
+        } };
+    };
+    for (const [type, expected] of Object.entries(acknowledgements)) {
+        assert.equal((await f.bridge.requestPlayback({ type, playlistId })).type, expected);
+    }
+    assert.equal(f.bridge.pendingPlaybackRequests.size, 0); assert.equal(f.timers.size, 0); assert.equal(f.requests.length, 0);
+});
+
+test('HTTP commit summaries keep the playlist poll active while later metadata pages stay in the same anonymous owner', async () => {
+    const f = fixture(), playlistId = `playlist-${'a'.repeat(32)}`;
+    f.context.GM.xmlHttpRequest = options => {
+        f.requests.push(options);
+        const request = JSON.parse(options.data).request;
+        options.onload({ status: 200, responseText: JSON.stringify({ reply: { type: request.type === 'commitWebPlaylist' ?
+            'webPlaylistRegistered' : 'webPlaylistItems', requestId: request.requestId, playlistId, itemCount: 601 }, events: [] }) });
+    };
+    await f.bridge.requestPlayback({ type: 'commitWebPlaylist', playlistId, expectedItemCount: 601 });
+    assert.ok(f.bridge.httpWebPlaylists.has(playlistId));
+    await f.bridge.requestPlayback({ type: 'getWebPlaylistItems', playlistId, offset: 500, limit: 100 });
+    assert.equal(f.requests.length, 2);
+    assert.equal(JSON.parse(f.requests[0].data).clientId, JSON.parse(f.requests[1].data).clientId);
+    assert.ok(f.requests.every(request => request.anonymous && !request.data.includes('Cookie')));
+    f.bridge.detachPlaybackHttp();
 });

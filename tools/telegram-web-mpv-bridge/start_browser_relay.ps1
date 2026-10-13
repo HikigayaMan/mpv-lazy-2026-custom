@@ -4,6 +4,7 @@ param(
     [switch]$Source,
     [switch]$Bilibili,
     [switch]$PlaybackProgress,
+    [switch]$WebPlaylist,
     [int]$HttpPort = 0,
     [int]$WsPort = 0,
     [int]$TimeoutSeconds = 15
@@ -12,8 +13,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $bridgeRoot = $PSScriptRoot
 $mpvRoot = [IO.Path]::GetFullPath((Join-Path $bridgeRoot '..\..'))
-if ($HttpPort -eq 0) { $HttpPort = if ($Bilibili -or $PlaybackProgress) { 9002 } else { 8999 } }
-if ($WsPort -eq 0) { $WsPort = if ($Bilibili -or $PlaybackProgress) { 9001 } else { 9000 } }
+if ($HttpPort -eq 0) { $HttpPort = if ($Bilibili -or $PlaybackProgress -or $WebPlaylist) { 9002 } else { 8999 } }
+if ($WsPort -eq 0) { $WsPort = if ($Bilibili -or $PlaybackProgress -or $WebPlaylist) { 9001 } else { 9000 } }
 
 function Test-BridgePort {
     $bridgeClient = New-Object Net.Sockets.TcpClient
@@ -28,6 +29,9 @@ function Test-BridgeReady {
     if (-not (Test-BridgePort)) { return $false }
     try {
         $bridgeHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$HttpPort/health" -TimeoutSec 2
+        if ($WebPlaylist) {
+            return $bridgeHealth.ok -eq $true -and $bridgeHealth.webPlaylistApiVersion -ge 1 -and $bridgeHealth.playbackProgressApiVersion -ge 1 -and $bridgeHealth.webPlaylistHierarchyApiVersion -eq 1 -and $bridgeHealth.webPlaylistChunkApiVersion -eq 1
+        }
         if ($PlaybackProgress) {
             return $bridgeHealth.playbackProgressApiVersion -ge 1 -and $bridgeHealth.playbackProgressProviders -contains 'web' -and $bridgeHealth.playbackProgressProviders -contains 'bilibili'
         }
@@ -42,7 +46,7 @@ if (Test-BridgeReady) { exit 0 }
 if (Test-BridgePort) {
     throw "Port $HttpPort is occupied by an incompatible service. Check /health and restart the correct browser relay."
 }
-$bridgeExe = Join-Path $bridgeRoot $(if ($Bilibili -or $PlaybackProgress) { 'bilibili-live-bridge.exe' } else { 'browser-media-bridge.exe' })
+$bridgeExe = Join-Path $bridgeRoot $(if ($Bilibili -or $PlaybackProgress -or $WebPlaylist) { 'bilibili-live-bridge.exe' } else { 'browser-media-bridge.exe' })
 $bridgePython = Join-Path $bridgeRoot '.venv\Scripts\python.exe'
 $bridgeScript = Join-Path $bridgeRoot 'bridge.py'
 $bridgeMpv = Join-Path $mpvRoot 'mpv.exe'
@@ -56,7 +60,7 @@ if (-not $Source -and (Test-Path -LiteralPath $bridgeExe -PathType Leaf)) {
     throw 'Browser relay is unavailable. Build the updated EXE or install requirements.txt in tools\telegram-web-mpv-bridge\.venv.'
 }
 
-$bridgeLogPrefix = if ($Bilibili -or $PlaybackProgress) { 'bilibili-bridge' } else { 'bridge' }
+$bridgeLogPrefix = if ($Bilibili -or $PlaybackProgress -or $WebPlaylist) { 'bilibili-bridge' } else { 'bridge' }
 $bridgeProcess = Start-Process -WindowStyle Hidden -FilePath $bridgeLauncher -ArgumentList $bridgeArgs -WorkingDirectory $bridgeRoot -RedirectStandardOutput (Join-Path $bridgeRoot "$bridgeLogPrefix.out.log") -RedirectStandardError (Join-Path $bridgeRoot "$bridgeLogPrefix.err.log") -PassThru
 $bridgeDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 while ([DateTime]::UtcNow -lt $bridgeDeadline) {
