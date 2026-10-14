@@ -898,7 +898,7 @@ test('native playlist preparation occurs before progress setup and old saved pla
     const parser = between('class BaseParser {', 'function isRelayPlayer(');
     assert.ok(parser.indexOf('prepareBilibiliPlaylistLaunch(media, player)') < parser.indexOf('playbackProgressSync.prepareLaunch(media, player)'));
     assert.ok(parser.indexOf('if (media.webPlaylist) media.time = undefined') > parser.indexOf('playbackProgressSync.prepareLaunch(media, player)'));
-    assert.match(source, /@version\s+1\.2\.14\.26/);
+    assert.match(source, /@version\s+1\.2\.14\.27/);
 });
 
 test('closing on another playlist CID syncs only the original page cached position', async () => {

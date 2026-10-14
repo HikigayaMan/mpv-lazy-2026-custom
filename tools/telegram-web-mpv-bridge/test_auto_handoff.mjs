@@ -31,6 +31,7 @@ function fixture() {
         currentParser: { parserKey: 'ytdlp', play: async player => launches.push(player.name) },
         automaticHandoffState: undefined, automaticHandoffTimer: undefined,
         handoffLaunchInFlight: false, handoffUiReady: true, iframeListenersAttached: false,
+        webPlaybackPauseGuard: { stop() {}, ready() {} },
         handoffPrimaryButton: undefined, handoffDockPlayButton: undefined, resourceSniffer: undefined,
         document: { querySelectorAll: () => [] },
         window: { addEventListener: (type, handler) => listeners.push(handler) },

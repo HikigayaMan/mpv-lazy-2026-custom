@@ -231,6 +231,14 @@ test('Bilibili uses an isolated bridge instance and leaves existing Telegram/Dou
 
 function iframeHandoffSandbox() {
     const messageListeners = [];
+    const documentListeners = new Map();
+    const frames = [];
+    const videoListeners = new Map();
+    const video = { tagName: 'VIDEO', isConnected: true, paused: false, pauseCalls: 0,
+        pause() { this.paused = true; this.pauseCalls++; },
+        addEventListener(type, listener) { videoListeners.set(type, listener); },
+        removeEventListener(type) { videoListeners.delete(type); },
+        contains(target) { return target === this; }, closest() { return this; } };
     const launches = [];
     const statuses = [];
     const toasts = [];
@@ -239,14 +247,22 @@ function iframeHandoffSandbox() {
     const context = sandbox({
         PROJECT_NAME: 'external-player', REFRESH_INTERVAL: 1, MAX_TRY_COUNT: 1,
         currentUrl: 'https://live.bilibili.com/719085',
-        location: { href: 'https://live.bilibili.com/719085' },
+        location: { href: 'https://live.bilibili.com/719085', origin: 'https://live.bilibili.com' },
         currentMedia: undefined, currentPlayer: undefined, currentTryCount: 0,
         topListenersAttached: false, isReloading: false, iframe: undefined,
         translation: { handoffDanmakuUnavailable: 'Danmaku unavailable; playing video only', loadFail: 'Load failed' },
-        document: { title: 'Bilibili live room', addEventListener() {}, getElementsByTagName: () => [] },
+        document: { title: 'Bilibili live room', documentElement: {},
+            addEventListener(type, listener) { documentListeners.set(type, listener); },
+            removeEventListener(type) { documentListeners.delete(type); },
+            getElementsByTagName: tag => tag === 'iframe' ? frames : tag === 'video' ? [video] : [],
+            querySelectorAll: selector => selector.includes('iframe') ? frames : selector.includes('video') ? [video] : [],
+            querySelector: selector => selector.includes('video') ? video : null,
+            contains(target) { return target === video || frames.includes(target); } },
         window: { addEventListener: (type, listener) => {
             if (type === 'message') messageListeners.push(listener);
-        }, open: url => launches.push(url) },
+        }, removeEventListener() {}, open: url => launches.push(url) },
+        setInterval: () => 1, clearInterval() {},
+        MutationObserver: class { observe() {} disconnect() {} },
         appendAll: async () => {}, showButtonDiv() {}, updateHandoffForCurrentParser() {},
         isResourceFallbackParser: () => false, resourceFallbackCanShow: () => false,
         isTelegramUrl: () => false, shouldUseBrowserRelay: () => false,
@@ -260,8 +276,13 @@ function iframeHandoffSandbox() {
             return { type: 'danmakuStarted', provider: 'bilibili', apiVersion: 2, sessionId: request.sessionId };
         }, stopDanmaku() {} }
     });
+    context.window.self = context.window.top = context.window.parent = context.window;
+    context.window.location = context.location;
+    context.self = context.top = context.parent = context.window;
+    video.ownerDocument = context.document;
     vm.runInContext([
         between('const defaultConfig = {', 'if (DEBUG === true)'),
+        between('// WEB_PLAYBACK_PAUSE_HELPERS_START', '// WEB_PLAYBACK_PAUSE_HELPERS_END'),
         between('class BaseParser {', 'function isRelayPlayer('),
         'const PARSER = { ' + between('IFRAME: class Parser extends BaseParser {', 'function compress('),
         between('async function initTop() {', 'function initIframe()'),
@@ -277,19 +298,24 @@ function iframeHandoffSandbox() {
     const childMedia = asPlain(context.currentMedia);
     childMedia.video = 'https://fixture.bilivideo.com/live.flv';
     childMedia.mpvOptions = ['--no-ytdl'];
+    const emitMessage = async event => {
+        for (const listener of messageListeners) await listener(event);
+    };
     const child = { postMessage: message => {
-        if (message.method === 'execute') messageListeners[0]({
+        if (message.method === 'execute') void emitMessage({ source: child,
             data: { name: 'external-player', method: 'currentMedia', currentMedia: childMedia }
         });
     } };
-    return { context, child, messageListeners, launches, statuses, toasts, authRooms, starts };
+    frames.push({ tagName: 'IFRAME', isConnected: true, contentWindow: child });
+    return { context, child, emitMessage, launches, statuses, toasts, authRooms, starts, video,
+        documentListeners, videoListeners };
 }
 
 test('the real iframe init/currentMedia/play route attaches live danmaku using the outer Bilibili room', async () => {
     const fixture = iframeHandoffSandbox();
-    const { context, child, messageListeners, starts, authRooms, launches } = fixture;
+    const { context, child, emitMessage, starts, authRooms, launches, video } = fixture;
     await context.initTop();
-    await messageListeners[0]({ source: child, data: { name: 'external-player', method: 'init', isReloading: false } });
+    await emitMessage({ source: child, data: { name: 'external-player', method: 'init', isReloading: false } });
     // This is the actual Bilibili page behavior: IFRAME replaces BILIBILI_LIVE and has no parserKey.
     assert.equal(context.currentParser.parserKey, undefined);
     const player = context.currentConfig.players.find(player => player.name === 'MPV');
@@ -302,6 +328,31 @@ test('the real iframe init/currentMedia/play route attaches live danmaku using t
     assert.match(launches[0], /fixture\.bilivideo\.com\/live\.flv/);
     assert.match(launches[0], /--input-ipc-server=\\\\\.\\pipe\\mpv-lazy-bilibili-/);
     assert.match(launches[0], /--fullscreen=yes/);
+    assert.equal(video.paused, true, 'the outer live page also pauses when its parser was replaced by IFRAME');
+    assert.ok(video.pauseCalls > 0);
+});
+
+test('pauseAuto disabled leaves the original live page playing after a successful external launch', async () => {
+    const { context, child, emitMessage, launches, video } = iframeHandoffSandbox();
+    await context.initTop();
+    await emitMessage({ source: child, data: { name: 'external-player', method: 'init' } });
+    const player = context.currentConfig.players.find(player => player.name === 'MPV');
+    player.presetEvent.pauseAuto = false;
+    await context.currentParser.play(player);
+    assert.equal(launches.length, 1);
+    assert.equal(video.paused, false);
+    assert.equal(video.pauseCalls, 0);
+});
+
+test('a failed protocol dispatch leaves the original live page playing', async () => {
+    const { context, child, emitMessage, video, statuses } = iframeHandoffSandbox();
+    await context.initTop();
+    await emitMessage({ source: child, data: { name: 'external-player', method: 'init' } });
+    context.window.open = () => { throw new Error('launch rejected'); };
+    await context.currentParser.play(context.currentConfig.players.find(player => player.name === 'MPV'));
+    assert.equal(statuses.at(-1)[0], 'failed');
+    assert.equal(video.paused, false);
+    assert.equal(video.pauseCalls, 0);
 });
 
 test('ordinary web handoff opens MPV and MPVNET fullscreen without changing other player options', async () => {
@@ -343,10 +394,10 @@ test('CSP fallback retains fullscreen alongside VOD cid and media options', asyn
 });
 
 test('iframe handoff preserves video and the failure reason if live authentication fails', async () => {
-    const { context, child, messageListeners, starts, launches, statuses, toasts } = iframeHandoffSandbox();
+    const { context, child, emitMessage, starts, launches, statuses, toasts } = iframeHandoffSandbox();
     context.resolveBilibiliLiveDanmakuAuth = async () => { throw new Error('API code -352'); };
     await context.initTop();
-    await messageListeners[0]({ source: child, data: { name: 'external-player', method: 'init' } });
+    await emitMessage({ source: child, data: { name: 'external-player', method: 'init' } });
     await context.currentParser.play(context.currentConfig.players.find(player => player.name === 'MPV'));
     assert.equal(starts.length, 0);
     assert.equal(launches.length, 1);
@@ -356,9 +407,9 @@ test('iframe handoff preserves video and the failure reason if live authenticati
 });
 
 test('SPA navigation during iframe parsing cancels the stale protocol launch', async () => {
-    const { context, child, messageListeners, starts, launches } = iframeHandoffSandbox();
+    const { context, child, emitMessage, starts, launches } = iframeHandoffSandbox();
     await context.initTop();
-    await messageListeners[0]({ source: child, data: { name: 'external-player', method: 'init' } });
+    await emitMessage({ source: child, data: { name: 'external-player', method: 'init' } });
     context.currentParser.execute = async () => {
         context.currentMedia.video = 'https://fixture.bilivideo.com/old-room.flv';
         context.location.href = 'https://live.bilibili.com/999999';
@@ -369,11 +420,11 @@ test('SPA navigation during iframe parsing cancels the stale protocol launch', a
 });
 
 test('switching Bilibili list content on the same URL during parsing cancels the stale media', async () => {
-    const { context, child, messageListeners, launches } = iframeHandoffSandbox();
+    const { context, child, emitMessage, launches } = iframeHandoffSandbox();
     context.location.href = context.currentUrl = 'https://www.bilibili.com/list/123';
     context.window.__INITIAL_STATE__ = { videoData: { aid: 11, cid: 22 } };
     await context.initTop();
-    await messageListeners[0]({ source: child, data: { name: 'external-player', method: 'init' } });
+    await emitMessage({ source: child, data: { name: 'external-player', method: 'init' } });
     context.currentParser.execute = async () => {
         context.currentMedia.video = 'https://fixture.bilivideo.com/old.flv';
         context.window.__INITIAL_STATE__.videoData = { aid: 33, cid: 44 };
@@ -383,13 +434,13 @@ test('switching Bilibili list content on the same URL during parsing cancels the
 });
 
 test('the complete iframe MPV handoff replaces a captured low-quality stream and carries variants plus live danmaku', async () => {
-    const { context, child, messageListeners, starts, launches } = iframeHandoffSandbox();
+    const { context, child, emitMessage, starts, launches } = iframeHandoffSandbox();
     vm.runInContext(between('// BILIBILI_STREAM_QUALITY_HELPERS_START', '// BILIBILI_STREAM_QUALITY_HELPERS_END'), context);
     const highest = { url: 'https://fixture.bilivideo.com/source-1440.flv', quality: 10000, title: '1440P 原画', height: 1440 };
     const lower = { url: 'https://fixture.bilivideo.com/captured-720.flv', quality: 250, title: '720P 超清', height: 720 };
     context.resolveBilibiliLiveStreams = async () => ({ variants: [highest, lower], selected: highest });
     await context.initTop();
-    await messageListeners[0]({ source: child, data: { name: 'external-player', method: 'init' } });
+    await emitMessage({ source: child, data: { name: 'external-player', method: 'init' } });
     await context.currentParser.play(context.currentConfig.players.find(player => player.name === 'MPV'));
     assert.equal(launches.length, 1);
     assert.match(launches[0], /source-1440\.flv/);

@@ -3,7 +3,7 @@
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.14.26
+// @version                 1.2.14.27
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -3037,6 +3037,125 @@ class PlaybackProgressSync {
 const playbackProgressSync = new PlaybackProgressSync(bilibiliMediaBridge);
 // PLAYBACK_PROGRESS_HELPERS_END
 
+// WEB_PLAYBACK_PAUSE_HELPERS_START
+class WebPlaybackPauseGuard {
+    constructor() {
+        this.frames = new Set();
+        this.videos = [];
+        const noteAction = event => {
+            if (event.isTrusted === true && this.isPlayerControl(event.target)) this.userActionAt = Date.now();
+        };
+        document.addEventListener('pointerdown', noteAction, true);
+        document.addEventListener('pointerup', noteAction, true);
+        document.addEventListener('keydown', event => {
+            if (event.isTrusted !== true || this.isTyping(event.target)) return;
+            const key = /^(?:Space|KeyK|MediaPlayPause|MediaPlay)$/.test(event.code || '') ||
+                event.code === 'Enter' && this.isPlayerControl(event.target);
+            if (key && this.videos.length) this.userActionAt = Date.now();
+        }, true);
+        const onPlay = event => {
+            if (!this.isCurrent() || event.target?.tagName !== 'VIDEO') return;
+            if (Date.now() - (this.userActionAt || 0) <= 3000) this.stop();
+            else this.pauseVideo(event.target);
+        };
+        document.addEventListener('play', onPlay, true);
+        document.addEventListener('playing', onPlay, true);
+        window.addEventListener('pagehide', () => this.stop(false));
+        window.addEventListener('message', event => this.onMessage(event));
+    }
+    pageKey() {
+        return (typeof getAutomaticHandoffKey === 'function' && getAutomaticHandoffKey()) || getAutoHandoffPageKey(location.href);
+    }
+    isTyping(target) {
+        return Boolean(target?.closest?.('input,textarea,select,[contenteditable="true"],[role="textbox"]'));
+    }
+    isPlayerControl(target) {
+        if (this.isTyping(target)) return false;
+        if (this.videos.includes(target)) return true;
+        const surface = target?.closest?.('.live-player-mounter,.bpx-player-video-wrap,.bilibili-player-video');
+        if (surface && this.videos.some(video => surface.contains(video))) return true;
+        const playSelector = '.web-player-icon-play,.bpx-player-ctrl-play,.vjs-play-control,.ytp-play-button';
+        const control = target?.closest?.(`button,[role="button"],[aria-label],[title],${playSelector}`);
+        const label = control?.getAttribute?.('aria-label') || control?.getAttribute?.('title') || '';
+        if (!control?.matches?.(playSelector) && !/^(?:播放|继续播放|恢复播放|播放\/暂停|play|resume|play\/pause)$/i.test(label.trim())) return false;
+        const container = control.closest?.('.live-player-ctnr,.bpx-player-container,.bilibili-player-video-wrap,.layout-Player,#player');
+        return Boolean(container && this.videos.some(video => container.contains(video)));
+    }
+    start({ pauseToken, ownerWindow, playerName } = {}) {
+        if (pauseToken !== undefined && (typeof pauseToken !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(pauseToken))) return;
+        if (pauseToken && pauseToken === this.pauseToken && this.isCurrent()) { this.tick(); return; }
+        this.stop(false);
+        this.pauseToken = pauseToken || `pause-${createBridgeRequestId()}`;
+        this.ownerWindow = ownerWindow;
+        this.playerName = playerName;
+        this.boundPageKey = this.pageKey();
+        this.userActionAt = 0;
+        if (typeof MutationObserver === 'function' && document.documentElement) {
+            this.observer = new MutationObserver(records => {
+                if (records.some(record => [...record.addedNodes, ...record.removedNodes].some(node =>
+                    node.matches?.('video,iframe') || node.querySelector?.('video,iframe')))) this.tick();
+            });
+            this.observer.observe(document.documentElement, { childList: true, subtree: true });
+        }
+        this.tick();
+    }
+    isCurrent() {
+        if (!this.pauseToken) return false;
+        const player = typeof currentConfig !== 'undefined' && currentConfig?.players?.find(item => item.name === this.playerName);
+        if (this.boundPageKey !== this.pageKey()) { this.stop(false); return false; }
+        if (player?.presetEvent?.pauseAuto === false) { this.stop(); return false; }
+        return true;
+    }
+    post(frame, method, pauseToken = this.pauseToken) {
+        try { frame.postMessage({ name: PROJECT_NAME, method, pauseToken, playerName: this.playerName }, '*'); }
+        catch (error) { /* Detached frames are dropped on the next scan. */ }
+    }
+    pauseVideo(video) {
+        if (video.paused) return;
+        try { video.pause(); } catch (error) { /* Retry a loading media element on the next scan. */ }
+    }
+    tick() {
+        if (!this.isCurrent()) return;
+        this.videos = [...document.getElementsByTagName('video')];
+        for (const video of this.videos) {
+            // A user's play request can precede the queued play event.
+            if (!video.paused && Date.now() - (this.userActionAt || 0) <= 3000) { this.stop(); return; }
+            this.pauseVideo(video);
+        }
+        const frames = new Set([...document.getElementsByTagName('iframe')].map(frame => frame.contentWindow).filter(Boolean));
+        for (const old of this.frames) if (!frames.has(old)) this.post(old, 'releasePause');
+        for (const frame of frames) if (!this.frames.has(frame)) this.post(frame, 'pause');
+        this.frames = frames;
+    }
+    stop(notifyOwner = true) {
+        const pauseToken = this.pauseToken;
+        if (!pauseToken) return;
+        this.pauseToken = undefined;
+        this.observer?.disconnect(); this.observer = undefined;
+        for (const frame of this.frames) this.post(frame, 'releasePause', pauseToken);
+        this.frames.clear(); this.videos = [];
+        if (notifyOwner && this.ownerWindow) this.post(this.ownerWindow, 'releasePause', pauseToken);
+        this.ownerWindow = undefined;
+    }
+    ready() {
+        if (window.parent && window.parent !== window) this.post(window.parent, 'browserPauseReady');
+    }
+    onMessage(event) {
+        const data = event.data;
+        if (!data || data.name !== PROJECT_NAME) return;
+        if (data.method === 'pause') {
+            if (!window.parent || window.parent === window || event.source !== window.parent) return;
+            this.start({ pauseToken: data.pauseToken, ownerWindow: event.source, playerName: data.playerName });
+        } else if (data.method === 'releasePause' && data.pauseToken === this.pauseToken) {
+            if (event.source === this.ownerWindow) this.stop(false);
+            else if (this.frames.has(event.source)) this.stop();
+        } else if ((data.method === 'init' || data.method === 'browserPauseReady') &&
+            this.isCurrent() && this.frames.has(event.source)) this.post(event.source, 'pause');
+    }
+}
+const webPlaybackPauseGuard = new WebPlaybackPauseGuard();
+// WEB_PLAYBACK_PAUSE_HELPERS_END
+
 class BaseParser {
     constructor() {
         currentMedia = {
@@ -3110,17 +3229,7 @@ class BaseParser {
         return new RegExp(VIDEO_URL_REGEX_EXACT).test(video);
     }
     async pause() {
-        for (let index = 0; index < MAX_TRY_COUNT; index++) {
-            try {
-                for (const video of document.getElementsByTagName('video')) {
-                    video.pause();
-                }
-            } catch (error) {
-                console.error('暂停失败', error);
-            } finally {
-                await sleep(REFRESH_INTERVAL * 3);
-            }
-        }
+        webPlaybackPauseGuard.start({ playerName: currentPlayer?.name });
     }
     async close() {
         try {
@@ -4633,12 +4742,6 @@ const PARSER = {
             }).finally(() => { this.pendingExecute = undefined; });
             return this.pendingExecute;
             await this.parseTitle();
-        }
-        async pause() {
-            iframe.postMessage({
-                name: PROJECT_NAME,
-                method: 'pause'
-            }, '*');
         }
         async check() {
             return currentMedia.video ? true : false;
@@ -8403,10 +8506,6 @@ function initIframe() {
                 }
                 return;
             }
-            if (data.method === 'pause') {
-                currentParser.pause();
-                return;
-            }
             if (data.method === 'reload') {
                 isReloading = true;
                 init(currentUrl);
@@ -8416,6 +8515,7 @@ function initIframe() {
 }
 
 async function init(url) {
+    webPlaybackPauseGuard.stop(false);
     const previousUrl = currentUrl;
     currentUrl = url;
     handoffUiReady = false;
@@ -8452,6 +8552,7 @@ async function init(url) {
         await initTop();
     } else {
         initIframe();
+        webPlaybackPauseGuard.ready();
     }
 }
 
@@ -8466,4 +8567,5 @@ setInterval(() => {
     scheduleAutomaticHandoff();
     if (typeof playbackProgressSync !== 'undefined') void playbackProgressSync.tick();
     if (typeof bilibiliWebPlaylists !== 'undefined') bilibiliWebPlaylists.tick();
+    webPlaybackPauseGuard.tick();
 }, REFRESH_INTERVAL);
