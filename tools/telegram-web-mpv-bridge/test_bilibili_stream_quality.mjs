@@ -212,6 +212,103 @@ test('native VOD parsing passes the selected DASH video, separate audio, real si
     assert.equal(variants[0].audio_url, media.audio);
 });
 
+test('first playlist resolution shares the same signed source and WBI keys, while another CID and expired URLs resolve again', async () => {
+    let now = 1_000_000, release;
+    const calls = [];
+    const context = sandbox({ Date: class extends Date { static now() { return now; } }, fetch: async url => {
+        calls.push(new URL(url));
+        if (url.includes('/nav')) return { ok: true, json: async () => ({ code: 0, data: { mid: 999, wbi_img: {
+            img_url: 'https://img.test/7cd084941338484aae1ad9425b84077c.png',
+            sub_url: 'https://img.test/4932caff0ff746eab6f01bf08b70ac45.png' } } }) };
+        await new Promise(resolve => { release = resolve; });
+        return { ok: true, json: async () => ({ code: 0, data: { quality: 120, dash: { video: [{ baseUrl: url }] } } }) };
+    } });
+    const first = context.fetchBilibiliVideoPlayInfo(100, 200);
+    const duplicate = context.fetchBilibiliVideoPlayInfo('100', '200');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls.length, 2); release();
+    const [original, resolved] = await Promise.all([first, duplicate]);
+    assert.equal(original, resolved); assert.equal(original.quality, 120);
+    assert.equal(await context.fetchBilibiliVideoPlayInfo(100, 200), original);
+    assert.equal(calls.length, 2);
+    const next = context.fetchBilibiliVideoPlayInfo(100, 201);
+    await new Promise(resolve => setImmediate(resolve)); release(); await next;
+    assert.equal(calls.filter(url => url.pathname.endsWith('/nav')).length, 1);
+    assert.equal(calls.filter(url => url.pathname.endsWith('/playurl')).length, 2);
+    now += 15001;
+    const expired = context.fetchBilibiliVideoPlayInfo(100, 200);
+    await new Promise(resolve => setImmediate(resolve)); release(); await expired;
+    assert.equal(calls.filter(url => url.pathname.endsWith('/playurl')).length, 3);
+    const publicKeys = await vm.runInContext('bilibiliWbiRequests.get("keys").promise', context);
+    assert.equal(publicKeys.length, 2); assert.ok(!JSON.stringify(publicKeys).includes('999'));
+});
+
+test('failed source requests are not cached and remembered source entries stay bounded', async () => {
+    let fail = true, navCalls = 0, playCalls = 0;
+    const context = sandbox({ fetch: async url => {
+        if (url.includes('/nav')) {
+            navCalls++;
+            return { ok: true, json: async () => ({ code: 0, data: { wbi_img: {
+                img_url: 'https://img.test/7cd084941338484aae1ad9425b84077c.png',
+                sub_url: 'https://img.test/4932caff0ff746eab6f01bf08b70ac45.png' } } }) };
+        }
+        playCalls++;
+        return { ok: true, json: async () => fail ? { code: -352 } : { code: 0, data: { quality: 120 } } };
+    } });
+    await assert.rejects(context.fetchBilibiliVideoPlayInfo(100, 200), /unavailable/);
+    fail = false; assert.equal((await context.fetchBilibiliVideoPlayInfo(100, 200)).quality, 120);
+    for (let cid = 201; cid <= 208; cid++) await context.fetchBilibiliVideoPlayInfo(100, cid);
+    assert.equal(navCalls, 1); assert.equal(playCalls, 10);
+    assert.equal(vm.runInContext('bilibiliPlayRequests.size', context), 4);
+});
+
+test('a rotated WBI signature refreshes public keys once, without retrying risk-control responses', async () => {
+    let navCalls = 0, playCalls = 0;
+    const context = sandbox({ fetch: async url => {
+        if (url.includes('/nav')) {
+            navCalls++; return { ok: true, json: async () => ({ code: 0, data: { wbi_img: {
+                img_url: `https://img.test/${navCalls === 1 ? '7cd084941338484aae1ad9425b84077c' : '4932caff0ff746eab6f01bf08b70ac45'}.png`,
+                sub_url: 'https://img.test/4932caff0ff746eab6f01bf08b70ac45.png' } } }) };
+        }
+        playCalls++;
+        return { ok: true, json: async () => playCalls === 1 ? { code: -403 } : { code: 0, data: { quality: 120 } } };
+    } });
+    assert.equal((await context.fetchBilibiliVideoPlayInfo(100, 200)).quality, 120);
+    assert.equal(navCalls, 2); assert.equal(playCalls, 2);
+    context.fetch = async () => { playCalls++; return { ok: true, json: async () => ({ code: -403 }) }; };
+    await assert.rejects(context.fetchBilibiliVideoPlayInfo(100, 201), /WBI keys unavailable/);
+    assert.equal(playCalls, 4); // Rejected playurl and one key refresh, then stop.
+});
+
+test('VOD SPA navigation cannot write an old CID or source into the newly initialized player media', async () => {
+    const context = sandbox({ currentUrl: 'https://www.bilibili.com/video/BVfixture',
+        currentPlayer: { name: 'MPV', playEvent: 'media.video; media.audio' },
+        currentMedia: { bilibili: {}, mpvOptions: [] }, BaseParser: class {} });
+    vm.runInContext(`const PARSER = { ${between('BILIBILI: class Parser extends BaseParser {', 'DOUYU: class Parser extends BaseParser {')} };
+        globalThis.VideoParser = PARSER.BILIBILI;`, context);
+    const parser = new context.VideoParser(); let release;
+    parser.getVideoInfoByBvid = () => new Promise(resolve => { release = resolve; });
+    const parsing = parser.parseVideo();
+    const nextMedia = { bilibili: { aid: 300, cid: 400 }, mpvOptions: [], video: 'https://cdn.test/new.m4s' };
+    context.currentUrl = 'https://www.bilibili.com/video/BVnext'; context.currentMedia = nextMedia;
+    release({ aid: 100, cid: 200, title: 'old video' });
+    await assert.rejects(parsing, /page changed/);
+    assert.deepEqual(nextMedia, { bilibili: { aid: 300, cid: 400 }, mpvOptions: [], video: 'https://cdn.test/new.m4s' });
+});
+
+test('a displaced Bilibili parser never starts new metadata requests against the replacement page', async () => {
+    const context = sandbox({ currentUrl: 'https://www.bilibili.com/video/BVnext',
+        currentPlayer: { name: 'MPV', playEvent: 'media.video; media.audio' },
+        currentMedia: { bilibili: { aid: 300, cid: 400 }, mpvOptions: [] }, BaseParser: class {} });
+    vm.runInContext(`const PARSER = { ${between('BILIBILI: class Parser extends BaseParser {', 'DOUYU: class Parser extends BaseParser {')} };
+        globalThis.VideoParser = PARSER.BILIBILI;`, context);
+    const oldParser = new context.VideoParser(); let requests = 0;
+    oldParser.getVideoInfoByBvid = async () => { requests++; return { aid: 100, cid: 200 }; };
+    context.currentParser = new context.VideoParser();
+    await assert.rejects(oldParser.parseVideo(), /page changed/);
+    assert.equal(requests, 0); assert.equal(context.currentMedia.bilibili.cid, 400);
+});
+
 test('stream metadata is bounded, retains the selected stream and rejects unsafe URLs', () => {
     const context = sandbox();
     const variants = Array.from({ length: 16 }, (_, index) => ({ url: `https://cdn.test/${index}.flv?sig=${'a'.repeat(2000)}`,

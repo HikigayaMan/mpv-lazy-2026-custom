@@ -24,6 +24,7 @@ faster-whisper-win/
 
 # 缓存
 _cache/
+__pycache__/
 
 # 日志
 *.log
@@ -53,7 +54,6 @@ portable_config/script-opts/rife_sr_runtime.json
 portable_config/script-opts/uosc_danmaku_style.json
 portable_config/script-opts/uosc_danmaku_style.json.*
 portable_config/script-opts/trakt_scrobble.conf
-portable_config/_cache/
 
 # obsolete 临时文件
 k7sfunc_*_obsolete.py
@@ -67,8 +67,6 @@ node_modules/
 
 # 工具运行态
 tools/telegram-web-mpv-bridge/.venv/
-tools/telegram-web-mpv-bridge/__pycache__/
-tools/telegram-web-mpv-bridge/*.log
 tools/telegram-web-mpv-bridge/playback-progress.json
 tools/telegram-web-mpv-bridge/playback-progress.json.*
 tools/telegram-web-mpv-bridge/build/

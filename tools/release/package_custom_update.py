@@ -112,6 +112,7 @@ def build(repo: Path, baseline: str, ref: str, version: str, exe: Path, provenan
             or not evidence.get("frozenWebSocketPassed") or evidence.get("frozenPlaybackHttpPassed") is not True
             or evidence.get("frozenWebPlaylistPassed") is not True
             or evidence.get("frozenWebPlaylistHierarchyPassed") is not True
+            or evidence.get("frozenWebPlaylistFastStartPassed") is not True
             or not evidence.get("brotliBinaryIncluded")):
         raise ValueError("Bridge verification does not match this executable.")
     expected_inputs = {name: sha256(entries[name]) for name in BRIDGE_INPUTS}

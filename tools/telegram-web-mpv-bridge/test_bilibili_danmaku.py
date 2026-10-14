@@ -639,6 +639,26 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.take_batch(paused=True), [])
         self.assertEqual(len(session.pending), 0)
 
+    async def test_escaped_danmaku_batches_fit_final_ipc_command_without_losing_items(self):
+        for text in ("\\" * 160, '"' * 160, "x\t" * 80, "🙂\\" * 80):
+            with self.subTest(text=text[:4]):
+                session = BilibiliSession("545068", "bilibili-test-1", "mpv-lazy-bilibili-test-1",
+                                          validate_auth(auth()), FakeOwner(), ipc=FakeIpc())
+                for index in range(120):
+                    session.enqueue({"text": text, "nick": "\\" * 48, "color": index})
+                delivered = []
+                while session.pending:
+                    batch = session.take_batch()
+                    self.assertTrue(batch)
+                    body = json.dumps(batch, ensure_ascii=False, separators=(",", ":"))
+                    command = ["script-message-to", "uosc_danmaku", "live-batch", session.session_id, body]
+                    wire = json.dumps({"command": command, "request_id": 1}, ensure_ascii=False,
+                                      separators=(",", ":")).encode("utf-8") + b"\n"
+                    self.assertLessEqual(len(wire), 65536)
+                    delivered.extend(batch)
+                self.assertEqual([item["color"] for item in delivered], list(range(120)))
+                self.assertEqual(session.dropped, 0)
+
     async def test_disconnect_reconnect_and_cancel_stops_heartbeat(self):
         first, second = FakeRemote(), FakeRemote(messages=[json_packet(5, event("重连后"))])
         connector = FakeConnector(first, second)

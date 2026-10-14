@@ -4,8 +4,17 @@ local tree = require 'lib/web_playlist_tree'
 local M = {}
 local MANIFEST = 'user-data/mpv-lazy/web-playlist-manifest'
 local STATUS = 'user-data/uosc/web-playlist-menu'
+local METADATA_STATE = 'user-data/mpv-lazy/web-playlist/metadata-state'
 local menu, model, manifest, playlist_id, current_value
 local expanded = {}
+
+local function metadata_status()
+    local state = mp.get_property_native(METADATA_STATE)
+    if type(state) == 'table' and state.playlistId == playlist_id
+        and type(state.revision) == 'number' and state.revision >= (manifest.revision or 0)
+        and (state.status == 'pending' or state.status == 'failed') then return state.status end
+    return manifest.metadataPending == true and 'pending' or 'ready'
+end
 
 local function available()
     local value = mp.get_property_native(MANIFEST)
@@ -25,14 +34,25 @@ local function diagnostics()
             active = row.active, kind = row.kind, expanded = model.groups[row.value] and expanded[row.value] == true}
     end
     mp.set_property_native(STATUS, {playlistId = playlist_id, visibleCount = #model.rows,
-        videoCount = model.videoCount, partCount = model.partCount, currentValue = model.currentValue, rows = rows})
+        videoCount = model.videoCount, partCount = model.partCount, currentValue = model.currentValue,
+        metadataStatus = metadata_status(), rows = rows})
 end
 
 local function data_for()
     local title = model.collectionTitle ~= '' and model.collectionTitle or ulang._playlist_submenu_title
-    if model.collectionTitle ~= '' then title = title .. ' (' .. tostring(model.currentVideoIndex or 0) .. '/' .. model.videoCount .. ')' end
+    local status = metadata_status()
+    local footnote = '点击多 P 视频展开／收起；点击视频或分 P 播放'
+    if status == 'pending' then
+        title = title .. '（合集加载中）'
+        footnote = '完整合集正在后台加载；当前视频可正常播放'
+    elseif status == 'failed' then
+        title = title .. '（合集加载失败）'
+        footnote = '完整合集加载失败；当前视频可继续播放，请在原网页重试'
+    elseif model.collectionTitle ~= '' then
+        title = title .. ' (' .. tostring(model.currentVideoIndex or 0) .. '/' .. model.videoCount .. ')'
+    end
     return {type = 'playlist', title = title, items = model.rows, item_actions = {}, keep_open = true,
-        footnote = '点击多 P 视频展开／收起；点击视频或分 P 播放', search_style = 'on_demand'}
+        footnote = footnote, search_style = 'on_demand'}
 end
 
 local function visible_focus(value, previous)
@@ -108,6 +128,7 @@ local function open(value)
     menu:scroll_to_index(menu.current.selected_index, nil, true)
     mp.observe_property('playlist', 'native', update)
     mp.observe_property(MANIFEST, 'native', update)
+    mp.observe_property(METADATA_STATE, 'native', update)
     return true
 end
 

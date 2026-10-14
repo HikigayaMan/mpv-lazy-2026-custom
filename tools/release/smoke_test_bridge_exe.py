@@ -97,6 +97,27 @@ def verify_frozen_web_playlist(http_port: int) -> None:
         assert page["nextOffset"] is None and page["items"][0]["partCount"] == 2
         with urllib.request.urlopen(playlist_url, timeout=3) as response:
             assert response.read() == expected
+        action('stopWebPlaylist', playlistId=playlist_id)
+        registered = False
+        bootstrap = action('registerWebPlaylist', bootstrap=True, playlistId=playlist_id,
+            sessionId=session_id, pipeName='mpv-lazy-' + session_id, items=[items[1]],
+            selectedItemId=items[1]['itemId'], collectionTitle='Frozen collection')
+        registered = True
+        assert bootstrap['itemCount'] == 1 and bootstrap['metadataPending'] is True
+        assert bootstrap['selectedIndex'] == 0
+        action('registerWebPlaylist', chunked=True, extendExisting=True, playlistId=playlist_id,
+            sessionId=session_id, pipeName='mpv-lazy-' + session_id, selectedItemId=items[1]['itemId'],
+            collectionTitle='Frozen collection')
+        action('appendWebPlaylistItems', playlistId=playlist_id, chunkIndex=0, items=items)
+        extended = action('commitWebPlaylist', playlistId=playlist_id, expectedItemCount=2)
+        assert extended['itemCount'] == 2 and extended['metadataPending'] is True
+        # Metadata may finish before MPV attaches. Its first M3U must still
+        # contain only the bootstrap CID; expansion waits for actual playback.
+        with urllib.request.urlopen(playlist_url, timeout=3) as response:
+            body = response.read().decode()
+            assert body.count('/item/') == 1 and body.endswith('/item/1001:2003\n')
+        failed = action('failWebPlaylistMetadata', playlistId=playlist_id)
+        assert failed['metadataPending'] is True and failed['metadataStage'] == 'failed'
     finally:
         if registered:
             stopped = action("stopWebPlaylist", requestId="frozen-playlist-stop", playlistId=playlist_id)
@@ -184,6 +205,7 @@ def main() -> None:
             assert type(health.get("webPlaylistApiVersion")) is int and health["webPlaylistApiVersion"] == 1
             assert type(health.get("webPlaylistHierarchyApiVersion")) is int and health["webPlaylistHierarchyApiVersion"] == 1
             assert type(health.get("webPlaylistChunkApiVersion")) is int and health["webPlaylistChunkApiVersion"] == 1
+            assert type(health.get('webPlaylistFastStartApiVersion')) is int and health['webPlaylistFastStartApiVersion'] == 1
             probe = urllib.request.Request(f"http://127.0.0.1:{http_port}/playback-progress",
                 data=json.dumps({"clientId": "progress-http-" + "a" * 32, "request": {
                     "type": "getPlaybackProgress", "requestId": "frozen-http-test", "provider": "bilibili",
@@ -213,6 +235,7 @@ def main() -> None:
                 "frozenPlaybackHttpPassed": True,
                 "frozenWebPlaylistPassed": True,
                 "frozenWebPlaylistHierarchyPassed": True,
+                "frozenWebPlaylistFastStartPassed": True,
                 "brotliBinaryIncluded": brotli_included, "python": sys.version.split()[0],
                 "packages": {name: importlib.metadata.version(name) for name in ("websockets", "Brotli", "pyinstaller")},
                 "sourceInputs": source_inputs, "compiledSourceInputs": compiled_inputs,

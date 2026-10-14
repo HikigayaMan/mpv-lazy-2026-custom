@@ -1,24 +1,24 @@
 # 仓库目录结构与本地依赖说明
 
-本仓库是 mpv-lazy 2026 自定义整合包的配置层仓库，已清洗二进制、模型和敏感内容，只保留可分享的配置、脚本、文档和工具源码。
+本仓库是 mpv-lazy 2026 自定义整合包的配置层仓库，保留配置、脚本、文档和工具源码。完整运行时、模型、账号凭证及本机偏好不作为更新包内容。
 
 ## 远端信息
 
-- 仓库地址：https://github.com/luoxue03/mpv-lazy-2026-custom
-- 可见性：public
-- 本地路径：F:\mpv_2026\mpv-lazy-26_github
-- 工作目录（日常使用）：F:\mpv_2026\mpv-lazy
-- 历史保留：60 个 commit，涵盖 2025→2026 迁移、RIFE 性能调查、真人超分接入、Telegram Bridge 等
+- 当前维护仓库：[HikigayaMan/mpv-lazy-2026-custom](https://github.com/HikigayaMan/mpv-lazy-2026-custom)。
+- 定制来源：[luoxue03/mpv-lazy-2026-custom](https://github.com/luoxue03/mpv-lazy-2026-custom)，更上游为 [hooke007/mpv_PlayKit](https://github.com/hooke007/mpv_PlayKit)。
+- 当前本地检出：`C:\Users\Hikig\Documents\GitHub\mpv-lazy-2026-custom`。
+- 可运行安装目录独立于源码检出；更新时将文件合并到实际包含 `mpv.exe` 的安装根目录。不要沿用上游文档中的 F 盘维护路径。
+- Git 历史保留上游迁移记录与本仓库后续修改；具体提交和已发布版本以当前 Git／Release 为准。
 
 ## 顶层目录
 
-| 路径 | 用途 | 是否上传远端 | 本地依赖 |
+| 路径 | 用途 | 版本控制 | 本地依赖 |
 |---|---|---|---|
 | portable_config/ | MPV 便携配置核心：conf、脚本、着色器、VS 滤镜脚本、字体 | 是 | 依赖 mpv.exe、VapourSynth 运行时、模型文件（不在仓库） |
 | docs/ | 文档：研究记录、迁移归档、文章、可视化报告 | 是 | 无 |
 | installer/ | Windows 注册/取消注册、umpv 安装、测试/纯净/跑分模式脚本 | 是 | 依赖完整包根目录中的 mpv.com、mpv.exe、umpv.exe |
 | tools/ | 工具源码：RIFE benchmark、RealESRGAN 导出、Browser Media Bridge | 是 | 源码开发需 Python/Node；Release 运行包使用 EXE |
-| tools/release/ | GitHub Release 分类打包脚本与说明 | 是 | 依赖完整发布源目录与 7z.exe |
+| tools/release/ | 累计更新／分类打包、冻结 EXE 和真实 MPV 验证工具 | 是 | 分类包需要完整发布源目录与 7z.exe；源码回归需要开发依赖 |
 | external_player.js | 油猴脚本，网页拉起 MPV 播放 | 是 | 依赖 url-scheme-handler 或 MPV 可执行路径 |
 | .gitignore | 忽略规则 | 是 | 无 |
 | LICENSE.txt / LICENSE.MD / README.MD | 许可证和上游说明 | 是 | 无 |
@@ -26,21 +26,10 @@
 
 ## portable_config/ 详细
 
-## installer/ 详细
-
-- mpv-register.bat：调用 `mpv.com --register` 注册 mpv。
-- mpv-unregister.bat：调用 `mpv.com --unregister` 取消注册。
-- umpv-install.bat：将 `umpv.exe` 写入系统“打开方式”和默认程序候选，需管理员权限。
-- umpv-uninstall.bat：撤销 `umpv.exe` 注册表项，需管理员权限。
-- mpv-测试模式.bat / mpv-纯净模式.bat / mpv-跑分模式.bat：用于诊断配置、脚本和性能问题。
-- mpv-BenchMark.conf / mpv-test.conf / mpv-icon.ico：上述脚本使用的配置与图标。
-
-这些文件会随 `base` 包发布。详细使用说明见 `docs/工具脚本安装配置使用说明.md`。
-
-### 配置文件（已上传）
+### 配置文件
 
 - mpv.conf：MPV 主配置入口。
-- input_uosc.conf：uosc 菜单和快捷键绑定，包含所有 VF 滤镜、超分、补帧、组合菜单项。
+- input_uosc.conf：uosc 菜单和快捷键绑定，包含 VF 滤镜、超分、补帧、组合菜单项；本次删除 15 条重复绑定，保留最终命令和菜单入口。
 - input_uosc.conf_2025：2025 版菜单备份，仅作参考。
 - menu.conf：原生右键菜单定义。
 - profiles.conf：自动 profile 预设（按分辨率、片源类型自动应用）。
@@ -48,20 +37,22 @@
 - fonts.conf：字体配置。
 - manager.json：管理器窗口状态。
 
-### script-opts/（已上传）
+### script-opts/
 
 - uosc_danmaku.conf：uosc 弹幕插件配置。
 - rife_runtime_default.json：RIFE 动态菜单的默认参数。
-- rife_runtime.json：RIFE 动态菜单当前选择状态。属于运行态，已纳入 .gitignore，但历史中被 track；后续应 git rm --cached 移除。
+- rife_runtime.json：RIFE 动态菜单当前选择状态，属于运行态。当前 Git 索引仍有上游遗留跟踪，累计打包工具明确排除它；用户自己的选择不能被覆盖更新。
 - rife_sr_runtime_default.json：超分补帧自定义组合默认选择。
 - rife_sr_runtime.json：超分补帧当前待应用选择，属于运行态，不上传、不打包。
 - uosc_danmaku_style.json：跨进程弹幕样式与直播帧率偏好，属于运行态。
 
-### scripts/（已上传）
+### scripts/
 
-MPV Lua/JS 脚本，全部已上传：
+MPV Lua／JS 源码：
 
-- quality-menu.lua：清晰度菜单，支持 yt-dlp 格式和直接 HLS editions。
+- quality-menu.lua：清晰度菜单，支持 yt-dlp、HLS、浏览器交接的 DASH／FLV 及合集条目；通用重载与直链切流共用有目标校验和失败清理的续播回调。
+- web_playlist.lua：当前 CID 快启、完整清单接收、后台原生列表扩展及延迟解析；扩展保留当前 native ID 与播放状态。
+- web_progress.lua：网页启动会话的进度发布、各 CID 隔离及品质切换保护。
 - rife_runtime_menu.lua：RIFE 动态参数菜单（模型/Turbo/flow_scale/H_Pre）。
 - ytdl-retry.lua：yt-dlp 403 自动重试（SpankBang 场景）。
 - telegram_web_mpv_bridge.lua：Browser Media Bridge MPV 端控制脚本，优先启动 Release EXE。
@@ -76,17 +67,19 @@ MPV Lua/JS 脚本，全部已上传：
 - auto_load_fonts.js / auto_sub_fonts_dir.lua：字体自动加载。
 - thumbfast_2025.lua / playlist_osd_2025.lua：2025 版缩略图和播放列表。
 
-### scripts 子目录（已上传）
+### scripts 子目录
 
-- bilibiliAssert/：B 站弹幕集成（含 main.lua、模块、Danmu2Ass 转换逻辑）。注意：Danmu2Ass.exe 已从仓库移除，本地需自行准备。
-- uosc/：uosc 现代化界面框架。注意：bin/ziggy-windows.exe 已从仓库移除。
+- bilibiliAssert/：保留旧 `b`／toggle 入口，转交统一 `uosc_danmaku` 渲染、显示开关和已保存样式；目录保留上游转换源码，普通视频交接不再使用独立固定样式转换路径。
+- uosc/：界面框架；`lib/web_playlist_tree.lua` 和 `lib/web_playlist_menu.lua` 提供合集／视频／分 P 层级菜单及后台加载／失败状态。二进制工具由可运行基础包提供。
 - uosc_danmaku/：uosc 弹幕插件，包含实时 API、跨进程样式和直播帧率。
 - trakt-scrobble/：Trakt 追踪插件（含 main.lua、modules、README）。
 - thumb_engine/：缩略图引擎。
 
-### vs/（已上传）
+不同脚本目录中的同名 `menu.lua`、`base64.lua` 等属于各自的模块加载域，不因名字或部分内容相同就直接合并删除。备份入口、兼容入口和用户数据也不按文件名判定为重复项。
 
-VapourSynth 滤镜脚本，全部 .vpy 文件已上传：
+### vs/
+
+VapourSynth 滤镜源码：
 
 - MEMC_*.vpy：补帧脚本（RIFE、MVTools、DRBA）。
 - MIX_UAI_*.vpy：超分脚本（UAI、AnimeJaNai、RealESRGAN、LiveAction、StarSample）。
@@ -95,20 +88,33 @@ VapourSynth 滤镜脚本，全部 .vpy 文件已上传：
 
 这些脚本引用的 ONNX 模型和 CUDA/TensorRT DLL 不在仓库，需本地准备。
 
-### shaders/（已上传）
+`SR_ARTCNN_NV_2025.vpy` 保留旧菜单／配置入口，转用同目录 `SR_ARTCNN_NV_2K.vpy` 的共用预设参数，不再复制维护一套相同实现。
 
-780 个 GLSL 着色器文件，按类别分目录：AA、Anime4K、ACNet、FSRCNNX、ESRGAN、Krig、SSimDownscaler 等。
+### shaders/
 
-### fonts/（已上传）
+GLSL 着色器按类别分目录：AA、Anime4K、ACNet、FSRCNNX、ESRGAN、Krig、SSimDownscaler 等。
+
+### fonts/
 
 字体文件：LXGWWenKaiMono、MaterialIcons、uosc_textures。
+
+## installer/ 详细
+
+- mpv-register.bat：调用 `mpv.com --register` 注册 mpv。
+- mpv-unregister.bat：调用 `mpv.com --unregister` 取消注册。
+- umpv-install.bat：将 `umpv.exe` 写入系统“打开方式”和默认程序候选，需管理员权限。
+- umpv-uninstall.bat：撤销 `umpv.exe` 注册表项，需管理员权限。
+- mpv-测试模式.bat / mpv-纯净模式.bat / mpv-跑分模式.bat：用于诊断配置、脚本和性能问题。
+- mpv-BenchMark.conf / mpv-test.conf / mpv-icon.ico：上述脚本使用的配置与图标。
+
+这些文件由完整基础包提供。详细使用说明见 [工具脚本安装配置使用说明](./docs/工具脚本安装配置使用说明.md)。
 
 ## docs/ 详细
 
 - README.md：文档总索引。
 - research/：人工研究报告（RIFE 性能调查、真人超分、Telegram Bridge、HLS 清晰度菜单等）。
 - articles/：面向用户的介绍文章。
-- reports/：可视化 HTML 报告（RIFE Benchmark Dashboard）。
+- reports/：RIFE 可视化报告，以及弹幕、品质、进度、层级列表和快启实测记录；本次见 [清理与快启报告](./docs/reports/2026-10-14-cleanup-and-fast-start.md)。
 - archive/2025-migration/：2025→2026 迁移文档精选。
 - repowiki/README.md：知识库索引（.qoder 内容已从仓库移除）。
 
@@ -117,8 +123,10 @@ VapourSynth 滤镜脚本，全部 .vpy 文件已上传：
 - rife_benchmark.py：RIFE 性能基准测试脚本。
 - rife_engine_builder.py / rife_engine_monitor.py：TensorRT engine 预构建和监控。
 - export_realesr_general_x4v3_dynamic.py：RealESRGAN 模型动态 ONNX 导出工具。
-- telegram-web-mpv-bridge/：Browser Media Bridge 源码与开发回退。已有整合包使用 `browser-media-bridge.exe` 和 `douyu-danmaku-client.exe`；本次新增独立 `bilibili-live-bridge.exe`，从 PC 网页交接 B 站直播实时弹幕。专用服务使用 `9001/9002`，构建后普通用户不需要 Python/Node。
+- telegram-web-mpv-bridge/：Browser Media Bridge 源码与开发回退。已有整合包使用 `browser-media-bridge.exe` 和 `douyu-danmaku-client.exe`；独立 `bilibili-live-bridge.exe` 负责 B站直播弹幕、双向进度及网页列表。专用服务使用 `9001/9002`，构建后普通用户不需要 Python／Node。`web_playlist.py` 管理当前 CID 快启与后台完整扩展，每份清单 32 MiB、最多八个会话；IPC 预算和发送共用字节序列化。
+- release/package_custom_update.py：从本仓库指定 Git 提交生成累计覆盖更新，补齐耦合模块并排除用户运行数据。
 - release/package_release.py：从已验证完整包生成 base / ai / config / docs 分类压缩包，并可选择上传到 GitHub Release。
+- release/smoke_test_web_playlist_hierarchy.py：真实 MPV 层级列表；`--fast-start` 检查一个当前条目扩展为完整合集且不重载。
 
 ## 未上传的内容（本地依赖）
 
@@ -159,17 +167,17 @@ VapourSynth 滤镜脚本，全部 .vpy 文件已上传：
 
 ## 日常维护
 
-- 日常配置修改在 F:\mpv_2026\mpv-lazy 完成。
-- 需要同步到远端时，将改动复制到 F:\mpv_2026\mpv-lazy-26_github 对应文件，再 git add && commit && push。
+- 源码修改在当前检出 `C:\Users\Hikig\Documents\GitHub\mpv-lazy-2026-custom` 中完成，验证后再复制到指定可运行安装目录；测试实例与用户实际偏好分开保存。
+- 提交与推送前核对 `git diff`，构建 EXE 和更新包时记录准确源提交及哈希。Git 发布操作应由明确的发布任务执行。
 - 涉及敏感信息（cookie、token、api key）的文件永远不要 git add。
 - 新增模型或二进制时，确认 .gitignore 规则覆盖，避免误提交。
-## v2026.06 分类发布
+## 原项目 v2026.06 与本仓库累计更新
 
-Release 附件已从“全量分卷 + hotfix”调整为分类包：
+原项目的 v2026.06 可运行基础采用分类包：
 
 - `mpv-lazy-2026-custom-base-v2026.06.zip`：基础可播放包。
 - `mpv-lazy-2026-custom-ai-v2026.06.zip.001` 起始的 AI/VS 分卷：VapourSynth、TensorRT/CUDA、RIFE、UAI、RealESRGAN、AnimeJaNai、faster-whisper 等大型依赖。
 - `mpv-lazy-2026-custom-config-v2026.06.zip`：菜单、脚本、快捷键、滤镜 vpy、配置文件更新包。
 - `mpv-lazy-2026-custom-docs-v2026.06.zip`：迁移记录、测试报告和使用文档。
 
-后续只更新菜单、脚本或 `.vpy` 滤镜时，通常只需要重新发布 `config` 小包。
+本仓库已发布的 [v2026.10.12-progress-update](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.12-progress-update) 是覆盖原可运行基础的累计更新，包内用户脚本为 `.19`。当前 `.24` 源码／本机更新的完整合集快启和清理修复尚未包含在该旧 Release 中；版本关系及升级方法见 [README](./README.MD)。原项目分类包工具的 F 盘默认路径和上传目标不能当作本仓库当前维护位置或发布目标。

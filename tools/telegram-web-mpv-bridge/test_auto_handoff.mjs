@@ -30,7 +30,7 @@ function fixture() {
         ] },
         currentParser: { parserKey: 'ytdlp', play: async player => launches.push(player.name) },
         automaticHandoffState: undefined, automaticHandoffTimer: undefined,
-        handoffLaunchInFlight: false, iframeListenersAttached: false,
+        handoffLaunchInFlight: false, handoffUiReady: true, iframeListenersAttached: false,
         handoffPrimaryButton: undefined, handoffDockPlayButton: undefined, resourceSniffer: undefined,
         document: { querySelectorAll: () => [] },
         window: { addEventListener: (type, handler) => listeners.push(handler) },
@@ -259,6 +259,31 @@ test('Bilibili list/festival DOM content identity launches new selections withou
     assert.deepEqual(launches, ['MPV', 'MPV']);
     assert.notEqual(context.getAutoHandoffPageKey('https://example.test/player?source=first'),
         context.getAutoHandoffPageKey('https://example.test/player?source=next'));
+});
+
+test('automatic launch waits for body and feedback controls instead of consuming its only attempt early', async () => {
+    const f = fixture();
+    f.context.currentConfig.global.autoHandoff = true;
+    f.context.handoffUiReady = false;
+    let releaseBody;
+    const appended = [];
+    f.context.waitForBody = () => new Promise(resolve => { releaseBody = resolve; });
+    for (const name of ['appendCss', 'appendToastDiv', 'appendLoadingDiv', 'appendButtonDiv']) {
+        f.context[name] = () => appended.push(name);
+    }
+    vm.runInContext(between('async function appendAll() {', 'async function initTop() {'), f.context);
+    const initializing = f.context.appendAll();
+    f.context.scheduleAutomaticHandoff();
+    assert.equal(await f.fireAuto(), false);
+    assert.deepEqual(f.launches, []);
+    releaseBody();
+    await initializing;
+    assert.deepEqual(appended, ['appendCss', 'appendToastDiv', 'appendLoadingDiv', 'appendButtonDiv']);
+    f.context.scheduleAutomaticHandoff();
+    assert.equal(await f.fireAuto(), true);
+    f.context.scheduleAutomaticHandoff();
+    assert.equal(await f.fireAuto(), false);
+    assert.deepEqual(f.launches, ['MPV']);
 });
 
 test('initial resource sniffing includes early performance entries while later SPA pages use a recent window', async () => {

@@ -3,7 +3,7 @@
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.14.21
+// @version                 1.2.14.24
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -256,6 +256,7 @@ const translations = {
         ,handoffQualityAuto: 'Best available'
         ,handoffDanmakuUnavailable: 'Danmaku unavailable; playing video only'
         ,handoffPlaylistUnavailable: 'Playlist unavailable; playing the selected video'
+        ,handoffPlaylistMetadataFailed: 'Full playlist loading failed; the current video keeps playing. Keep the webpage open and retry.'
         ,handoffPlaylistUpdateRequired: 'Update the local bridge to enable webpage playlists'
     },
     zh: {
@@ -303,6 +304,7 @@ const translations = {
         ,handoffQualityAuto: '最高可用'
         ,handoffDanmakuUnavailable: '弹幕不可用，仍将播放视频'
         ,handoffPlaylistUnavailable: '播放列表暂不可用，仍将播放当前视频'
+        ,handoffPlaylistMetadataFailed: '完整列表加载失败，当前视频仍在播放；请保留原网页并重新移交'
         ,handoffPlaylistUpdateRequired: '请更新本地中继以启用网页播放列表'
     }
 };
@@ -520,8 +522,24 @@ async function fetchBilibiliLiveJson(url) {
     const timeout = setTimeout(() => controller.abort(), 6000);
     try {
         const response = await fetch(url, { credentials: 'include', signal: controller.signal });
-        if (!response.ok) throw new Error(`Bilibili live request failed (${response.status})`);
-        return await response.json();
+        if (!response.ok) {
+            const error = new Error('Bilibili request failed');
+            error.bilibiliRequestCause = 'request_http';
+            error.httpStatus = response.status;
+            throw error;
+        }
+        try { return await response.json(); }
+        catch (failure) {
+            if (controller.signal.aborted) throw failure;
+            const error = new Error('Bilibili response is not JSON');
+            error.bilibiliRequestCause = 'response_json';
+            throw error;
+        }
+    } catch (failure) {
+        if (failure?.bilibiliRequestCause) throw failure;
+        const error = new Error('Bilibili request failed');
+        error.bilibiliRequestCause = controller.signal.aborted ? 'request_timeout' : 'request_network';
+        throw error;
     } finally {
         clearTimeout(timeout);
     }
@@ -784,7 +802,7 @@ class BrowserMediaBridge {
             }
             if (message.type === 'startPlaybackProgress') this.httpPlaybackSessions.add(result.reply.sessionId);
             if (message.type === 'stopPlaybackProgress') this.httpPlaybackSessions.delete(message.sessionId);
-            if (['registerWebPlaylist', 'commitWebPlaylist', 'getWebPlaylist'].includes(message.type)) {
+            if (['registerWebPlaylist', 'commitWebPlaylist', 'getWebPlaylist', 'failWebPlaylistMetadata'].includes(message.type)) {
                 const playlist = result.reply.playlist || result.reply;
                 if (playlist.playlistId) this.httpWebPlaylists.add(playlist.playlistId);
                 if (typeof bilibiliWebPlaylists !== 'undefined') bilibiliWebPlaylists.adopt(playlist);
@@ -851,7 +869,8 @@ class BrowserMediaBridge {
         for (const message of events) {
             if (message?.type === 'playbackProgressStopped') this.httpPlaybackSessions.delete(message.sessionId);
             if (message?.type === 'webPlaylistStopped') this.httpWebPlaylists.delete(message.playlistId);
-            if (['playbackProgress', 'playbackProgressStopped', 'resolveWebPlaylistItem', 'webPlaylistStopped'].includes(message?.type)) {
+            if (['playbackProgress', 'playbackProgressStopped', 'resolveWebPlaylistItem', 'webPlaylistStopped',
+                'webPlaylistMetadataReady', 'webPlaylistMetadataFailed'].includes(message?.type)) {
                 this.handleMessage({ data: JSON.stringify(message) });
             }
         }
@@ -941,14 +960,14 @@ class BrowserMediaBridge {
         try { message = JSON.parse(event.data); } catch (error) { return; }
         if (['playbackProgressState', 'playbackProgressSaved', 'playbackProgressStarted', 'webPlaylistRegistered',
             'webPlaylistUploadStarted', 'webPlaylistItemsAppended', 'webPlaylistItems',
-            'webPlaylistState', 'webPlaylistItemSubmitted', 'webPlaylistItemSaved', 'webPlaylistStopped'].includes(message.type) && message.requestId) {
+            'webPlaylistState', 'webPlaylistItemSubmitted', 'webPlaylistItemSaved', 'webPlaylistStopped', 'webPlaylistMetadataFailed'].includes(message.type) && message.requestId) {
             if (typeof bilibiliWebPlaylists !== 'undefined' && (message.playlist ||
-                message.type === 'webPlaylistRegistered' || message.type === 'webPlaylistState')) {
+                message.type === 'webPlaylistRegistered' || message.type === 'webPlaylistState' || message.type === 'webPlaylistMetadataFailed')) {
                 bilibiliWebPlaylists.adopt(message.playlist || message);
             }
             const pending = this.pendingPlaybackRequests.get(message.requestId);
             if (pending) { this.pendingPlaybackRequests.delete(message.requestId); pending.resolve(message); }
-        } else if (message.type === 'resolveWebPlaylistItem' || message.type === 'webPlaylistStopped') {
+        } else if (['resolveWebPlaylistItem', 'webPlaylistStopped', 'webPlaylistMetadataReady', 'webPlaylistMetadataFailed'].includes(message.type)) {
             if (typeof bilibiliWebPlaylists !== 'undefined') bilibiliWebPlaylists.handleMessage(message);
         } else if (message.type === 'playbackProgress' || message.type === 'playbackProgressStopped') {
             if (typeof playbackProgressSync !== 'undefined') playbackProgressSync.handleBridgeMessage(message);
@@ -1623,7 +1642,10 @@ async function fetchBilibiliQualityJson(url) {
         const response = await fetch(url, { credentials: 'include', signal: controller.signal });
         if (!response.ok) throw new Error(`Bilibili stream request failed (${response.status})`);
         const payload = await response.json();
-        if (Number(payload?.code) !== 0) throw new Error(`Bilibili stream unavailable (API code ${Number(payload?.code)})`);
+        if (Number(payload?.code) !== 0) {
+            const error = new Error(`Bilibili stream unavailable (API code ${Number(payload?.code)})`);
+            error.apiCode = Number(payload?.code); throw error;
+        }
         return payload;
     } finally { clearTimeout(timeout); }
 }
@@ -1745,22 +1767,198 @@ function parseBilibiliDashStreams(data, preferredCodec) {
     return [...byQuality.values()].sort((left, right) => right.quality - left.quality);
 }
 
-async function fetchBilibiliVideoPlayInfo(aid, cid, epid, fnval = 4048) {
-    if (epid) {
-        const result = await fetchBilibiliQualityJson(`https://api.bilibili.com/pgc/player/web/v2/playurl?qn=127&otype=json&fourk=1&fnver=0&fnval=${fnval}&avid=${aid}&cid=${cid}&ep_id=${epid}&from_client=BROWSER&module=bangumi&drm_tech_type=2&support_multi_audio=true`);
-        return result.result?.video_info;
+// BILIBILI_REQUEST_CACHE_HELPERS_START
+const bilibiliViewRequests = new Map(), bilibiliPartRequests = new Map(), bilibiliPlayRequests = new Map(), bilibiliWbiRequests = new Map();
+const BILIBILI_METADATA_CAUSES = new Set(['request_timeout', 'request_network', 'request_http', 'response_json',
+    'api_rejected', 'response_identity', 'response_pages_missing', 'part_identity_mismatch', 'parts_incomplete',
+    'collection_incomplete', 'page_changed', 'collection_discovery_failed', 'metadata_upload_failed', 'metadata_unavailable']);
+function bilibiliMetadataError(cause, details = {}) {
+    const messages = { collection_incomplete: 'Incomplete Bilibili collection metadata',
+        parts_incomplete: 'Incomplete Bilibili part metadata', page_changed: 'Bilibili collection page changed' };
+    const error = new Error(messages[cause] || 'Bilibili video metadata unavailable');
+    error.metadataCause = BILIBILI_METADATA_CAUSES.has(cause) ? cause : 'metadata_unavailable';
+    if (/^[1-9]\d{0,19}$/.test(String(details.aid || ''))) error.metadataAid = String(details.aid);
+    if (Number.isSafeInteger(details.apiCode)) error.apiCode = details.apiCode;
+    if (Number.isInteger(details.httpStatus) && details.httpStatus >= 100 && details.httpStatus <= 599) error.httpStatus = details.httpStatus;
+    return error;
+}
+function traceBilibiliMetadata(phase, error, details = {}) {
+    const message = { phase };
+    if (['fetch', 'begin', 'append', 'commit'].includes(details.stage)) message.stage = details.stage;
+    if (error) message.cause = BILIBILI_METADATA_CAUSES.has(error.metadataCause) ? error.metadataCause : 'metadata_unavailable';
+    const aid = error?.metadataAid || details.aid;
+    if (/^[1-9]\d{0,19}$/.test(String(aid || ''))) message.aid = String(aid);
+    if (Number.isSafeInteger(error?.apiCode)) message.apiCode = error.apiCode;
+    if (Number.isInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599) message.httpStatus = error.httpStatus;
+    for (const name of ['requestedVideos', 'completedVideos', 'listedVideos', 'ms']) {
+        if (Number.isSafeInteger(details[name]) && details[name] >= 0) message[name] = details[name];
     }
-    const nav = await fetchBilibiliLiveJson('https://api.bilibili.com/x/web-interface/nav');
-    const key = value => String(value || '').split('/').pop().split('.')[0];
-    const query = buildBilibiliWbiQuery({ avid: aid, cid, qn: 127, otype: 'json', fourk: 1, fnver: 0, fnval },
-        key(nav?.data?.wbi_img?.img_url), key(nav?.data?.wbi_img?.sub_url));
-    return (await fetchBilibiliQualityJson(`https://api.bilibili.com/x/player/wbi/playurl?${query}`)).data;
+    // Emit only fixed categories, public identifiers and numeric diagnostics.
+    // Original exception messages and source/request objects may carry credentials.
+    console.debug?.('External Player: playlist_metadata_diagnostic', JSON.stringify(message));
+}
+function bilibiliTimingNow() {
+    return typeof performance === 'object' && typeof performance.now === 'function' ? performance.now() : Date.now();
+}
+function traceBilibiliHandoff(phase, startedAt, details = {}) {
+    if (!Number.isFinite(startedAt)) return;
+    const message = { phase, ms: Math.max(0, Math.round(bilibiliTimingNow() - startedAt)) };
+    if (/^BV[a-zA-Z0-9]{1,30}$/.test(String(details.bvid))) message.bvid = details.bvid;
+    for (const name of ['itemCount', 'videoCount']) if (Number.isSafeInteger(details[name]) && details[name] > 0) message[name] = details[name];
+    // Diagnostics contain public identifiers and timings only. Never log the
+    // source object, browser account fields, signed URLs or headers.
+    console.debug?.('External Player: handoff_timing', JSON.stringify(message));
+}
+function reuseBilibiliRequest(cache, key, ttl, limit, request) {
+    const now = Date.now();
+    for (const [id, entry] of cache) if (entry.expires && entry.expires <= now) cache.delete(id);
+    const previous = cache.get(key);
+    if (previous) return previous.promise;
+    const entry = { expires: 0 };
+    entry.promise = Promise.resolve().then(request).then(value => {
+        entry.expires = Date.now() + ttl;
+        return value;
+    }, error => { if (cache.get(key) === entry) cache.delete(key); throw error; });
+    cache.set(key, entry);
+    while (cache.size > limit) cache.delete(cache.keys().next().value);
+    return entry.promise;
+}
+function bilibiliVideoRoute(pageUrl) {
+    const url = new URL(pageUrl);
+    return url.hostname === 'www.bilibili.com' && url.pathname.match(/^\/video\/(BV[a-zA-Z0-9]+|av\d+)\/?$/)?.[1];
+}
+async function fetchBilibiliMetadataJson(url, aid, retryTransient = false) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const response = await fetchBilibiliLiveJson(url);
+            if (Number(response?.code) !== 0) throw bilibiliMetadataError('api_rejected', { aid, apiCode: Number(response?.code) });
+            return response;
+        } catch (failure) {
+            const error = failure?.metadataCause ? failure : bilibiliMetadataError(failure?.bilibiliRequestCause,
+                { aid, httpStatus: failure?.httpStatus });
+            const transient = ['request_timeout', 'request_network'].includes(error.metadataCause) ||
+                error.metadataCause === 'request_http' && error.httpStatus >= 500;
+            // A single transient detail failure must not discard hundreds
+            // of valid entries. Risk-control/API rejections are never retried.
+            if (!retryTransient || attempt !== 0 || !transient) throw error;
+            traceBilibiliMetadata('request-retry', error);
+            await new Promise(resolve => setTimeout(resolve, 350));
+        }
+    }
+}
+function fetchBilibiliVideoData(id) {
+    if (!/^(?:BV[a-zA-Z0-9]{1,30}|av[1-9]\d{0,19})$/.test(String(id))) throw new Error('Invalid Bilibili video id');
+    return reuseBilibiliRequest(bilibiliViewRequests, id, 60000, 2, async () => {
+        const query = id.startsWith('BV') ? `bvid=${id}` : `aid=${id.slice(2)}`;
+        const response = await fetchBilibiliMetadataJson(`https://api.bilibili.com/x/web-interface/view?${query}`,
+            id.startsWith('av') ? id.slice(2) : undefined);
+        const data = response?.data;
+        if (!/^[1-9]\d{0,19}$/.test(String(data?.aid)) ||
+            !/^BV[a-zA-Z0-9]{1,30}$/.test(String(data?.bvid)) ||
+            (id.startsWith('BV') ? data.bvid !== id : String(data.aid) !== id.slice(2))) throw bilibiliMetadataError('response_identity', { aid: data?.aid });
+        if (!Array.isArray(data.pages) || !data.pages.length) throw bilibiliMetadataError('response_pages_missing', { aid: data.aid });
+        return data;
+    });
+}
+function fetchBilibiliPartData(aid, bvid, knownPages = [], expectedCount = 0) {
+    if (!/^[1-9]\d{0,19}$/.test(String(aid)) || !/^BV[a-zA-Z0-9]{1,30}$/.test(String(bvid))) {
+        throw bilibiliMetadataError('response_identity');
+    }
+    const validate = detail => {
+        if (Number.isInteger(expectedCount) && expectedCount > detail.pages.length) throw bilibiliMetadataError('parts_incomplete', { aid });
+        for (const [index, known] of knownPages.entries()) {
+            if (!known?.cid) continue;
+            const page = Number(known.page) || index + 1;
+            if (!Number.isInteger(page) || String(detail.pages[page - 1]?.cid) !== String(known.cid)) {
+                throw bilibiliMetadataError('part_identity_mismatch', { aid });
+            }
+        }
+        return detail;
+    };
+    // The existing MPV Bilibili loader uses this endpoint for every P. Unlike
+    // view, its complete page array does not repeat the whole collection tree.
+    return reuseBilibiliRequest(bilibiliPartRequests, `${aid}:${bvid}`, 60000, 32, async () => {
+        const response = await fetchBilibiliMetadataJson(`https://api.bilibili.com/x/player/pagelist?aid=${aid}`, aid, true);
+        if (!Array.isArray(response.data) || !response.data.length) throw bilibiliMetadataError('response_pages_missing', { aid });
+        const seen = new Set();
+        const pages = response.data.map((page, index) => {
+            const cid = String(page?.cid || '');
+            if (!/^[1-9]\d{0,19}$/.test(cid) || Number(page.page) !== index + 1 || seen.has(cid)) {
+                throw bilibiliMetadataError('parts_incomplete', { aid });
+            }
+            seen.add(cid);
+            return { cid, page: index + 1, part: String(page.part || ''), duration: Number(page.duration) || 0 };
+        });
+        return validate({ aid: String(aid), bvid, pages, videos: pages.length });
+    }).then(validate);
+}
+function fetchBilibiliWbiKeys() {
+    return reuseBilibiliRequest(bilibiliWbiRequests, 'keys', 10 * 60 * 1000, 1, async () => {
+        const nav = await fetchBilibiliLiveJson('https://api.bilibili.com/x/web-interface/nav');
+        const key = value => String(value || '').split('/').pop().split('.')[0];
+        const keys = [key(nav?.data?.wbi_img?.img_url), key(nav?.data?.wbi_img?.sub_url)];
+        if (keys.some(value => !/^[a-f0-9]{32}$/i.test(value))) throw new Error('Bilibili WBI keys unavailable');
+        // Signing keys are public. Do not retain nav account/profile fields.
+        return keys;
+    });
+}
+// BILIBILI_REQUEST_CACHE_HELPERS_END
+
+function fetchBilibiliVideoPlayInfo(aid, cid, epid, fnval = 4048) {
+    // The initial handoff and the first playlist resolver need the same source.
+    // Keep its exact signed URLs briefly in this tab; never persist them.
+    return reuseBilibiliRequest(bilibiliPlayRequests, `${aid}:${cid}:${epid || ''}:${fnval}`, 15000, 4, async () => {
+        if (epid) {
+            const result = await fetchBilibiliQualityJson(`https://api.bilibili.com/pgc/player/web/v2/playurl?qn=127&otype=json&fourk=1&fnver=0&fnval=${fnval}&avid=${aid}&cid=${cid}&ep_id=${epid}&from_client=BROWSER&module=bangumi&drm_tech_type=2&support_multi_audio=true`);
+            return result.result?.video_info;
+        }
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const [imgKey, subKey] = await fetchBilibiliWbiKeys();
+            const query = buildBilibiliWbiQuery({ avid: aid, cid, qn: 127, otype: 'json', fourk: 1, fnver: 0, fnval }, imgKey, subKey);
+            try { return (await fetchBilibiliQualityJson(`https://api.bilibili.com/x/player/wbi/playurl?${query}`)).data; }
+            catch (error) {
+                // WBI image keys can rotate before our short cache expires.
+                // Refresh once on a rejected signature; never retry risk-control
+                // responses or downgrade quality to make a source appear valid.
+                if (attempt !== 0 || error.apiCode !== -403) throw error;
+                bilibiliWbiRequests.clear();
+            }
+        }
+    });
 }
 // BILIBILI_STREAM_QUALITY_HELPERS_END
 
 // BILIBILI_WEB_PLAYLIST_HELPERS_START
 const BILIBILI_WEB_PLAYLIST_CHUNK_ITEMS = 100;
 const BILIBILI_WEB_PLAYLIST_CHUNK_BYTES = 48 * 1024;
+let bilibiliPlaylistWarmup;
+function preloadBilibiliPlaylistPage(pageUrl) {
+    const id = bilibiliVideoRoute(pageUrl);
+    if (!id || self !== top) { bilibiliPlaylistWarmup = undefined; return; }
+    const pageKey = getAutoHandoffPageKey(pageUrl);
+    if (bilibiliPlaylistWarmup?.pageKey === pageKey) return;
+    const warmup = { pageKey };
+    bilibiliPlaylistWarmup = warmup;
+    warmup.promise = fetchBilibiliVideoData(id).then(data => {
+        warmup.data = data;
+        return data;
+    });
+    // Ordinary webpage viewing only warms the selected view, shared with
+    // resume recovery. Hundreds of part details wait for handoff intent.
+    void warmup.promise.catch(() => { if (bilibiliPlaylistWarmup === warmup) bilibiliPlaylistWarmup = undefined; });
+}
+function completeBilibiliPlaylistForLaunch(data, pageUrl, isCurrent) {
+    const pageKey = getAutoHandoffPageKey(pageUrl);
+    const warmup = bilibiliPlaylistWarmup?.pageKey === pageKey && bilibiliPlaylistWarmup.data === data ? bilibiliPlaylistWarmup : undefined;
+    if (warmup?.completion) return warmup.completion;
+    const completion = completeBilibiliPlaylistData(data, pageUrl, isCurrent).then(completed => {
+        if (warmup) warmup.completed = completed;
+        return completed;
+    });
+    if (warmup) warmup.completion = completion;
+    void completion.catch(() => { if (warmup?.completion === completion) warmup.completion = undefined; });
+    return completion;
+}
 function bilibiliPlaylistText(value, fallback = '') {
     const text = String(value || fallback).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
     let title = '', bytes = 0;
@@ -1836,12 +2034,17 @@ async function completeBilibiliPlaylistData(data, pageUrl, isCurrent = () => tru
     if (!Array.isArray(season?.sections)) return data;
     const sections = season.sections.map(section => ({ ...section, episodes: (section.episodes || []).map(episode => ({ ...episode })) }));
     const episodes = sections.flatMap(section => section.episodes);
-    if (Number(season.ep_count) > episodes.length) throw new Error('Incomplete Bilibili collection metadata');
+    if (Number(season.ep_count) > episodes.length) {
+        const error = bilibiliMetadataError('collection_incomplete', { aid: data.aid });
+        traceBilibiliMetadata('collection-failed', error, { listedVideos: episodes.length });
+        throw error;
+    }
     const cache = new Map([[String(data.aid), Promise.resolve(data)]]);
-    let cursor = 0, failed = false;
+    const startedAt = bilibiliTimingNow();
+    let cursor = 0, failed = false, requestedVideos = 0, completedVideos = 0;
     const worker = async () => {
         try { while (cursor < episodes.length && !failed) {
-            if (!isCurrent()) throw new Error('Bilibili collection page changed');
+            if (!isCurrent()) throw bilibiliMetadataError('page_changed', { aid: data.aid });
             const episode = episodes[cursor++], archive = episode.arc || episode.archive || {};
             const aid = String(episode.aid || archive.aid || ''), bvid = String(episode.bvid || archive.bvid || '');
             if (!/^[1-9]\d{0,19}$/.test(aid) || !/^BV[a-zA-Z0-9]{1,30}$/.test(bvid)) continue;
@@ -1850,23 +2053,30 @@ async function completeBilibiliPlaylistData(data, pageUrl, isCurrent = () => tru
             if (aid !== String(data.aid) && (explicit?.length && Number.isInteger(count) && count > 0 && explicit.length >= count ||
                 count === 1 && (episode.page?.cid || episode.cid || archive.cid))) continue;
             if (!cache.has(aid)) cache.set(aid, (async () => {
-                const response = await fetchBilibiliLiveJson(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`);
-                if (response.code !== 0 || String(response.data?.aid) !== aid || response.data?.bvid !== bvid ||
-                    !Array.isArray(response.data.pages) || !response.data.pages.length) throw new Error('Bilibili part metadata unavailable');
-                if (Number(response.data.videos) > response.data.pages.length) throw new Error('Incomplete Bilibili part metadata');
+                requestedVideos++;
+                let detail;
+                const knownPages = explicit?.length ? explicit : [episode.page || { cid: episode.cid || archive.cid, page: 1 }];
+                try { detail = await fetchBilibiliPartData(aid, bvid, knownPages, count); }
+                catch (failure) { throw bilibiliMetadataError(failure?.metadataCause, { aid, apiCode: failure?.apiCode, httpStatus: failure?.httpStatus }); }
+                if (String(detail.aid) !== aid) throw bilibiliMetadataError('part_identity_mismatch', { aid });
+                if (Number(detail.videos) > detail.pages.length) throw bilibiliMetadataError('parts_incomplete', { aid });
+                completedVideos++;
                 // Each view response can repeat the entire collection. Cache
                 // only public part metadata rather than N copies of that tree.
-                return { aid: response.data.aid, bvid: response.data.bvid, pages: response.data.pages };
+                return detail;
             })());
             const detail = await cache.get(aid);
-            if (!isCurrent()) throw new Error('Bilibili collection page changed');
-            if (Number.isInteger(count) && count > detail.pages.length) throw new Error('Incomplete Bilibili part metadata');
+            if (!isCurrent()) throw bilibiliMetadataError('page_changed', { aid });
+            if (Number.isInteger(count) && count > detail.pages.length) throw bilibiliMetadataError('parts_incomplete', { aid });
             episode._playlistPages = detail.pages;
         } } catch (error) { failed = true; throw error; }
     };
     const outcomes = await Promise.allSettled(Array.from({ length: Math.min(3, episodes.length) }, worker));
     const failure = outcomes.find(outcome => outcome.status === 'rejected');
-    if (failure) throw failure.reason;
+    const diagnostics = { listedVideos: episodes.length, requestedVideos, completedVideos,
+        ms: Math.max(0, Math.round(bilibiliTimingNow() - startedAt)) };
+    if (failure) { traceBilibiliMetadata('collection-failed', failure.reason, diagnostics); throw failure.reason; }
+    traceBilibiliMetadata('collection-complete', undefined, diagnostics);
     return { ...data, ugc_season: { ...season, sections } };
 }
 function debugBilibiliPlaylistData(data) {
@@ -1938,11 +2148,13 @@ class BilibiliWebPlaylists {
         if (!/^playlist-[a-f0-9]{32}$/.test(String(playlist?.playlistId || '')) ||
             !/^progress-[a-zA-Z0-9_-]{1,43}$/.test(String(playlist?.sessionId || ''))) return undefined;
         const itemCount = Number(playlist.itemCount ?? playlist.items?.length);
-        if (!Number.isSafeInteger(itemCount) || itemCount < 2) return undefined;
+        if (!Number.isSafeInteger(itemCount) || itemCount < 1 || itemCount === 1 && playlist.metadataPending !== true) return undefined;
         const items = (Array.isArray(playlist.items) ? playlist.items : playlist.currentItem ? [playlist.currentItem] : [])
             .map((item, index) => normalizeBilibiliPlaylistEntry(item, index));
         if (items.some(item => !item) || new Set(items.map(item => item.itemId)).size !== items.length) return undefined;
         const previous = this.playlists.get(playlist.playlistId);
+        if (previous && previous.sessionId !== playlist.sessionId) return undefined;
+        if (previous && Number.isSafeInteger(previous.revision) && Number.isSafeInteger(playlist.revision) && playlist.revision < previous.revision) return undefined;
         const state = Object.assign(previous || { items: [], itemMap: new Map(), sequences: new Map(), resolving: new Map() },
             { ...playlist, items: previous?.items || [], itemCount });
         for (const item of items) this.addItem(state, item);
@@ -1997,11 +2209,23 @@ class BilibiliWebPlaylists {
             const error = new Error('Web playlist bridge update required'); error.code = 'web_playlist_update_required'; throw error;
         }
         await this.bridge.ensurePlaybackBridge(false);
+        return health;
     }
-    async register(media, player, data, pageUrl) {
-        const found = discoverBilibiliWebPlaylist(data, pageUrl, media.bilibili?.cid);
+    async register(media, player, data, pageUrl, pendingMetadata) {
+        let found = discoverBilibiliWebPlaylist(data, pageUrl, media.bilibili?.cid);
         if (!found) return media;
-        await this.ensureBridge();
+        const health = await this.ensureBridge();
+        if (pendingMetadata && health.webPlaylistFastStartApiVersion !== 1) {
+            // Older supported bridges retain the complete-list behavior. A
+            // one-entry bootstrap must never be mistaken for a full collection.
+            const completed = await pendingMetadata.completion;
+            if (!pendingMetadata.isCurrent()) return media;
+            return this.register(media, player, completed, pageUrl);
+        }
+        if (pendingMetadata) {
+            const selected = found.items[found.selectedIndex];
+            found = { ...found, items: [{ ...selected, order: 0 }], selectedIndex: 0 };
+        }
         this.reboundPageKey = undefined;
         const selected = found.items[found.selectedIndex];
         const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -2015,21 +2239,26 @@ class BilibiliWebPlaylists {
             (typeof progressEnabled === 'function' && progressEnabled() || player.presetEvent?.syncTime ? Number(media.time) || 0 : 0);
         let reply;
         try {
-            const begin = await this.bridge.requestPlayback({ type: 'registerWebPlaylist', chunked: true, playlistId, sessionId,
+            const registration = { type: 'registerWebPlaylist', playlistId, sessionId,
                 pipeName: `mpv-lazy-${sessionId}`, selectedItemId: found.selectedItemId, initialPosition,
-                collectionId: found.collectionId, collectionTitle: found.collectionTitle }, true);
-            if (begin.type !== 'webPlaylistUploadStarted' || begin.playlistId !== playlistId || begin.sessionId !== sessionId || begin.nextChunkIndex !== 0) {
-                throw new Error('Invalid web playlist upload acknowledgement');
+                collectionId: found.collectionId, collectionTitle: found.collectionTitle };
+            if (pendingMetadata) {
+                reply = await this.bridge.requestPlayback({ ...registration, bootstrap: true, items: found.items }, true);
+            } else {
+                const begin = await this.bridge.requestPlayback({ ...registration, chunked: true }, true);
+                if (begin.type !== 'webPlaylistUploadStarted' || begin.playlistId !== playlistId || begin.sessionId !== sessionId || begin.nextChunkIndex !== 0) {
+                    throw new Error('Invalid web playlist upload acknowledgement');
+                }
+                const chunks = bilibiliPlaylistChunks(found.items);
+                let itemCount = 0;
+                for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+                    const appended = await this.bridge.requestPlayback({ type: 'appendWebPlaylistItems', playlistId, chunkIndex, items: chunks[chunkIndex] });
+                    itemCount += chunks[chunkIndex].length;
+                    if (appended.type !== 'webPlaylistItemsAppended' || appended.playlistId !== playlistId ||
+                        appended.nextChunkIndex !== chunkIndex + 1 || appended.itemCount !== itemCount) throw new Error('Invalid web playlist upload cursor');
+                }
+                reply = await this.bridge.requestPlayback({ type: 'commitWebPlaylist', playlistId, expectedItemCount: found.items.length });
             }
-            const chunks = bilibiliPlaylistChunks(found.items);
-            let itemCount = 0;
-            for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-                const appended = await this.bridge.requestPlayback({ type: 'appendWebPlaylistItems', playlistId, chunkIndex, items: chunks[chunkIndex] });
-                itemCount += chunks[chunkIndex].length;
-                if (appended.type !== 'webPlaylistItemsAppended' || appended.playlistId !== playlistId ||
-                    appended.nextChunkIndex !== chunkIndex + 1 || appended.itemCount !== itemCount) throw new Error('Invalid web playlist upload cursor');
-            }
-            reply = await this.bridge.requestPlayback({ type: 'commitWebPlaylist', playlistId, expectedItemCount: found.items.length });
         } catch (error) {
             this.bridge.sendJson({ type: 'stopWebPlaylist', playlistId }); throw error;
         }
@@ -2040,6 +2269,10 @@ class BilibiliWebPlaylists {
         }
         const state = this.adopt({ ...reply, items: found.items, initialPosition });
         if (!state) throw new Error('Invalid web playlist manifest');
+        state.timingStartedAt = currentParser?.handoffStartedAt;
+        traceBilibiliHandoff(pendingMetadata ? 'bootstrap-registered' : 'playlist-registered', state.timingStartedAt,
+            { bvid: selected.bvid, itemCount: found.items.length });
+        if (pendingMetadata) state.pendingMetadata = { ...pendingMetadata, pageUrl, selectedItemId: found.selectedItemId };
         const options = (media.mpvOptions || []).filter(option => !/^--(?:audio-file|sub-file|force-media-title|start|input-ipc-server|playlist-start)(?:=|$)/i.test(String(option)) &&
             !/(?:quality-menu-(?:stream|hls)_variants=|web_(?:progress|playlist)-|(?:^|[",])cid=)/.test(String(option)));
         options.push('--no-ytdl', `--playlist-start=${found.selectedIndex}`,
@@ -2049,7 +2282,109 @@ class BilibiliWebPlaylists {
         return { ...media, video: expectedUrl, audio: undefined, subtitle: undefined, title: undefined,
             origin: undefined, referer: undefined, cookie: undefined, disableBrowserRelay: true, sensitiveUrl: true,
             bilibili: { ...media.bilibili, cid: undefined }, time: initialPosition, mpvOptions: [...new Set(options)],
-            webPlaylist: { playlistId, sessionId, selected, items: found.items, initialPosition } };
+            webPlaylist: { playlistId, sessionId, selected, items: found.items, initialPosition,
+                ...(pendingMetadata ? { metadataPending: true } : {}) } };
+    }
+    onLaunchDispatched(media) {
+        const state = this.playlists.get(media.webPlaylist?.playlistId);
+        if (!state?.pendingMetadata || state.pendingMetadata.started || state.sessionId !== media.webPlaylist.sessionId) return;
+        state.pendingMetadata.started = true;
+        state.metadataTask = this.extendMetadata(state);
+    }
+    async extendMetadata(state) {
+        const pending = state.pendingMetadata;
+        const current = () => this.playlists.get(state.playlistId) === state && pending.isCurrent();
+        let fullManifest, commitSent = false, stage = 'fetch';
+        try {
+            const data = await pending.completion;
+            if (!current()) throw bilibiliMetadataError('page_changed');
+            const found = discoverBilibiliWebPlaylist(data, pending.pageUrl, pending.selectedItemId.split(':')[1]);
+            if (!found || found.selectedItemId !== pending.selectedItemId) throw bilibiliMetadataError('collection_discovery_failed');
+            fullManifest = found;
+            traceBilibiliHandoff('metadata-ready', state.timingStartedAt,
+                { bvid: state.items[0]?.bvid, itemCount: found.items.length, videoCount: new Set(found.items.map(item => item.aid)).size });
+            stage = 'begin';
+            const begin = await this.bridge.requestPlayback({ type: 'registerWebPlaylist', chunked: true, extendExisting: true,
+                playlistId: state.playlistId, sessionId: state.sessionId, pipeName: state.pipeName || `mpv-lazy-${state.sessionId}`,
+                selectedItemId: pending.selectedItemId, initialPosition: state.initialPosition || 0,
+                collectionId: found.collectionId, collectionTitle: found.collectionTitle });
+            if (begin.type !== 'webPlaylistUploadStarted' || begin.playlistId !== state.playlistId ||
+                begin.sessionId !== state.sessionId || begin.nextChunkIndex !== 0) throw bilibiliMetadataError('metadata_upload_failed');
+            const chunks = bilibiliPlaylistChunks(found.items);
+            let itemCount = 0;
+            stage = 'append';
+            for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+                if (!current()) throw bilibiliMetadataError('page_changed');
+                const appended = await this.bridge.requestPlayback({ type: 'appendWebPlaylistItems', playlistId: state.playlistId,
+                    chunkIndex, items: chunks[chunkIndex] });
+                itemCount += chunks[chunkIndex].length;
+                if (appended.type !== 'webPlaylistItemsAppended' || appended.playlistId !== state.playlistId ||
+                    appended.nextChunkIndex !== chunkIndex + 1 || appended.itemCount !== itemCount) throw bilibiliMetadataError('metadata_upload_failed');
+            }
+            if (!current()) throw bilibiliMetadataError('page_changed');
+            commitSent = true;
+            stage = 'commit';
+            const reply = await this.bridge.requestPlayback({ type: 'commitWebPlaylist', playlistId: state.playlistId,
+                expectedItemCount: found.items.length });
+            if (!current()) return;
+            if (reply.type !== 'webPlaylistRegistered' || reply.playlistId !== state.playlistId ||
+                reply.sessionId !== state.sessionId || reply.itemCount !== found.items.length ||
+                reply.playlistUrl !== `http://127.0.0.1:9002/web-playlist/${state.playlistId}/list.m3u`) {
+                throw bilibiliMetadataError('metadata_upload_failed');
+            }
+            this.adopt({ ...reply, items: found.items });
+            state.pendingMetadata = undefined;
+            traceBilibiliHandoff('metadata-uploaded', state.timingStartedAt, { itemCount: found.items.length });
+        } catch (error) {
+            // Metadata failure only affects the unfinished list, never the
+            // already playing CID, its quality, progress session or resolver.
+            if (this.playlists.get(state.playlistId) !== state) return;
+            traceBilibiliMetadata('extension-error', error?.metadataCause ? error :
+                bilibiliMetadataError(stage === 'fetch' ? 'metadata_unavailable' : 'metadata_upload_failed'),
+                { aid: state.items[0]?.aid, stage });
+            // A lost HTTP acknowledgement can follow a successfully committed
+            // list. Read the same owner before cancelling metadata delivery.
+            if (commitSent && fullManifest && current()) {
+                try {
+                    const recovered = await this.bridge.requestPlayback({ type: 'getWebPlaylist', playlistId: state.playlistId,
+                        identity: `bilibili:${pending.selectedItemId}` });
+                    const manifest = recovered.playlist || recovered;
+                    if (current() && manifest.playlistId === state.playlistId && manifest.sessionId === state.sessionId &&
+                        manifest.itemCount === fullManifest.items.length && manifest.metadataStage !== 'failed' &&
+                        manifest.playlistUrl === `http://127.0.0.1:9002/web-playlist/${state.playlistId}/list.m3u` &&
+                        this.adopt({ ...manifest, items: fullManifest.items })) {
+                        state.pendingMetadata = undefined;
+                        traceBilibiliMetadata('extension-recovered', undefined, { aid: state.items[0]?.aid, stage });
+                        return;
+                    }
+                } catch (failure) { /* A genuine failed commit receives the fixed failure notice below. */ }
+            }
+            try {
+                const reply = await this.bridge.requestPlayback({ type: 'failWebPlaylistMetadata', playlistId: state.playlistId,
+                    sessionId: state.sessionId, error: 'playlist_metadata_failed' });
+                this.adopt(reply.playlist || reply);
+            } catch (failure) { /* The player keeps its original single source even if notification fails. */ }
+            state.metadataError = 'playlist_metadata_failed';
+            traceBilibiliHandoff('metadata-failed', state.timingStartedAt, { itemCount: state.itemCount });
+            if (pending.isCurrent()) this.warnMetadataFailed(state);
+        }
+    }
+    warnMetadataFailed(state) {
+        if (state.metadataWarningShown) return;
+        state.metadataWarningShown = true;
+        console.warn('External Player: playlist_metadata_failed');
+        showToast(translation.handoffPlaylistMetadataFailed || translation.handoffPlaylistUnavailable);
+    }
+    resumePendingMetadata(state, pageUrl) {
+        if (state.pendingMetadata || !state.metadataPending || state.itemCount !== 1 || state.metadataStage === 'extending') return;
+        const id = bilibiliVideoRoute(pageUrl), pageKey = getAutoHandoffPageKey(pageUrl);
+        if (!id || !state.items[0]) return;
+        const completion = fetchBilibiliVideoData(id).then(data => {
+            return completeBilibiliPlaylistForLaunch(data, pageUrl, () => getAutoHandoffPageKey(location.href) === pageKey);
+        });
+        state.pendingMetadata = { pageUrl, selectedItemId: state.items[0].itemId, completion, started: true,
+            isCurrent: () => getAutoHandoffPageKey(location.href) === pageKey };
+        state.metadataTask = this.extendMetadata(state);
     }
     async restore(pageUrl = location.href) {
         if (this.restoring || self !== top) return;
@@ -2061,7 +2396,8 @@ class BilibiliWebPlaylists {
             if (!content || content.provider !== 'bilibili' || getAutoHandoffPageKey(location.href) !== pageKey) return;
             const reply = await this.bridge.requestPlayback({ type: 'getWebPlaylist', identity: content.identity, rebind: true });
             if (getAutoHandoffPageKey(location.href) !== pageKey) return;
-            this.adopt(reply.playlist || (reply.playlistId ? reply : undefined));
+            const state = this.adopt(reply.playlist || (reply.playlistId ? reply : undefined));
+            if (state) this.resumePendingMetadata(state, pageUrl);
         } catch (error) { /* An old or stopped bridge must not interrupt webpage playback. */ }
         finally { this.restoring = false; }
     }
@@ -2075,6 +2411,13 @@ class BilibiliWebPlaylists {
     handleMessage(message) {
         const state = this.playlists.get(message.playlistId);
         if (!state) return;
+        if (message.type === 'webPlaylistMetadataReady' || message.type === 'webPlaylistMetadataFailed') {
+            if (message.sessionId !== state.sessionId || !this.adopt(message.playlist || message)) return;
+            traceBilibiliHandoff(message.type === 'webPlaylistMetadataReady' ? 'playlist-ready' : 'metadata-failed', state.timingStartedAt,
+                { bvid: state.items[0]?.bvid, itemCount: state.itemCount });
+            if (message.type === 'webPlaylistMetadataFailed' && state.pendingMetadata?.isCurrent()) this.warnMetadataFailed(state);
+            return;
+        }
         if (message.type === 'webPlaylistStopped') {
             if (message.reason === 'browser_rebound') {
                 this.reboundPageKey = getAutoHandoffPageKey(location.href);
@@ -2129,7 +2472,12 @@ class BilibiliWebPlaylists {
             itemId: item.itemId, generation: message.generation, media: media || null, ...(error ? { error } : {}) };
         for (let attempt = 0; attempt < 2; attempt++) {
             if (this.playlists.get(state.playlistId) !== state || state.resolving.get(item.itemId) !== message.generation) return;
-            try { await this.bridge.requestPlayback(submission); return; }
+            try {
+                await this.bridge.requestPlayback(submission);
+                if (message.first === true && media) traceBilibiliHandoff('first-source-submitted', state.timingStartedAt,
+                    { bvid: item.bvid, itemCount: state.itemCount });
+                return;
+            }
             catch (failure) {
                 const disconnected = failure?.message === 'Playback bridge disconnected';
                 const expired = failure?.code === 'playback_progress_client_expired';
@@ -2168,12 +2516,20 @@ async function prepareBilibiliPlaylistLaunch(media, player) {
         let data = currentParser?.bilibiliVideoData;
         if (!data || String(data.aid) !== String(media.bilibili?.aid)) {
             const id = url.pathname.match(/\/(BV[a-zA-Z0-9]+|av\d+)/)[1];
-            const response = await fetchBilibiliLiveJson(`https://api.bilibili.com/x/web-interface/view?${id.startsWith('BV') ? `bvid=${id}` : `aid=${id.slice(2)}`}`);
-            if (response.code !== 0) return media;
-            data = response.data;
+            data = await fetchBilibiliVideoData(id);
         }
         debugBilibiliPlaylistData(data);
-        data = await completeBilibiliPlaylistData(data, pageUrl, () => getAutoHandoffPageKey(location.href) === pageKey);
+        const isCurrent = () => getAutoHandoffPageKey(location.href) === pageKey;
+        const warmup = bilibiliPlaylistWarmup?.pageKey === pageKey && bilibiliPlaylistWarmup.data === data ? bilibiliPlaylistWarmup : undefined;
+        if (warmup?.completed) data = warmup.completed;
+        else {
+            const completion = completeBilibiliPlaylistForLaunch(data, pageUrl, isCurrent);
+            void completion.catch(() => undefined);
+            if (Array.isArray(data.ugc_season?.sections) && discoverBilibiliWebPlaylist(data, pageUrl, media.bilibili?.cid)) {
+                return await bilibiliWebPlaylists.register(media, player, data, pageUrl, { completion, isCurrent });
+            }
+            data = await completion;
+        }
         if (getAutoHandoffPageKey(location.href) !== pageKey) return media;
         return await bilibiliWebPlaylists.register(media, player, data, pageUrl);
     } catch (error) {
@@ -2254,11 +2610,10 @@ async function resolvePlaybackContent(media = {}, pageUrl = location.href) {
         const part = Math.max(1, Number(url.searchParams.get('p')) || 1);
         if (!info.aid || !info.cid) {
             if (route) {
-                const query = route[1].startsWith('BV') ? `bvid=${route[1]}` : `aid=${route[1].slice(2)}`;
-                const result = await fetchBilibiliLiveJson(`https://api.bilibili.com/x/web-interface/view?${query}`);
-                const selected = result.data?.pages?.[part - 1];
-                if (result.code !== 0 || !selected) return undefined;
-                info = { aid: result.data.aid, bvid: result.data.bvid, cid: selected.cid, duration: selected.duration };
+                const data = await fetchBilibiliVideoData(route[1]);
+                const selected = data.pages[part - 1];
+                if (!selected) return undefined;
+                info = { aid: data.aid, bvid: data.bvid, cid: selected.cid, duration: selected.duration };
             } else {
                 const initial = page.__INITIAL_STATE__;
                 const data = initial?.videoData || initial?.videoInfo;
@@ -2826,6 +3181,10 @@ class BaseParser {
             currentPlayer = player;
             let media = currentMedia;
             let parser = currentParser;
+            if (parser?.parserKey === 'bilibili' && typeof bilibiliTimingNow === 'function') {
+                parser.handoffStartedAt = bilibiliTimingNow();
+                traceBilibiliHandoff('start', parser.handoffStartedAt);
+            }
             let config = currentConfig.global;
             let liveDanmakuError;
 
@@ -2848,6 +3207,7 @@ class BaseParser {
                     }
                     await sleep(REFRESH_INTERVAL * 2);
                 } catch (error) {
+                    if (!isLaunchContextCurrent()) return;
                     latestError = error;
                     console.error(`第${currentTryCount}次尝试解析失败：`, error);
                 }
@@ -2993,6 +3353,12 @@ class BaseParser {
                     }
                 }
             }
+            if (parser?.parserKey === 'bilibili' && typeof traceBilibiliHandoff === 'function') {
+                traceBilibiliHandoff('protocol-dispatched', parser.handoffStartedAt,
+                    { bvid: media.webPlaylist?.selected?.bvid || media.bilibili?.bvid,
+                        itemCount: media.webPlaylist?.items?.length });
+            }
+            if (media.webPlaylist?.metadataPending) bilibiliWebPlaylists.onLaunchDispatched(media);
             if (liveDanmakuError) updateHandoffStatus('danmaku-unavailable', liveDanmakuError);
             else updateHandoffStatus('success', player.name);
 
@@ -3513,15 +3879,24 @@ const PARSER = {
             await this.parseTime();
         }
         async parseVideo() {
+            const media = currentMedia, pageUrl = currentUrl, player = currentPlayer;
+            const pageKey = value => typeof getAutoHandoffPageKey === 'function' ? getAutoHandoffPageKey(value) : value;
+            const ensureCurrent = () => {
+                if ((typeof currentParser === 'object' && currentParser !== this) || currentMedia !== media || pageKey(currentUrl) !== pageKey(pageUrl) ||
+                    (typeof location === 'object' && pageKey(location.href) !== pageKey(pageUrl))) {
+                    throw new Error('Bilibili video page changed');
+                }
+            };
+            ensureCurrent();
             let videoInfo = undefined;
-            if (currentUrl.startsWith('https://www.bilibili.com/bangumi/')) {
+            if (pageUrl.startsWith('https://www.bilibili.com/bangumi/')) {
                 videoInfo = await this.getVideoInfoByEpid();
-            } else if (currentUrl.startsWith('https://www.bilibili.com/video/')) {
-                videoInfo = await this.getVideoInfoByBvid();
+            } else if (pageUrl.startsWith('https://www.bilibili.com/video/')) {
+                videoInfo = await this.getVideoInfoByBvid(pageUrl);
             } else {
                 videoInfo = await this.getVideoInfo();
             }
-
+            ensureCurrent();
             if (!videoInfo || !videoInfo.aid || !videoInfo.cid) {
                 throw new Error('can not find aid and cid');
             }
@@ -3533,27 +3908,32 @@ const PARSER = {
             const codecid = currentConfig.global.parser.bilibili.preferredCodec;
             const quality = currentConfig.global.parser.bilibili.preferredQuality;
 
-            currentMedia.bilibili.cid = cid;
-            currentMedia.bilibili.aid = aid;
-            currentMedia.bilibili.bvid = videoInfo.bvid;
-            currentMedia.bilibili.duration = videoInfo.duration;
-            currentMedia.bilibili.epid = epid;
-            currentMedia.title = title ? title : currentMedia.title;
+            media.bilibili.cid = cid;
+            media.bilibili.aid = aid;
+            media.bilibili.bvid = videoInfo.bvid;
+            media.bilibili.duration = videoInfo.duration;
+            media.bilibili.epid = epid;
+            media.title = title ? title : media.title;
             if (currentConfig.global.parser.bilibili.preferredSubtitle &&
                 currentConfig.global.parser.bilibili.preferredSubtitle !== 'off') {
-                currentMedia.subtitle = await this.getSubtitle(aid, cid);
+                const subtitle = await this.getSubtitle(aid, cid);
+                ensureCurrent(); media.subtitle = subtitle;
             }
             // 支持传入音频优先获取 dash 格式视频，以支持更高分辨率
-            if (currentPlayer.playEvent && currentPlayer.playEvent.indexOf('audio') > -1) {
+            if (player.playEvent && player.playEvent.indexOf('audio') > -1) {
                 const dash = await this.getDash(aid, cid, codecid, quality, epid);
+                ensureCurrent();
                 if (dash) {
-                    currentMedia.audio = dash.audio;
-                    currentMedia.video = dash.video;
-                    attachBilibiliStreamVariants(currentMedia, dash.variants, dash.selected);
+                    media.audio = dash.audio;
+                    media.video = dash.video;
+                    attachBilibiliStreamVariants(media, dash.variants, dash.selected);
+                    traceBilibiliHandoff('source-ready', this.handoffStartedAt, { bvid: videoInfo.bvid });
                     return;
                 }
             }
-            currentMedia.video = await this.getFlvOrMP4(aid, cid);
+            const video = await this.getFlvOrMP4(aid, cid);
+            ensureCurrent(); media.video = video;
+            traceBilibiliHandoff('source-ready', this.handoffStartedAt, { bvid: videoInfo.bvid });
         }
         async getVideoInfo() {
             try {
@@ -3579,45 +3959,20 @@ const PARSER = {
                 console.error(error.message);
             }
         }
-        async getVideoInfoByBvid() {
-            let param = undefined;
-            const bvids = currentUrl.match(/BV([0-9a-zA-Z]+)/);
-            if (bvids && bvids[1]) {
-                param = `bvid=${bvids[1]}`;
-            } else {
-                const avids = currentUrl.match(/av([0-9]+)/);
-                param = `aid=${avids[1]}`;
-            }
-
-            if (!param) {
-                throw new Error('can not find bvid or avid');
-            }
-
-            const response = await (await fetch(`https://api.bilibili.com/x/web-interface/view?${param}`, {
-                method: 'GET',
-                credentials: 'include'
-            })).json();
-            this.bilibiliVideoData = response.data;
-
-            let aid = response.data.aid;
-            let cid = response.data.cid;
-            let title = response.data.title;
-
-            // 分 p 视频
-            const ps = currentUrl.match(/[?&]p=([^&]+)/);
-            if (ps && response.data.pages.length > 1) {
-                const p = ps[1];
-                const currentPage = response.data.pages[p - 1];
-                cid = currentPage.cid;
-                title = currentPage.part;
-            }
-
+        async getVideoInfoByBvid(pageUrl = currentUrl) {
+            const id = bilibiliVideoRoute(pageUrl);
+            if (!id) throw new Error('can not find bvid or avid');
+            const data = await fetchBilibiliVideoData(id);
+            this.bilibiliVideoData = data;
+            const p = Number(new URL(pageUrl).searchParams.get('p') || 1);
+            if (!Number.isInteger(p) || p < 1 || !data.pages[p - 1]?.cid) throw new Error('Bilibili video part unavailable');
+            const currentPage = data.pages[p - 1];
             return {
-                aid: aid,
-                cid: cid,
-                title: title,
-                bvid: response.data.bvid,
-                duration: response.data.pages?.[(Number(ps?.[1]) || 1) - 1]?.duration || response.data.duration
+                aid: data.aid,
+                cid: currentPage.cid,
+                title: data.pages.length > 1 && p > 1 ? currentPage.part : data.title,
+                bvid: data.bvid,
+                duration: currentPage.duration || data.duration
             };
         }
         async getVideoInfoByEpid() {
@@ -4822,6 +5177,7 @@ var handoffInitialEdgeHideId;
 var handoffInitialPreviewStarted = false;
 var resourceFallbackDisplayPromise;
 var topListenersAttached = false;
+var handoffUiReady = false;
 var isReloading = false;
 
 // HANDOFF_EDGE_HIDE_HELPERS_START
@@ -4961,6 +5317,10 @@ function appendToastDiv() {
 }
 
 function showToast(message) {
+    if (!toastDiv) {
+        if (!document.body) return;
+        appendToastDiv();
+    }
     toastDiv.textContent = message;
     toastDiv.style.opacity = '0.9';
     toastDiv.style.display = 'block';
@@ -4983,6 +5343,10 @@ function appendLoadingDiv() {
 }
 
 function showLoading(timeout) {
+    if (!loadingDiv) {
+        if (!document.body) return;
+        appendLoadingDiv();
+    }
     if (loadingId) {
         clearTimeout(loadingId);
         loadingId = undefined;
@@ -5006,7 +5370,9 @@ function showBrowserRelayToast(message) {
 }
 
 function hideLoading() {
-    loadingDiv.style.display = 'none';
+    if (loadingDiv) loadingDiv.style.display = 'none';
+    if (loadingId) clearTimeout(loadingId);
+    loadingId = undefined;
 }
 
 function setHandoffHostDisplay(display) {
@@ -6434,7 +6800,7 @@ function automaticHandoffPlayers() {
 }
 
 function scheduleAutomaticHandoff() {
-    if (self !== top || !currentParser || handoffLaunchInFlight) return;
+    if (self !== top || !currentParser || !handoffUiReady || handoffLaunchInFlight) return;
     const state = syncAutomaticHandoffState();
     if (!state || automaticHandoffTimer !== undefined ||
         !automaticHandoffPlayers().some(player => !state.attempted.has(player.name))) return;
@@ -6449,7 +6815,7 @@ function scheduleAutomaticHandoff() {
             await launchWithPlayer(player, undefined, true);
         } catch (error) {
             updateHandoffStatus('failed');
-            showToast(`${translation.loadFail}: ${error.message}`);
+            showToast(translation.loadFail);
         }
     }, REFRESH_INTERVAL * 2);
 }
@@ -7894,6 +8260,7 @@ async function appendAll() {
     appendToastDiv();
     appendLoadingDiv();
     appendButtonDiv();
+    handoffUiReady = true;
 }
 
 async function initTop() {
@@ -8015,6 +8382,7 @@ function initIframe() {
 async function init(url) {
     const previousUrl = currentUrl;
     currentUrl = url;
+    handoffUiReady = false;
     cancelAutomaticHandoff();
     installTelegramPageCapture();
     resourceSniffer?.stop();
@@ -8023,6 +8391,8 @@ async function init(url) {
     currentConfig = loadConfig();
     translation = translations[currentConfig.global.language];
     currentParser = matchParser(currentConfig.global.parser, url) || matchParser(defaultConfig.global.parser, url);
+    if (currentParser?.parserKey === 'bilibili') preloadBilibiliPlaylistPage(url);
+    else bilibiliPlaylistWarmup = undefined;
     if (typeof playbackProgressSync !== 'undefined') void playbackProgressSync.resetPage(url);
     if (typeof bilibiliWebPlaylists !== 'undefined') void bilibiliWebPlaylists.restore(url);
     if (!currentParser && self === top && currentConfig.global.resourceSniffing !== false) {

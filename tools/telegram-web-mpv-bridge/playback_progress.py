@@ -637,25 +637,26 @@ class HttpProgressTransport:
             "getPlaybackProgress", "updatePlaybackProgress", "startPlaybackProgress", "stopPlaybackProgress",
             "pollPlaybackProgress", "detachPlaybackProgress",
             "registerWebPlaylist", "submitWebPlaylistItem", "getWebPlaylist", "stopWebPlaylist",
-            "appendWebPlaylistItems", "commitWebPlaylist", "getWebPlaylistItems"}:
+            "appendWebPlaylistItems", "commitWebPlaylist", "getWebPlaylistItems", "failWebPlaylistMetadata"}:
             raise ValueError("invalid HTTP progress action")
         client_id, action = envelope["clientId"], request["type"]
         owner = self.clients.get(client_id)
         if owner is None:
-            if action in {"pollPlaybackProgress", "stopPlaybackProgress", "detachPlaybackProgress", "submitWebPlaylistItem", "stopWebPlaylist", "appendWebPlaylistItems", "commitWebPlaylist"}:
+            if action in {"pollPlaybackProgress", "stopPlaybackProgress", "detachPlaybackProgress", "submitWebPlaylistItem", "stopWebPlaylist", "appendWebPlaylistItems", "commitWebPlaylist", "failWebPlaylistMetadata"}:
                 raise LookupError("expired HTTP progress client")
             if len(self.clients) >= 32:
                 raise ValueError("too many HTTP progress clients")
             owner = self.clients[client_id] = HttpProgressOwner()
         owner.last_seen = time.monotonic()
         reply, activate = None, None
-        if action in {"registerWebPlaylist", "submitWebPlaylistItem", "getWebPlaylist", "stopWebPlaylist", "appendWebPlaylistItems", "commitWebPlaylist", "getWebPlaylistItems"}:
+        if action in {"registerWebPlaylist", "submitWebPlaylistItem", "getWebPlaylist", "stopWebPlaylist", "appendWebPlaylistItems", "commitWebPlaylist", "getWebPlaylistItems", "failWebPlaylistMetadata"}:
             if self.playlist_manager is None:
                 raise ValueError("web playlist is unavailable")
             method = {"registerWebPlaylist": self.playlist_manager.register, "submitWebPlaylistItem": self.playlist_manager.submit,
                       "getWebPlaylist": self.playlist_manager.get, "stopWebPlaylist": self.playlist_manager.stop,
                       "appendWebPlaylistItems": self.playlist_manager.append_items, "commitWebPlaylist": self.playlist_manager.commit_upload,
-                      "getWebPlaylistItems": self.playlist_manager.get_items}[action]
+                      "getWebPlaylistItems": self.playlist_manager.get_items,
+                      "failWebPlaylistMetadata": self.playlist_manager.fail_metadata}[action]
             reply = await method(request, owner)
         elif action == "getPlaybackProgress":
             provider, identity = validate_identity(request)

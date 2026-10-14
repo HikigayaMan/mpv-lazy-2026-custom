@@ -14,6 +14,7 @@ SOURCE = ROOT / "portable_config/scripts/uosc/lib/web_playlist_menu.lua"
 TREE = ROOT / "portable_config/scripts/uosc/lib/web_playlist_tree.lua"
 MANIFEST = "user-data/mpv-lazy/web-playlist-manifest"
 STATUS = "user-data/uosc/web-playlist-menu"
+METADATA_STATE = "user-data/mpv-lazy/web-playlist/metadata-state"
 
 MOCK = r'''
 T={props={}, observers={}, messages={}, commands={}, openCount=0, updateCount=0}
@@ -176,7 +177,7 @@ class WebPlaylistMenuLuaTests(unittest.TestCase):
     def test_close_removes_runtime_observers_and_published_support_state(self):
         baseline = self.observer_count()
         self.controller.open()
-        self.assertEqual(self.observer_count(), baseline + 2)
+        self.assertEqual(self.observer_count(), baseline + 3)
         self.assertIsNotNone(self.t.props[STATUS])
         self.g.Menu.close(self.g.Menu)
         # The two permanent upgrade observers intentionally remain registered.
@@ -234,6 +235,34 @@ class WebPlaylistMenuLuaTests(unittest.TestCase):
         self.assertEqual(self.t.menu.current.selected_index, 1001)
         self.assertEqual(self.t.menu.lastScrolledIndex, 1001)
         self.assertTrue(self.t.menu.scrollImmediate)
+
+    def test_pending_collection_is_labelled_without_claiming_its_partial_count_is_complete(self):
+        manifest = self.fixture.manifest(self.items)
+        manifest["metadataPending"] = True
+        self.t.props[MANIFEST] = self.to_lua(manifest)
+        self.controller.open()
+        self.assertIn("合集加载中", self.t.menu.data.title)
+        self.assertNotIn("(1/", self.t.menu.data.title)
+        self.assertIn("完整合集正在后台加载", self.t.menu.data.footnote)
+        self.assertEqual(self.t.props[STATUS].metadataStatus, "pending")
+        manifest["revision"] = 2
+        manifest["metadataPending"] = False
+        self.t.props[MANIFEST] = self.to_lua(manifest)
+        self.t.fire(MANIFEST)
+        self.assertNotIn("加载中", self.t.menu.data.title)
+        self.assertIn("(1/2)", self.t.menu.data.title)
+        self.assertEqual(self.t.props[STATUS].metadataStatus, "ready")
+
+    def test_failed_background_metadata_stays_playable_and_is_not_shown_as_complete(self):
+        self.controller.open()
+        self.t.props[METADATA_STATE] = self.to_lua({"playlistId": self.fixture.manifest(self.items)["playlistId"],
+                                                   "revision": 2, "status": "failed"})
+        self.t.fire(METADATA_STATE)
+        self.assertIn("合集加载失败", self.t.menu.data.title)
+        self.assertIn("当前视频可继续播放", self.t.menu.data.footnote)
+        self.assertEqual(self.t.props[STATUS].metadataStatus, "failed")
+        self.activate(self.row("Part 2").value)
+        self.assertEqual(self.commands(), [["set", "playlist-pos", "1"]])
 
 
 if __name__ == "__main__":

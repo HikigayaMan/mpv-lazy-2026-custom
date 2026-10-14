@@ -25,7 +25,7 @@ const media = () => ({ video: 'https://v.bilivideo.com/first.m4s', audio: 'https
     bilibili: { aid: 11, cid: 21, bvid: 'BVtest', duration: 194 }, ytdlp: {},
     mpvOptions: ['--fullscreen=yes', '--script-opts-append="quality-menu-stream_variants=old"',
         '--audio-file=old', '--script-opts-append="cid=21"', '--start=70'] });
-function fixture({ url = 'https://www.bilibili.com/video/BVtest/?p=1', sync = true } = {}) {
+function fixture({ url = 'https://www.bilibili.com/video/BVtest/?p=1', sync = true, fastStart = false } = {}) {
     let now = 2_000_000, position = 70;
     const storage = {}, requests = [], streamCalls = [], subtitles = [], posts = [], warnings = [], diagnostics = [];
     let upload;
@@ -41,6 +41,12 @@ function fixture({ url = 'https://www.bilibili.com/video/BVtest/?p=1', sync = tr
         requestPlayback: async message => {
             requests.push(plain(message));
             if (message.type === 'registerWebPlaylist') {
+                if (message.bootstrap) {
+                    upload = { ...message, items: plain(message.items), nextChunkIndex: 0 };
+                    return { ...message, type: 'webPlaylistRegistered', itemCount: 1, selectedIndex: 0,
+                        currentItem: message.items[0], revision: 1, metadataPending: true,
+                        playlistUrl: `http://127.0.0.1:9002/web-playlist/${message.playlistId}/list.m3u` };
+                }
                 upload = { ...message, items: [], nextChunkIndex: 0 };
                 return { type: 'webPlaylistUploadStarted', playlistId: message.playlistId, sessionId: message.sessionId, nextChunkIndex: 0 };
             }
@@ -52,7 +58,7 @@ function fixture({ url = 'https://www.bilibili.com/video/BVtest/?p=1', sync = tr
             if (message.type === 'commitWebPlaylist') {
                 const selectedIndex = upload.items.findIndex(item => item.itemId === upload.selectedItemId);
                 return { type: 'webPlaylistRegistered', playlistId: upload.playlistId, sessionId: upload.sessionId,
-                    itemCount: upload.items.length, selectedIndex, currentItem: upload.items[selectedIndex], revision: 1,
+                    itemCount: upload.items.length, selectedIndex, currentItem: upload.items[selectedIndex], revision: 2, metadataPending: false,
                     playlistUrl: `http://127.0.0.1:9002/web-playlist/${upload.playlistId}/list.m3u` };
             }
             if (message.type === 'getWebPlaylistItems') {
@@ -64,6 +70,7 @@ function fixture({ url = 'https://www.bilibili.com/video/BVtest/?p=1', sync = tr
             if (message.type === 'startPlaybackProgress') return { ...message, type: 'playbackProgressStarted',
                 apiVersion: 1, record: { position: message.position, duration: message.duration, updatedAt: message.updatedAt, source: 'mpv' } };
             if (message.type === 'getWebPlaylist') return { type: 'webPlaylistState', playlist: bridge.restored };
+            if (message.type === 'failWebPlaylistMetadata') return { ...message, type: 'webPlaylistMetadataFailed' };
             return { type: 'playbackProgressState', record: undefined };
         } };
     const topWindow = {};
@@ -95,12 +102,13 @@ function fixture({ url = 'https://www.bilibili.com/video/BVtest/?p=1', sync = tr
     vm.runInContext([
         between('function isBilibiliStreamUrl(', 'function normalizeBilibiliLiveQuality('),
         between('function encodeBilibiliStreamVariants(', 'function buildMpvEncodedScriptOption('),
+        between('// BILIBILI_REQUEST_CACHE_HELPERS_START', '// BILIBILI_REQUEST_CACHE_HELPERS_END'),
         between('// BILIBILI_WEB_PLAYLIST_HELPERS_START', '// BILIBILI_WEB_PLAYLIST_HELPERS_END'),
         between('// PLAYBACK_PROGRESS_HELPERS_START', '// PLAYBACK_PROGRESS_HELPERS_END'),
         'globalThis.playlists = bilibiliWebPlaylists; globalThis.sync = playbackProgressSync;'
     ].join('\n'), context);
     context.fetchPlaybackBridgeHealth = async () => ({ ok: true, webPlaylistApiVersion: 1,
-        webPlaylistHierarchyApiVersion: 1, webPlaylistChunkApiVersion: 1 });
+        webPlaylistHierarchyApiVersion: 1, webPlaylistChunkApiVersion: 1, ...(fastStart ? { webPlaylistFastStartApiVersion: 1 } : {}) });
     return { context, playlists: context.playlists, sync: context.sync, bridge, storage, requests, streamCalls, subtitles,
         posts, warnings, diagnostics, video, advance: ms => { now += ms; } };
 }
@@ -145,6 +153,203 @@ function collectionData(count = 8) {
             page: { cid: index === 0 ? 21 : 1000 + index, page: 1, part: 'Preview', duration: 10 } })) }] } };
 }
 
+test('metadata used by parser, resume recovery and playlist recovery shares one request despite search tracking parameters', async () => {
+    const f = fixture(); let calls = 0;
+    f.context.fetchBilibiliLiveJson = async () => { calls++; return { code: 0, data: plain(pages) }; };
+    const [data, recovered, another] = await Promise.all([
+        f.context.fetchBilibiliVideoData('BVtest'),
+        f.context.resolvePlaybackContent({}, 'https://www.bilibili.com/video/BVtest/?p=2&spm_id_from=search'),
+        f.context.fetchBilibiliVideoData('BVtest')
+    ]);
+    assert.equal(calls, 1); assert.equal(data, another); assert.equal(recovered.identity, 'bilibili:11:22');
+    f.advance(60001); await f.context.fetchBilibiliVideoData('BVtest'); assert.equal(calls, 2);
+});
+
+test('page entry warms only the selected view; handoff intent starts complete discovery without duplicate view or detail requests', async () => {
+    const f = fixture(), data = collectionData(3), calls = [];
+    let release;
+    f.context.currentParser.bilibiliVideoData = undefined;
+    f.context.fetchBilibiliLiveJson = async url => {
+        const parsed = new URL(url), id = parsed.searchParams.get('bvid') || `av${parsed.searchParams.get('aid')}`; calls.push(id);
+        if (id === 'BVtest') return { code: 0, data };
+        assert.equal(parsed.pathname, '/x/player/pagelist');
+        return new Promise(resolve => { release = () => resolve({ code: 0, data: [
+            { cid: 1002, page: 1, part: 'First' }, { cid: 2002, page: 2, part: 'Second' } ] }); });
+    };
+    f.context.preloadBilibiliPlaylistPage(f.context.location.href);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, ['BVtest']);
+    const launching = f.context.prepareBilibiliPlaylistLaunch(media(), { name: 'MPV', presetEvent: {} });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, ['BVtest', 'av102']); release();
+    const launched = await launching;
+    assert.equal(launched.webPlaylist.items.length, 5);
+    assert.deepEqual(plain(launched.webPlaylist.items).map(item => item.itemId), ['11:21', '11:22', '101:1001', '102:1002', '102:2002']);
+    assert.deepEqual(calls, ['BVtest', 'av102']);
+    const warmedLaunch = await f.context.prepareBilibiliPlaylistLaunch(media(), { name: 'MPV', presetEvent: {} });
+    assert.equal(warmedLaunch.webPlaylist.items.length, 5); assert.equal(warmedLaunch.webPlaylist.metadataPending, undefined);
+    assert.deepEqual(calls, ['BVtest', 'av102']);
+});
+
+test('view API errors, mismatched identities and missing selected P never enter the metadata cache', async () => {
+    const f = fixture(); let calls = 0;
+    f.context.fetchBilibiliLiveJson = async () => { calls++; return calls === 1 ? { code: -404 } : { code: 0, data: plain(pages) }; };
+    await assert.rejects(f.context.fetchBilibiliVideoData('BVtest'), /metadata unavailable/);
+    assert.equal((await f.context.fetchBilibiliVideoData('BVtest')).bvid, 'BVtest'); assert.equal(calls, 2);
+    await assert.rejects(f.context.fetchBilibiliVideoData('BVother'), /metadata unavailable/);
+    assert.equal(await f.context.resolvePlaybackContent({}, 'https://www.bilibili.com/video/BVtest/?p=999'), undefined);
+});
+
+function blockedLargeCollection(f, count = 325) {
+    const data = collectionData(count);
+    for (const episode of data.ugc_season.sections[0].episodes) delete episode.arc.videos;
+    const full = plain(data);
+    for (const [index, episode] of full.ugc_season.sections[0].episodes.entries()) {
+        episode._playlistPages = index === 0 ? plain(pages.pages) : [
+            { cid: 1000 + index, page: 1, part: 'First' }, { cid: 2000 + index, page: 2, part: 'Second' } ];
+    }
+    let resolve, reject;
+    f.context.currentParser.bilibiliVideoData = data;
+    f.context.completeBilibiliPlaylistData = () => new Promise((yes, no) => { resolve = yes; reject = no; });
+    return { release: () => resolve(full), fail: () => reject(new Error('Private URL secret must not reach errors')), full };
+}
+
+test('a 325-video collection starts the selected CID before any detail completes, then uploads every P in the same session after dispatch', async () => {
+    const f = fixture({ fastStart: true }), collection = blockedLargeCollection(f);
+    let launch;
+    const preparing = f.context.prepareBilibiliPlaylistLaunch(media(), { name: 'MPV', presetEvent: {} }).then(value => { launch = value; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(launch, 'playable bootstrap must finish while all 325 details remain pending');
+    await preparing;
+    const bootstrap = f.requests.find(request => request.bootstrap);
+    assert.equal(bootstrap.items.length, 1); assert.equal(bootstrap.items[0].itemId, '11:21');
+    assert.equal(launch.webPlaylist.metadataPending, true);
+    assert.equal(f.requests.filter(request => request.extendExisting).length, 0);
+    const state = f.playlists.playlists.get(launch.webPlaylist.playlistId);
+    f.playlists.handleMessage({ type: 'resolveWebPlaylistItem', playlistId: state.playlistId, sessionId: state.sessionId,
+        itemId: '11:21', generation: 1, first: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.requests.find(request => request.type === 'submitWebPlaylistItem').media.cid, '21');
+    const progressLaunch = await f.sync.prepareLaunch(launch, { name: 'MPV' });
+    assert.equal(progressLaunch.webPlaylist.sessionId, state.sessionId);
+    assert.equal(f.requests.find(request => request.type === 'startPlaybackProgress').playlistId, state.playlistId);
+    f.playlists.onLaunchDispatched(progressLaunch); f.playlists.onLaunchDispatched(progressLaunch);
+    assert.equal(f.requests.filter(request => request.extendExisting).length, 0);
+    collection.release(); await state.metadataTask;
+    const extending = f.requests.filter(request => request.extendExisting);
+    assert.equal(extending.length, 1); assert.equal(extending[0].playlistId, state.playlistId);
+    assert.equal(extending[0].sessionId, state.sessionId); assert.equal(extending[0].selectedItemId, '11:21');
+    const uploaded = f.requests.filter(request => request.type === 'appendWebPlaylistItems').flatMap(request => request.items);
+    assert.equal(uploaded.length, 650); assert.equal(new Set(uploaded.map(item => item.itemId)).size, 650);
+    assert.equal(state.itemMap.size, 650); assert.equal(state.completeManifest, true);
+    assert.equal(state.metadataPending, false); assert.equal(f.requests.some(request => request.type === 'stopWebPlaylist'), false);
+    assert.ok(!JSON.stringify(uploaded).includes('first.m4s'));
+});
+
+test('metadata failure reports a fixed error while the already registered CID and progress session remain usable', async () => {
+    const f = fixture({ fastStart: true }), collection = blockedLargeCollection(f);
+    const launch = await f.context.prepareBilibiliPlaylistLaunch(media(), { name: 'MPV', presetEvent: {} });
+    const state = f.playlists.playlists.get(launch.webPlaylist.playlistId);
+    f.playlists.onLaunchDispatched(launch); collection.fail(); await state.metadataTask;
+    const failure = f.requests.find(request => request.type === 'failWebPlaylistMetadata');
+    assert.equal(failure.playlistId, state.playlistId); assert.equal(failure.sessionId, state.sessionId);
+    assert.equal(failure.error, 'playlist_metadata_failed');
+    assert.equal(f.playlists.playlists.get(state.playlistId), state); assert.equal(state.itemMap.size, 1);
+    assert.equal(f.requests.some(request => request.type === 'stopWebPlaylist'), false);
+    assert.ok(!JSON.stringify(f.warnings).includes('Private URL'));
+    f.playlists.handleMessage({ type: 'resolveWebPlaylistItem', playlistId: state.playlistId, itemId: '11:21', generation: 2 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.requests.findLast(request => request.type === 'submitWebPlaylistItem').media.cid, '21');
+});
+
+test('failed extension chunks and SPA navigation stop further commits without stopping the first video', async () => {
+    for (const navigation of [false, true]) {
+        const f = fixture({ fastStart: true }), collection = blockedLargeCollection(f);
+        const launch = await f.context.prepareBilibiliPlaylistLaunch(media(), { name: 'MPV', presetEvent: {} });
+        const state = f.playlists.playlists.get(launch.webPlaylist.playlistId), original = f.bridge.requestPlayback;
+        f.bridge.requestPlayback = async request => {
+            if (request.type === 'appendWebPlaylistItems') {
+                if (!navigation) throw new Error('network failed with a private URL');
+                f.context.location.href = 'https://www.bilibili.com/video/BVnext/';
+            }
+            return original(request);
+        };
+        f.playlists.onLaunchDispatched(launch); collection.release(); await state.metadataTask;
+        assert.equal(f.requests.filter(request => request.type === 'commitWebPlaylist').length, 0);
+        assert.equal(f.requests.filter(request => request.type === 'failWebPlaylistMetadata').length, 1);
+        assert.equal(f.requests.some(request => request.type === 'stopWebPlaylist'), false);
+        assert.equal(f.playlists.playlists.get(state.playlistId), state);
+        assert.equal(state.itemMap.size, 1);
+    }
+});
+
+test('a supported old bridge completes every entry before handoff rather than receiving a partial bootstrap', async () => {
+    const f = fixture(), collection = blockedLargeCollection(f);
+    let launch;
+    const preparing = f.context.prepareBilibiliPlaylistLaunch(media(), { name: 'MPV', presetEvent: {} }).then(value => { launch = value; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(launch, undefined); assert.equal(f.requests.some(request => request.bootstrap), false);
+    collection.release(); await preparing;
+    assert.equal(launch.webPlaylist.items.length, 650); assert.equal(launch.webPlaylist.metadataPending, undefined);
+    assert.equal(f.requests.find(request => request.type === 'commitWebPlaylist').expectedItemCount, 650);
+});
+
+test('a lost extension commit reply recovers its committed owner instead of aborting native list delivery', async () => {
+    const f = fixture({ fastStart: true }), collection = blockedLargeCollection(f);
+    const launch = await f.context.prepareBilibiliPlaylistLaunch(media(), { name: 'MPV', presetEvent: {} });
+    const state = f.playlists.playlists.get(launch.webPlaylist.playlistId), original = f.bridge.requestPlayback;
+    f.bridge.requestPlayback = async request => {
+        const reply = await original(request);
+        if (request.type === 'commitWebPlaylist') {
+            f.bridge.restored = { ...reply, metadataPending: true, metadataStage: 'extending' };
+            throw Object.assign(new Error('Lost HTTP reply'), { code: 'playback_request_timeout' });
+        }
+        return reply;
+    };
+    f.playlists.onLaunchDispatched(launch); collection.release(); await state.metadataTask;
+    assert.equal(state.itemMap.size, 650); assert.equal(state.completeManifest, true);
+    assert.equal(state.metadataStage, 'extending'); assert.equal(state.pendingMetadata, undefined);
+    assert.equal(f.requests.filter(request => request.type === 'getWebPlaylist').length, 1);
+    assert.equal(f.requests.some(request => request.type === 'failWebPlaylistMetadata'), false);
+    assert.equal(f.requests.some(request => request.type === 'stopWebPlaylist'), false);
+});
+
+test('refresh restores and completes a pending bootstrap without creating another playlist or replaying the first CID', async () => {
+    const f = fixture({ fastStart: true }), collection = blockedLargeCollection(f);
+    const initialItem = plain(manifest().items[0]);
+    f.bridge.restored = { playlistId, sessionId, selectedIndex: 0, currentItemId: initialItem.itemId,
+        currentItem: initialItem, itemCount: 1, metadataPending: true, metadataStage: 'pending', revision: 1,
+        playlistUrl: `http://127.0.0.1:9002/web-playlist/${playlistId}/list.m3u` };
+    await f.playlists.restore();
+    const state = f.playlists.playlists.get(playlistId);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(state.pendingMetadata.started, true); assert.equal(state.sessionId, sessionId);
+    assert.equal(f.requests.some(request => request.bootstrap), false);
+    collection.release(); await state.metadataTask;
+    assert.equal(state.itemMap.size, 650); assert.equal(f.requests.find(request => request.extendExisting).playlistId, playlistId);
+    assert.equal(f.requests.some(request => request.type === 'startPlaybackProgress'), false);
+    assert.equal(f.requests.some(request => request.type === 'stopWebPlaylist'), false);
+});
+
+test('metadata lifecycle events accept only the current session and revision and show a single fixed failure notice', () => {
+    const f = fixture(), state = f.playlists.adopt({ ...manifest(), revision: 10, metadataPending: true });
+    state.pendingMetadata = { isCurrent: () => true };
+    f.playlists.handleMessage({ ...manifest(), type: 'webPlaylistMetadataReady', revision: 9, metadataPending: false });
+    assert.equal(state.metadataPending, true); assert.equal(state.revision, 10);
+    f.playlists.handleMessage({ ...manifest(), type: 'webPlaylistMetadataReady', revision: 11,
+        sessionId: 'progress-foreign', metadataPending: false });
+    assert.equal(state.metadataPending, true); assert.equal(state.revision, 10);
+    f.playlists.handleMessage({ ...manifest(), type: 'webPlaylistMetadataFailed', revision: 10,
+        metadataPending: true, metadataStage: 'failed', metadataError: 'playlist_metadata_ipc_failed' });
+    f.playlists.handleMessage({ ...manifest(), type: 'webPlaylistMetadataFailed', revision: 10,
+        metadataPending: true, metadataStage: 'failed', metadataError: 'playlist_metadata_ipc_failed' });
+    assert.equal(state.metadataError, 'playlist_metadata_ipc_failed');
+    assert.equal(f.warnings.filter(message => message === 'playlist fallback').length, 1);
+    f.playlists.handleMessage({ ...manifest(), type: 'webPlaylistMetadataReady', revision: 11,
+        metadataPending: false, metadataStage: 'ready' });
+    assert.equal(state.metadataPending, false); assert.equal(state.metadataStage, 'ready');
+});
+
 test('full metadata discovery fetches missing multi-parts with at most three requests, retaining section/video/part order', async () => {
     const f = fixture(), data = collectionData();
     let active = 0, peak = 0;
@@ -152,10 +357,11 @@ test('full metadata discovery fetches missing multi-parts with at most three req
     f.context.fetchBilibiliLiveJson = async url => {
         requested.push(url); active++; peak = Math.max(peak, active);
         await new Promise(resolve => setTimeout(resolve, 1)); active--;
-        const index = Number(new URL(url).searchParams.get('bvid').match(/\d+$/)[0]);
-        return { code: 0, data: { aid: 100 + index, bvid: `BVother${index}`, pages: [
+        assert.equal(new URL(url).pathname, '/x/player/pagelist');
+        const index = Number(new URL(url).searchParams.get('aid')) - 100;
+        return { code: 0, data: [
             { cid: 1000 + index, page: 1, part: 'A', duration: 10 },
-            { cid: 2000 + index, page: 2, part: 'B', duration: 20 } ] } };
+            { cid: 2000 + index, page: 2, part: 'B', duration: 20 } ] };
     };
     const completed = await f.context.completeBilibiliPlaylistData(data, f.context.location.href);
     const found = f.context.discoverBilibiliWebPlaylist(completed, f.context.location.href, 22);
@@ -167,14 +373,14 @@ test('full metadata discovery fetches missing multi-parts with at most three req
     assert.equal(found.items[3].sectionId, '8'); assert.equal(data.ugc_season.sections[0].episodes[2]._playlistPages, undefined);
 });
 
-test('unknown part counts request complete view metadata and repeated videos share one bounded API request', async () => {
+test('unknown part counts request the complete lightweight page array and repeated videos share one bounded API request', async () => {
     const f = fixture(), data = collectionData(3);
     const repeated = data.ugc_season.sections[0].episodes[2];
     delete repeated.arc.videos; repeated.pages = [repeated.page];
     data.ugc_season.sections[0].episodes.push({ ...repeated }); data.ugc_season.ep_count = 4;
     let requests = 0;
-    f.context.fetchBilibiliLiveJson = async () => { requests++; return { code: 0, data: { aid: 102, bvid: 'BVother2', pages: [
-        { cid: 1002, page: 1, part: 'First' }, { cid: 2002, page: 2, part: 'Hidden second' } ] } }; };
+    f.context.fetchBilibiliLiveJson = async url => { requests++; assert.equal(new URL(url).pathname, '/x/player/pagelist');
+        return { code: 0, data: [ { cid: 1002, page: 1, part: 'First' }, { cid: 2002, page: 2, part: 'Hidden second' } ] }; };
     const completed = await f.context.completeBilibiliPlaylistData(data, f.context.location.href);
     const found = f.context.discoverBilibiliWebPlaylist(completed, f.context.location.href, 21);
     assert.equal(requests, 1); assert.equal(found.items.length, 5);
@@ -191,6 +397,98 @@ test('metadata errors and explicit incomplete seasons stop discovery rather than
     await assert.rejects(f.context.completeBilibiliPlaylistData(data, f.context.location.href, () => false), /page changed/);
 });
 
+test('background details retry one transport timeout while risk control and API failures fail once', async () => {
+    for (const failure of [{ bilibiliRequestCause: 'request_timeout' },
+        { bilibiliRequestCause: 'request_http', httpStatus: 503 }]) {
+        const f = fixture(); let calls = 0;
+        f.context.setTimeout = callback => { queueMicrotask(callback); return 1; };
+        f.context.fetchBilibiliLiveJson = async () => {
+            if (++calls === 1) throw Object.assign(new Error('private signed URL must not appear'), failure);
+            return { code: 0, data: plain(pages.pages) };
+        };
+        assert.equal((await f.context.fetchBilibiliPartData(11, 'BVtest')).aid, '11');
+        assert.equal(calls, 2);
+        assert.ok(!JSON.stringify(f.diagnostics).includes('private signed URL'));
+    }
+    for (const failure of [{ bilibiliRequestCause: 'request_http', httpStatus: 412 }, { apiCode: -352 }, { apiCode: -404 }]) {
+        const f = fixture(); let calls = 0;
+        f.context.fetchBilibiliLiveJson = async () => {
+            calls++;
+            if (failure.apiCode) return { code: failure.apiCode };
+            throw Object.assign(new Error('private exception'), failure);
+        };
+        await assert.rejects(f.context.fetchBilibiliPartData(11, 'BVtest'));
+        assert.equal(calls, 1);
+    }
+});
+
+test('collection failure identifies public video/API code and request counts without exception text or cookies', async () => {
+    const f = fixture(), data = collectionData(20);
+    f.context.fetchBilibiliLiveJson = async () => ({ code: -352, message: 'secret cookie and signed URL' });
+    await assert.rejects(f.context.completeBilibiliPlaylistData(data, f.context.location.href));
+    const record = f.diagnostics.filter(([name]) => name === 'External Player: playlist_metadata_diagnostic')
+        .map(([, value]) => JSON.parse(value)).find(value => value.phase === 'collection-failed');
+    assert.equal(record.cause, 'api_rejected');
+    assert.equal(record.apiCode, -352);
+    assert.match(record.aid, /^[1-9]\d*$/);
+    assert.equal(record.listedVideos, 20);
+    assert.ok(record.requestedVideos > 0 && record.requestedVideos <= 3);
+    assert.equal(record.completedVideos, 0);
+    assert.ok(!JSON.stringify(f.diagnostics).includes('secret'));
+    assert.ok(!JSON.stringify(f.diagnostics).includes('signed URL'));
+});
+
+test('navigation cancellation and incomplete parts retain different fixed diagnostic causes', async () => {
+    const f = fixture();
+    await assert.rejects(f.context.completeBilibiliPlaylistData(collectionData(3), f.context.location.href, () => false),
+        error => error.metadataCause === 'page_changed');
+    f.context.fetchBilibiliLiveJson = async () => ({ code: 0, data: [{ cid: 1002, page: 1, part: 'Only first' }] });
+    await assert.rejects(f.context.completeBilibiliPlaylistData(collectionData(3), f.context.location.href),
+        error => error.metadataCause === 'parts_incomplete');
+    const causes = f.diagnostics.filter(([name]) => name === 'External Player: playlist_metadata_diagnostic')
+        .map(([, value]) => JSON.parse(value).cause);
+    assert.deepEqual(causes, ['page_changed', 'parts_incomplete']);
+});
+
+test('pagelist rejects missing P, repeated CID and mismatched known CID without caching a truncated result', async () => {
+    for (const [returned, known, count, cause] of [
+        [[{ cid: 21, page: 1 }], [{ cid: 21, page: 1 }], 2, 'parts_incomplete'],
+        [[{ cid: 21, page: 1 }, { cid: 22, page: 3 }], [], 0, 'parts_incomplete'],
+        [[{ cid: 21, page: 1 }, { cid: 21, page: 2 }], [], 0, 'parts_incomplete'],
+        [[{ cid: 999, page: 1 }], [{ cid: 21, page: 1 }], 0, 'part_identity_mismatch']
+    ]) {
+        const f = fixture(); let calls = 0;
+        f.context.fetchBilibiliLiveJson = async () => { calls++; return { code: 0, data: returned }; };
+        for (let attempt = 0; attempt < 2; attempt++) {
+            await assert.rejects(f.context.fetchBilibiliPartData(11, 'BVtest', known, count), error => error.metadataCause === cause);
+        }
+        assert.equal(calls, 2);
+    }
+});
+
+test('cached pagelist validates each caller known CID and retains all 1001 P without video-view requests', async () => {
+    const f = fixture(); let calls = 0;
+    const returned = Array.from({ length: 1001 }, (_, index) => ({ cid: 21 + index, page: index + 1, part: `P${index + 1}` }));
+    f.context.fetchBilibiliLiveJson = async url => {
+        calls++;
+        assert.equal(new URL(url).pathname, '/x/player/pagelist');
+        return { code: 0, data: returned };
+    };
+    const [first, duplicate] = await Promise.all([
+        f.context.fetchBilibiliPartData(11, 'BVtest', [{ cid: 21, page: 1 }], 1001),
+        f.context.fetchBilibiliPartData(11, 'BVtest', [{ cid: 22, page: 2 }], 1001)
+    ]);
+    assert.equal(calls, 1);
+    assert.equal(first, duplicate);
+    assert.equal(first.pages.length, 1001);
+    await assert.rejects(f.context.fetchBilibiliPartData(11, 'BVtest', [{ cid: 999999, page: 1 }]),
+        error => error.metadataCause === 'part_identity_mismatch');
+    assert.equal(calls, 1);
+    f.advance(60001);
+    await f.context.fetchBilibiliPartData(11, 'BVtest');
+    assert.equal(calls, 2);
+});
+
 test('only public collection schema is logged without account details or media URLs', () => {
     const f = fixture(), data = collectionData(3);
     data.cookie = 'secret-cookie'; data.ugc_season.sections[0].episodes[0].video = 'https://private.test/?signature=secret';
@@ -198,6 +496,17 @@ test('only public collection schema is logged without account details or media U
     const logged = JSON.stringify(f.diagnostics);
     assert.match(logged, /archiveVideos/); assert.match(logged, /listedVideos/);
     assert.ok(!logged.includes('secret-cookie')); assert.ok(!logged.includes('signature=secret')); assert.ok(!logged.includes('private.test'));
+});
+
+test('handoff phase diagnostics expose only public identifiers, counts and elapsed time', () => {
+    const f = fixture(), started = f.context.bilibiliTimingNow(); f.advance(125);
+    f.context.traceBilibiliHandoff('protocol-dispatched', started, { bvid: 'BVtest', itemCount: 1, videoCount: 325,
+        video: 'https://private.test/video.m4s?signature=secret', cookie: 'account-secret', mid: 12345, token: 'private-token' });
+    f.context.traceBilibiliHandoff('metadata-ready', started, { bvid: 'https://private.test', itemCount: Infinity });
+    const messages = f.diagnostics.map(([, text]) => JSON.parse(text));
+    assert.deepEqual(messages, [ { phase: 'protocol-dispatched', ms: 125, bvid: 'BVtest', itemCount: 1, videoCount: 325 },
+        { phase: 'metadata-ready', ms: 125 } ]);
+    assert.ok(!JSON.stringify(f.diagnostics).includes('secret')); assert.ok(!JSON.stringify(f.diagnostics).includes('private'));
 });
 
 test('single videos, recommendations and absent current entries do not create playlists, while more than 500 parts remain complete', () => {
@@ -589,5 +898,5 @@ test('native playlist preparation occurs before progress setup and old saved pla
     const parser = between('class BaseParser {', 'function isRelayPlayer(');
     assert.ok(parser.indexOf('prepareBilibiliPlaylistLaunch(media, player)') < parser.indexOf('playbackProgressSync.prepareLaunch(media, player)'));
     assert.ok(parser.indexOf('if (media.webPlaylist) media.time = undefined') > parser.indexOf('playbackProgressSync.prepareLaunch(media, player)'));
-    assert.match(source, /@version\s+1\.2\.14\.21/);
+    assert.match(source, /@version\s+1\.2\.14\.24/);
 });

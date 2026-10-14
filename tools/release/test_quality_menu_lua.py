@@ -223,6 +223,48 @@ class QualityMenuLuaTests(unittest.TestCase):
                 self.state.fire("file-loaded")
                 self.assertEqual(["seek", "40.5", "absolute+exact"] in self.commands(), expected_seek)
 
+    def test_generic_reload_resumes_only_its_own_file(self):
+        self.load()
+        self.state.props.duration = 120
+        self.state.props["time-pos"] = "40.5"
+        self.state.bindings.reload()
+        self.state.fire("file-loaded")
+        self.assertIn(["seek", "40.5", "absolute+exact"], self.commands())
+        self.state.props.path = "https://media.example.test/unrelated.mp4"
+        self.state.fire("file-loaded")
+        self.assertEqual(sum(command[0] == "seek" for command in self.commands()), 1)
+
+    def test_failed_generic_reload_does_not_seek_the_next_unrelated_video(self):
+        self.load()
+        self.state.props.duration = 120
+        self.state.props["time-pos"] = "40.5"
+        self.state.bindings.reload()
+        self.state.fire("end-file", self.lua.table_from({"reason": "error"}))
+        self.state.props.path = "https://media.example.test/unrelated.mp4"
+        self.state.fire("file-loaded")
+        self.assertFalse(any(command[0] == "seek" for command in self.commands()))
+
+    def test_generic_reload_timeout_does_not_seek_a_late_file_loaded(self):
+        self.load()
+        self.state.props.duration = 120
+        self.state.props["time-pos"] = "40.5"
+        self.state.bindings.reload()
+        self.state.advance(16)
+        self.state.fire("file-loaded")
+        self.assertFalse(any(command[0] == "seek" for command in self.commands()))
+
+    def test_abandoned_browser_quality_reload_does_not_leave_a_stale_seek(self):
+        self.load(variants=self.variants())
+        self.state.props.duration = 120
+        self.state.props["time-pos"] = "40.5"
+        self.open()
+        self.state.messages["video-format-set"](VIDEO_720, VIDEO_1080)
+        self.state.props.path = "https://media.example.test/unrelated.mp4"
+        self.state.fire("file-loaded")
+        self.state.props.path = VIDEO_1080
+        self.state.fire("file-loaded")
+        self.assertFalse(any(command[0] == "seek" for command in self.commands()))
+
     def test_repeated_quality_clicks_wait_for_inflight_switch_and_do_not_replace_marker(self):
         self.load(variants=self.variants())
         self.state.fire("file-loaded")

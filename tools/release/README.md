@@ -12,7 +12,7 @@
 - `smoke_test_cached_thumbnails.py`：本地 HTTP 网络视频上的真实 uosc 悬停，验证缓存内预览、未缓存清图、零新增网络请求及播放状态保持，见 [缓存缩略图说明](../../docs/scripts/cached-thumbnails.md)。
 - `smoke_test_web_progress.py`：真实 MPV／Windows IPC／WebSocket 或 HTTP 进度兜底／本地 HTTP，验证双向续播、倒退及零秒、品质切换、网页断开后保存和分 P／换文件隔离，见 [进度同步](../../docs/scripts/playback-progress.md)。
 - `smoke_test_web_playlist.py`：真实 MPV 原生条目、选集、乱序、单曲／列表循环及品质切换保留列表的离线冒烟验证。
-- `smoke_test_web_playlist_hierarchy.py`：真实 MPV/uosc 上的 1001 条目完整合集层级验证，包含 3 P／4 P、单 P、分块交接、展开／折叠和乱序后点选。
+- `smoke_test_web_playlist_hierarchy.py`：真实 MPV/uosc 上的 1001 条目完整合集层级验证，包含 3 P／4 P、单 P、分块交接、展开／折叠和乱序后点选；`--fast-start` 验证先播当前 CID，再不重载地扩展完整列表。
 
 打包脚本负责结构验证，播放验证脚本负责行为验证。
 
@@ -41,13 +41,15 @@ gh release create v2026.10.12-progress-update "$releaseDir/artifacts/mpv-lazy-20
 
 下面的分类包工具保留原作者默认仓库和版本，不能将其默认上传命令直接用于本仓库累计更新。
 
+当前 `.24` 源码／本机更新新增完整合集快启、重复项清理和失败恢复，尚未包含在上方 `.19` Release 中。以后打包此版时使用新的 tag 和对应构建输入，保留旧 Release；范围见 [清理与快启报告](../../docs/reports/2026-10-14-cleanup-and-fast-start.md)。当前累计包校验还要求 `frozenWebPlaylistPassed`、`frozenWebPlaylistHierarchyPassed`、`frozenWebPlaylistFastStartPassed` 均为布尔 `true`，不能仅凭源码测试替代冻结 EXE 验证。
+
 ## `package_release.py`：分类打包脚本
 
 ### 脚本用途
 
 `package_release.py` 用于把完整 mpv-lazy 目录重新打成适合 GitHub Release 发布的分类包。
 
-当前 `mpv-lazy-26_github` 仓库只保存配置、脚本、文档和工具源码，不保存 `mpv.exe`、Python 运行时、VapourSynth 插件、模型等大型依赖。打包时脚本会：
+当前 `HikigayaMan/mpv-lazy-2026-custom` 仓库只保存配置、脚本、文档和工具源码，不保存 `mpv.exe`、Python 运行时、VapourSynth 插件、模型等大型依赖。打包时脚本会：
 
 1. 复制一个已验证可运行的完整源目录。
 2. 将当前 Git 仓库里的最新配置、脚本、文档覆盖进去。
@@ -66,12 +68,10 @@ gh release create v2026.10.12-progress-update "$releaseDir/artifacts/mpv-lazy-20
 
 ### 默认路径
 
-- 配置仓库：当前仓库，即 `F:\mpv_2026\mpv-lazy-26_github`。
-- 完整源目录：`F:\mpv_2026\_release_test`。
-- 临时工作目录：`F:\mpv_2026\_release_package_work`。
-- 输出目录：`F:\mpv_2026\_release_artifacts_split`。
+- 配置仓库：由脚本位置定位当前仓库；本地检出为 `C:\Users\Hikig\Documents\GitHub\mpv-lazy-2026-custom`。
+- 完整源、工作及输出目录仍沿用上游工具的 `F:\mpv_2026\_release_test`、`_release_package_work`、`_release_artifacts_split` 默认值。
 
-脚本默认不使用 `F:\mpv_2026\mpv-lazy`，避免影响你日常使用的目录。
+这些 F 盘路径是工具的旧默认值，不是本仓库当前维护目录。运行分类包工具时，按实际已验证完整包显式传入 `--source`、`--work`、`--artifacts`；源码仓库不能代替包含 `mpv.exe` 与运行依赖的完整源目录。本仓库累计更新优先使用前述 `package_custom_update.py`。
 
 ### 本地打包并验证
 
@@ -254,7 +254,7 @@ python tools\release\smoke_test_mpv.py --no-window
 
 ## 完整合集层级与 1001 条目验证
 
-External Player **1.2.14.21** 的源码／本机更新使用完整合集、视频、分 P 层级菜单，尚未包含在上述 `.19` 累计 Release 中。完整分 P 不设两条或 500 条硬限；清单公开元数据预算为 32 MiB，通过分块注册、分页恢复和分块 IPC 传递，超过预算明确拒绝，避免输出被静默截断的合集。
+External Player **1.2.14.24** 的源码／本机更新使用完整合集、视频、分 P 层级菜单，并支持先播当前 CID、后台补齐完整列表，尚未包含在上述 `.19` 累计 Release 中。完整分 P 不设两条或 500 条硬限；每份清单公开元数据预算为 32 MiB，最多 8 个会话，通过分块注册、分页恢复和分块 IPC 传递，超过预算明确拒绝，避免输出被静默截断的合集。扩展沿用已有会话，不额外占名额。
 
 在 Windows 仓库根目录、已安装中继 Python 开发依赖的环境运行：
 
@@ -262,9 +262,17 @@ External Player **1.2.14.21** 的源码／本机更新使用完整合集、视�
 & .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe tools/release/smoke_test_web_playlist_hierarchy.py --mpv 'C:/mpv/mpv.exe' --fixture 'C:/fixtures/video.mp4' --output-dir 'tools/telegram-web-mpv-bridge/build/web-playlist-hierarchy-smoke'
 ```
 
+验证快启与后台扩展时，在同一工具增加 `--fast-start`：
+
+```powershell
+& .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe tools/release/smoke_test_web_playlist_hierarchy.py --fast-start --mpv 'C:/mpv/mpv.exe' --fixture 'C:/fixtures/video.mp4' --output-dir 'tools/telegram-web-mpv-bridge/build/web-playlist-fast-start-smoke'
+```
+
 `--mpv` 指向可运行的 `mpv.exe`，`--fixture` 为可解码、至少 20 秒的本地视频。输出目录必须在仓库 `build` 目录内。工具创建隔离的媒体、进度文件和随机本机服务端口，使用模拟浏览器解析与真实 Windows IPC，结束后关闭自己创建的播放器与服务。结果写入 `result.json`，具体 MPV 日志保留在输出目录的 `run-*` 子目录。
 
 该工具实际注册 **1001 个原生条目、996 个视频**，其中两个视频分别含 3 P 和 4 P；检查全部条目保留、单 P 直接呈现、当前项祖先展开、同面板折叠不改变原生数量、乱序后仍点选正确 P，以及下一条导航和长媒体地址。循环与画质切换继续由既有 `smoke_test_web_playlist.py` 检查。树菜单只是原生列表的显示视图，组行不成为可播放条目。
+
+`--fast-start` 改为先启动只有当前 P 的临时清单，再在同一个 MPV 中扩展至全部条目。它核对初始单条清单及 ACK、完整扩展 ACK、当前原生条目 ID／位置／暂停／品质／轨道保持，以及完成后完整层级和顺序；菜单加载／失败提示另外由 Lua 回归检查。后台列表扩展不调用当前视频的重载；即使详情很早完成，也先让初始当前视频加载，防止初次 M3U 请求直接读到整份清单。
 
 纯 Lua 回归覆盖分块重复提交、旧 revision、不完整清单和重复 CID 拒绝，以及层级构建、焦点保留、原生条目 ID 重扫和观察者清理：
 
@@ -272,7 +280,7 @@ External Player **1.2.14.21** 的源码／本机更新使用完整合集、视�
 & .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe -m unittest discover -s tools/release -p 'test_web_playlist*_lua.py'
 ```
 
-这两项真实 MPV 冒烟使用本地媒体和模拟浏览器，不代替真实 B站账号与网页联机测试。本次层级功能的实际验证范围见 [报告](../../docs/reports/2026-10-13-web-playlist-hierarchy.md)。
+这些真实 MPV 冒烟使用本地媒体和模拟浏览器，不代替真实 B站账号与网页联机测试。最新快启与清理的实际验证范围见 [2026-10-14 报告](../../docs/reports/2026-10-14-cleanup-and-fast-start.md)；此前 `.21` 层级功能的真实合集验证保留在 [2026-10-13 报告](../../docs/reports/2026-10-13-web-playlist-hierarchy.md)。
 
 ## 推荐发布前流程
 
@@ -282,9 +290,9 @@ External Player **1.2.14.21** 的源码／本机更新使用完整合集、视�
 python tools/release/smoke_test_web_playlist.py --mpv 'C:/mpv/mpv.exe' --fixture 'C:/fixtures/video.mp4' --output-dir 'tools/telegram-web-mpv-bridge/build/web-playlist-smoke'
 ```
 
-测试检查第二项启动、手动选集、UOSC 乱序及下一条、单曲／列表循环、画质切换保留列表与位置、各项进度和媒体参数。只使用本地媒体，不验证真实 B站鉴权。冻结 EXE 烟测额外验证 `webPlaylistApiVersion: 1` 与两项 M3U 的 GET／HEAD；未来累计打包要求 `frozenWebPlaylistPassed` 为布尔 `true`。
+测试检查第二项启动、手动选集、UOSC 乱序及下一条、单曲／列表循环、画质切换保留列表与位置、各项进度和媒体参数。只使用本地媒体，不验证真实 B站鉴权。冻结 EXE 烟测额外检查列表、层级、分块和快启 API，以及 M3U 的 GET／HEAD、当前 CID bootstrap、同会话完整清单提交和失败通知；对应三个列表验证字段必须为布尔 `true`。
 
-1. 在 `mpv-lazy-26_github` 中完成配置或脚本修改。
+1. 在当前 `HikigayaMan/mpv-lazy-2026-custom` 检出中完成配置或脚本修改。
 2. 运行 `python tools\release\package_release.py` 生成并解压验证分类包。
 3. 用 `smoke_test_mpv.py` 对解压后的完整包做基础播放验证。
 4. 如果改过 VF、模型或 `vs-plugins`，再用 `--vf` 验证一个补帧/超分组合。

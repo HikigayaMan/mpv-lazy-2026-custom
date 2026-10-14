@@ -42,6 +42,20 @@ function fixture({ promiseOnly = false } = {}) {
 }
 const get = { type: 'getPlaybackProgress', provider: 'bilibili', identity: 'bilibili:11:21', pageUrl: 'https://www.bilibili.com/video/BVtest?p=1' };
 
+test('HTTP polling delivers complete-list success and failure without stopping current playback', async () => {
+    const f = fixture();
+    await f.bridge.requestPlayback({ ...get, type: 'startPlaybackProgress', sessionId: 'progress-test' });
+    const poll = [...f.timers.values()].find(timer => timer.delay === 1000);
+    f.response = { status: 200, responseText: JSON.stringify({ reply: null, events: [
+        { type: 'webPlaylistMetadataReady', playlistId: 'playlist-test', sessionId: 'progress-test', itemCount: 325 },
+        { type: 'webPlaylistMetadataFailed', playlistId: 'playlist-test', sessionId: 'progress-test', metadataError: 'playlist_metadata_failed' }
+    ] }) };
+    await poll.callback();
+    assert.deepEqual(f.messages.map(message => message.type), ['webPlaylistMetadataReady', 'webPlaylistMetadataFailed']);
+    assert.equal(f.messages[0].itemCount, 325);
+    assert.equal(f.bridge.httpPlaybackSessions.has('progress-test'), true);
+});
+
 test('blocked WebSocket falls back to anonymous JSON HTTP with a random capability and no page credentials', async () => {
     const f = fixture();
     await f.bridge.requestPlayback(get);
@@ -203,7 +217,7 @@ test('WebSocket playlist acknowledgements resolve their pending request and do n
 test('every chunked-upload and paginated-manifest acknowledgement is correlated on a real WebSocket dispatch path', async () => {
     const f = fixture(), playlistId = `playlist-${'a'.repeat(32)}`;
     const acknowledgements = { registerWebPlaylist: 'webPlaylistUploadStarted', appendWebPlaylistItems: 'webPlaylistItemsAppended',
-        commitWebPlaylist: 'webPlaylistRegistered', getWebPlaylistItems: 'webPlaylistItems' };
+        commitWebPlaylist: 'webPlaylistRegistered', getWebPlaylistItems: 'webPlaylistItems', failWebPlaylistMetadata: 'webPlaylistMetadataFailed' };
     f.bridge.ensureConnected = async () => {
         f.bridge.socket = { readyState: 1, send: raw => {
             const request = JSON.parse(raw);

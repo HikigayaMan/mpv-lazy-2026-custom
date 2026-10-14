@@ -194,13 +194,13 @@ class BridgeState:
             await websocket.send(json.dumps(await method(payload, websocket), ensure_ascii=False))
         elif msg_type == "stopPlaybackProgress":
             await self.progress.stop(str(payload.get("sessionId") or ""), websocket)
-        elif msg_type in ("registerWebPlaylist", "submitWebPlaylistItem", "getWebPlaylist", "stopWebPlaylist", "appendWebPlaylistItems", "commitWebPlaylist", "getWebPlaylistItems"):
+        elif msg_type in ("registerWebPlaylist", "submitWebPlaylistItem", "getWebPlaylist", "stopWebPlaylist", "appendWebPlaylistItems", "commitWebPlaylist", "getWebPlaylistItems", "failWebPlaylistMetadata"):
             if websocket is None:
                 raise ValueError("web playlist requires a browser connection")
             method = {"registerWebPlaylist": self.playlists.register, "submitWebPlaylistItem": self.playlists.submit,
                       "getWebPlaylist": self.playlists.get, "stopWebPlaylist": self.playlists.stop,
                       "appendWebPlaylistItems": self.playlists.append_items, "commitWebPlaylist": self.playlists.commit_upload,
-                      "getWebPlaylistItems": self.playlists.get_items}[msg_type]
+                      "getWebPlaylistItems": self.playlists.get_items, "failWebPlaylistMetadata": self.playlists.fail_metadata}[msg_type]
             await websocket.send(json.dumps(await method(payload, websocket), ensure_ascii=False))
         elif msg_type == "error":
             request_id = str(payload.get("id") or "")
@@ -318,6 +318,7 @@ async def handle_http_client(reader: asyncio.StreamReader, writer: asyncio.Strea
                                "playbackProgressHttpApiVersion": 1,
                                "webPlaylistApiVersion": 1,
                                "webPlaylistHierarchyApiVersion": 1, "webPlaylistChunkApiVersion": 1,
+                               "webPlaylistFastStartApiVersion": 1,
                                "browserConnected": bool(state.browser_clients),
                                "browserClients": len(state.browser_clients)}).encode("utf-8")
             writer.write(http_response(200, "OK", {"Content-Type": "application/json", **health_headers}, body))

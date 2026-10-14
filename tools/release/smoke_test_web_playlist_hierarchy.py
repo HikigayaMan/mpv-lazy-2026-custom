@@ -61,24 +61,38 @@ async def run(args):
         {'url': video, 'audio_url': audio, 'width': 640, 'height': 360, 'quality': 80, 'title': '360p'}]}
     browser = Browser(state.playlists.http_port, {item['itemId']: media for item in items})
     player = None
-    try:
+    async def register_complete(extend=False):
         await browser.post({'type': 'registerWebPlaylist', 'requestId': 'begin', 'chunked': True,
+            'extendExisting': extend,
             'playlistId': playlist_id, 'sessionId': sid, 'pipeName': pipe,
             'collectionId': 'fixture', 'collectionTitle': 'Fixture collection',
             'selectedItemId': selected['itemId'], 'initialPosition': 12.5})
         for chunk, offset in enumerate(range(0, len(items), 50)):
             await browser.post({'type': 'appendWebPlaylistItems', 'requestId': 'chunk-' + str(chunk),
                 'playlistId': playlist_id, 'chunkIndex': chunk, 'items': items[offset:offset + 50]})
-        registered = (await browser.post({'type': 'commitWebPlaylist', 'requestId': 'commit',
+        complete = (await browser.post({'type': 'commitWebPlaylist', 'requestId': 'commit',
             'playlistId': playlist_id, 'expectedItemCount': len(items)}))['reply']
-        require(registered['itemCount'] == 1001 and registered['selectedIndex'] == 5, 'Chunked registration lost entries')
+        require(complete['itemCount'] == 1001 and complete['selectedIndex'] == 5, 'Chunked registration lost entries')
+        return complete
+    try:
+        if args.fast_start:
+            registered = (await browser.post({'type': 'registerWebPlaylist', 'requestId': 'bootstrap', 'bootstrap': True,
+                'playlistId': playlist_id, 'sessionId': sid, 'pipeName': pipe, 'selectedItemId': selected['itemId'],
+                'collectionId': 'fixture', 'collectionTitle': 'Fixture collection', 'items': [selected],
+                'initialPosition': 12.5}))['reply']
+            require(registered['itemCount'] == 1 and registered['metadataPending'], 'Bootstrap claimed a complete list')
+        else:
+            registered = await register_complete()
         await browser.post({'type': 'startPlaybackProgress', 'requestId': 'progress', 'playlistId': playlist_id,
             'provider': 'bilibili', 'identity': 'bilibili:' + selected['itemId'], 'pageUrl': selected['pageUrl'],
             'sessionId': sid, 'pipeName': pipe, 'position': 12.5, 'duration': 90})
+        if args.early_metadata:
+            require(args.fast_start, 'Early metadata requires bootstrap mode')
+            await register_complete(extend=True)
         browser.task = asyncio.create_task(browser.poll())
         ipc = MpvPipe(pipe)
         command = [str(args.mpv), '--no-config', '--load-scripts=no', '--idle=yes', '--no-ytdl',
-            '--pause=yes', '--vo=null', '--ao=null', '--terminal=no', '--playlist-start=5',
+            '--pause=yes', '--vo=null', '--ao=null', '--terminal=no', '--playlist-start=' + ('0' if args.fast_start else '5'),
             '--input-ipc-server=' + ipc.path, '--log-file=' + str(work / 'mpv-details.log'),
             *['--script=' + str(REPO / 'portable_config/scripts' / name) for name in ('web_playlist.lua', 'web_progress.lua', 'quality-menu.lua')],
             '--script=' + str(REPO / 'portable_config/scripts/uosc'),
@@ -90,9 +104,40 @@ async def run(args):
         progress = 'user-data/mpv-lazy/playback-progress'
         status = 'user-data/uosc/web-playlist-menu'
         await wait_property(ipc, progress, lambda s: s and s.get('ready') and abs(s['position'] - 12.5) < .1, timeout=25)
+        if args.fast_start and not args.early_metadata:
+            require(await ipc.command(['get_property', 'playlist-count']) == 1, 'Startup waited for the complete collection')
+            before_entry = (await ipc.command(['get_property', 'playlist']))[0]
+            before_tracks = await ipc.command(['get_property', 'track-list'])
+            before_current = await ipc.command(['get_property', 'user-data/mpv-lazy/web-playlist/current'])
+            await wait_property(ipc, 'user-data/mpv-lazy/web-playlist/manifest-ack',
+                lambda s: s and s.get('stage') == 'commit' and s.get('ok') and s.get('itemCount') == 1)
+            await register_complete(extend=True)
+            await wait_property(ipc, 'user-data/mpv-lazy/web-playlist/extend-ack',
+                lambda s: s and s.get('ok') and s.get('itemCount') == 1001, timeout=30)
+            current_index = await ipc.command(['get_property', 'playlist-pos'])
+            current_entry = {key: await ipc.command(['get_property', f'playlist/{current_index}/{key}'])
+                for key in ('id', 'filename')}
+            require(current_entry['id'] == before_entry['id'] and current_entry['filename'] == before_entry['filename'],
+                'Extending replaced the playing native entry')
+            require(await ipc.command(['get_property', 'track-list']) == before_tracks, 'Extending changed audio/subtitle tracks')
+            require(abs((await ipc.command(['get_property', 'time-pos'])) - 12.5) < .1 and
+                await ipc.command(['get_property', 'pause']) is True, 'Extending changed position or pause')
+            require(await ipc.command(['get_property', 'playlist-pos']) == 5, 'Extending lost the full collection index')
+            after_current = await ipc.command(['get_property', 'user-data/mpv-lazy/web-playlist/current'])
+            require(after_current['generation'] == before_current['generation'] and after_current['video'] == before_current['video'],
+                'Extending reloaded or changed quality of the playing media')
+            require(len([r for r in browser.requests if r['itemId'] == selected['itemId']]) == 1,
+                'Bootstrap source was unnecessarily resolved twice')
         await wait_property(ipc, 'user-data/mpv-lazy/web-playlist/manifest-ack',
             lambda s: s and s.get('stage') == 'commit' and s.get('ok') and s.get('itemCount') == 1001, timeout=30)
         require(await ipc.command(['get_property', 'playlist-count']) == 1001, 'Native playlist truncated a large collection')
+        if args.early_metadata:
+            c = await ipc.command(['get_property', 'user-data/mpv-lazy/web-playlist/current'])
+            require(c['generation'] == 1 and c['itemId'] == selected['itemId'], 'Early metadata reloaded the first media')
+            require(abs((await ipc.command(['get_property', 'time-pos'])) - 12.5) < .1 and
+                await ipc.command(['get_property', 'pause']) is True, 'Early metadata changed playback state')
+            require(len([r for r in browser.requests if r['itemId'] == selected['itemId']]) == 1,
+                'Early metadata resolved the bootstrap twice')
         await ipc.command(['script-binding', 'uosc/playlist'])
         menu = await wait_property(ipc, status, lambda s: s and s.get('partCount') == 1001)
         require(menu['videoCount'] == 996, 'Single-part videos created extra parents')
@@ -119,6 +164,10 @@ async def run(args):
             'chunkedHttpRegistration': True, 'manifestIpcAck': True, 'currentAncestorsExpand': True,
             'collapsePreservesNativePlaylist': True, 'singlePartHasNoChildFolder': True,
             'selectionAfterNativeShuffle': True, 'nativeNext': True, 'longMediaUrls': True,
+            'fastStartBeforeFullMetadata': args.fast_start,
+            'earlyMetadataBeforePlayerLaunch': args.early_metadata,
+            'extensionPreservesCurrentNativeIdAndTracks': args.fast_start,
+            'extensionPreservesPositionPauseAndQuality': args.fast_start,
             'scope': 'Actual MPV with local media and simulated browser; no account or website requests.'}
         (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
         return result
@@ -143,4 +192,6 @@ if __name__ == '__main__':
     parser.add_argument('--mpv', required=True, type=Path)
     parser.add_argument('--fixture', required=True, type=Path)
     parser.add_argument('--output-dir', required=True, type=Path)
+    parser.add_argument('--fast-start', action='store_true', help='Play one bootstrap entry, then extend it to the complete collection without reloading')
+    parser.add_argument('--early-metadata', action='store_true', help='Finish metadata before MPV opens the bootstrap URI')
     print(json.dumps(asyncio.run(run(parser.parse_args())), indent=2))

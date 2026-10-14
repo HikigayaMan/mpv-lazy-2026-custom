@@ -15,7 +15,7 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from bilibili_danmaku import MpvPipe
+from bilibili_danmaku import MAX_MPV_COMMAND_BYTES, MpvPipe, encode_mpv_command
 from playback_progress import SAFE_SESSION, MpvIpcAvailability, canonical_page_url, ipc_error_summary, seconds, validate_identity
 
 LOG = logging.getLogger("web-playlist")
@@ -29,6 +29,8 @@ INLINE_MANIFEST_BYTES = 192 * 1024
 PAGE_BYTES = 48 * 1024
 MANIFEST_API_PROPERTY = "user-data/mpv-lazy/web-playlist/manifest-api-version"
 MANIFEST_ACK_PROPERTY = "user-data/mpv-lazy/web-playlist/manifest-ack"
+EXTEND_ACK_PROPERTY = "user-data/mpv-lazy/web-playlist/extend-ack"
+METADATA_ERRORS = {"playlist_metadata_failed", "playlist_metadata_incomplete", "playlist_metadata_timeout", "playlist_metadata_ipc_failed"}
 BASE_FIELDS = ("itemId", "aid", "cid", "bvid", "p", "identity", "title", "duration", "pageUrl")
 HIERARCHY_FIELDS = ("sectionId", "sectionTitle", "videoId", "videoTitle", "partTitle", "partCount", "order")
 COMPACT_FIELDS = ("itemId", "title", "duration", "sectionId", "sectionTitle", "videoId", "videoTitle", "partTitle", "p", "partCount", "order")
@@ -146,7 +148,10 @@ def validate_leaf_items(raw_items: Any, *, offset: int = 0) -> list[dict[str, An
 def validate_items(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
     validate_registration(payload)
     raw_items = payload.get("items")
-    if not isinstance(raw_items, list) or len(raw_items) < 2:
+    bootstrap = payload.get("bootstrap") is True
+    if "bootstrap" in payload and type(payload["bootstrap"]) is not bool:
+        raise ValueError("invalid web playlist bootstrap")
+    if not isinstance(raw_items, list) or (len(raw_items) != 1 if bootstrap else len(raw_items) < 2):
         raise ValueError("invalid web playlist items")
     entries = validate_leaf_items(raw_items)
     seen = {entry["itemId"] for entry in entries}
@@ -232,6 +237,14 @@ class WebPlaylistSession:
         self.manifest_task = None
         self.manifest_stage, self.manifest_sent = "waiting", 0
         self.manifest_ack_timeout = 2.5
+        self.bootstrap_item_id = self.current_item_id if payload.get("bootstrap") is True else None
+        self.bootstrap_entry = dict(items[selected_index]) if self.bootstrap_item_id else None
+        self.metadata_pending = self.bootstrap_item_id is not None
+        self.metadata_error = None
+        self.metadata_task = None
+        self.extend_ack_timeout = 12.0
+        self.bootstrap_loaded = False
+        self.extension_m3u_ready = False
 
     def start(self) -> None:
         self.task = asyncio.create_task(self.run())
@@ -240,9 +253,12 @@ class WebPlaylistSession:
         current = self.entries.get(self.current_item_id, self.items[self.selected_index])
         result = {"playlistId": self.playlist_id, "sessionId": self.session_id, "pipeName": self.pipe_name,
                 "playlistUrl": self.manager.playlist_url(self.playlist_id), "selectedIndex": self.selected_index,
+                "initialPosition": self.initial_position,
                 "currentItemId": self.current_item_id, "currentItem": dict(current), "itemCount": len(self.items),
                 "revision": self.revision, "collectionId": self.collection_id, "collectionTitle": self.collection_title,
-                "hasHierarchy": True, "hierarchyApiVersion": 1}
+                "hasHierarchy": True, "hierarchyApiVersion": 1, "metadataPending": self.metadata_pending,
+                "metadataStage": "failed" if self.metadata_error else "extending" if self.metadata_pending and self.metadata_task else "pending" if self.metadata_pending else "ready",
+                **({"metadataError": self.metadata_error} if self.metadata_error else {})}
         if not self.chunked:
             legacy = [{key: item[key] for key in BASE_FIELDS} for item in self.items]
             if len(json.dumps(legacy, ensure_ascii=False).encode()) <= INLINE_MANIFEST_BYTES:
@@ -252,33 +268,48 @@ class WebPlaylistSession:
     async def manifest_exchange(self, name: str, envelope: dict[str, Any], stage: str) -> None:
         encoded = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
         command = ["script-message-to", "web_playlist", name, encoded]
-        if len(json.dumps({"command": command, "request_id": 1}, ensure_ascii=False).encode()) > 32768:
+        if len(encode_mpv_command(command)) > 32768:
             raise ValueError("web playlist manifest IPC chunk is too large")
+        expected = {"stage": stage, "itemCount": self.manifest_sent + len(envelope["items"]) if stage == "chunk" else envelope["itemCount"]}
+        if stage == "chunk":
+            expected["chunkIndex"] = envelope["chunkIndex"]
+        await self.exchange_ack(command, MANIFEST_ACK_PROPERTY, envelope, expected,
+                                self.manifest_ack_timeout, "manifest", .03)
+
+    async def exchange_ack(self, command: list[Any], property_name: str, envelope: dict[str, Any],
+                           expected: dict[str, Any], timeout: float, label: str, poll_interval: float) -> None:
+        """Wait for async Lua acknowledgements, including before their first property exists."""
         for _ in range(3):
             try:
                 await self.ipc.command(command)
-                deadline = time.monotonic() + self.manifest_ack_timeout
-                while time.monotonic() < deadline:
-                    ack = await self.ipc.command(["get_property", MANIFEST_ACK_PROPERTY])
-                    if isinstance(ack, dict) and ack.get("playlistId") == self.playlist_id and ack.get("revision") == self.revision:
-                        if ack.get("ok") is False:
-                            raise ValueError("web playlist manifest was rejected")
-                        expected_count = self.manifest_sent + len(envelope["items"]) if stage == "chunk" else envelope["itemCount"]
-                        if ack.get("ok") is True and ack.get("stage") == stage and ack.get("itemCount") == expected_count and (stage != "chunk" or ack.get("chunkIndex") == envelope["chunkIndex"]):
-                            return
-                    await asyncio.sleep(.03)
             except (OSError, RuntimeError, TimeoutError):
-                pass
-        raise TimeoutError("web playlist manifest acknowledgement timed out")
+                await asyncio.sleep(poll_interval)
+                continue
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    ack = await self.ipc.command(["get_property", property_name])
+                except (OSError, RuntimeError, ValueError, TimeoutError):
+                    # script-message-to returns before file-loaded/loadlist
+                    # callbacks publish their ACK. Missing properties and a
+                    # busy pipe are transient during this bounded wait.
+                    ack = None
+                if isinstance(ack, dict) and ack.get("playlistId") == self.playlist_id and ack.get("revision") == envelope["revision"]:
+                    if ack.get("ok") is False:
+                        raise ValueError("web playlist " + label + " was rejected")
+                    if ack.get("ok") is True and all(ack.get(key) == value for key, value in expected.items()):
+                        return
+                await asyncio.sleep(poll_interval)
+        raise TimeoutError("web playlist " + label + " acknowledgement timed out")
 
-    def manifest_chunks(self):
+    def manifest_chunks(self, *, items=None, revision=None):
         chunk, index = [], 0
-        for item in self.items:
+        for item in self.items if items is None else items:
             compact = {key: item[key] for key in COMPACT_FIELDS}
             candidate = chunk + [compact]
-            envelope = {"playlistId": self.playlist_id, "revision": self.revision, "chunkIndex": index, "items": candidate}
+            envelope = {"playlistId": self.playlist_id, "revision": self.revision if revision is None else revision, "chunkIndex": index, "items": candidate}
             encoded = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
-            wire = json.dumps({"command": ["script-message-to", "web_playlist", "web-playlist-manifest-chunk", encoded], "request_id": 1}, ensure_ascii=False).encode()
+            wire = encode_mpv_command(["script-message-to", "web_playlist", "web-playlist-manifest-chunk", encoded])
             if chunk and (len(wire) > 32768 or len(candidate) > 100):
                 yield chunk
                 index += 1
@@ -288,7 +319,13 @@ class WebPlaylistSession:
         if chunk:
             yield chunk
 
-    async def publish_manifest(self) -> None:
+    async def publish_manifest(self, *, metadata_pending=None) -> None:
+        # An extension may commit before this scheduled bootstrap publisher
+        # starts. Its replacement publisher must own the new revision alone.
+        if metadata_pending is None and self.metadata_task is not None:
+            return
+        items, revision = self.items, self.revision
+        pending = self.metadata_pending if metadata_pending is None else metadata_pending
         try:
             deadline = time.monotonic() + 6
             while True:
@@ -302,19 +339,21 @@ class WebPlaylistSession:
                     self.manifest_stage = "unsupported"
                     return
                 await asyncio.sleep(.1)
-            shared = {"playlistId": self.playlist_id, "revision": self.revision}
+            shared = {"playlistId": self.playlist_id, "revision": revision}
+            self.manifest_sent = 0
             self.manifest_stage = "begin"
-            await self.manifest_exchange("web-playlist-manifest-begin", {**shared, "itemCount": len(self.items),
-                "collectionId": self.collection_id, "collectionTitle": self.collection_title}, "begin")
+            await self.manifest_exchange("web-playlist-manifest-begin", {**shared, "itemCount": len(items),
+                "collectionId": self.collection_id, "collectionTitle": self.collection_title,
+                "metadataPending": pending}, "begin")
             chunks = 0
-            for index, items in enumerate(self.manifest_chunks()):
+            for index, chunk_items in enumerate(self.manifest_chunks(items=items, revision=revision)):
                 self.manifest_stage = "chunk"
-                await self.manifest_exchange("web-playlist-manifest-chunk", {**shared, "chunkIndex": index, "items": items}, "chunk")
-                self.manifest_sent += len(items)
+                await self.manifest_exchange("web-playlist-manifest-chunk", {**shared, "chunkIndex": index, "items": chunk_items}, "chunk")
+                self.manifest_sent += len(chunk_items)
                 chunks += 1
                 await asyncio.sleep(0)
             self.manifest_stage = "commit"
-            await self.manifest_exchange("web-playlist-manifest-commit", {**shared, "itemCount": len(self.items), "chunkCount": chunks}, "commit")
+            await self.manifest_exchange("web-playlist-manifest-commit", {**shared, "itemCount": len(items), "chunkCount": chunks}, "commit")
             self.manifest_stage = "ready"
         except asyncio.CancelledError:
             raise
@@ -323,6 +362,59 @@ class WebPlaylistSession:
             diagnostic = ipc_error_summary(error)
             LOG.warning("web playlist manifest unavailable: session=%s kind=%s errno=%s winerror=%s", self.session_id,
                         diagnostic["kind"], diagnostic["errno"], diagnostic["winerror"])
+
+    def apply_extension(self, payload: dict[str, Any], items: list[dict[str, Any]], selected_index: int) -> None:
+        """Replace public metadata without replacing the live player session."""
+        self.items, self.selected_index = items, selected_index
+        self.entries = {item["itemId"]: item for item in items}
+        self.revision = self.manager.next_revision()
+        self.collection_id, self.collection_title = payload["collectionId"], payload["collectionTitle"]
+        self.chunked = True
+        self.metadata_pending, self.metadata_error = True, None
+        progress = self.manager.progress.sessions.get(self.session_id)
+        if progress is not None and progress.playlist_id == self.playlist_id:
+            progress.playlist_entries = {item["identity"]: dict(item) for item in items}
+        self.metadata_task = asyncio.create_task(self.finish_extension())
+
+    async def extension_exchange(self) -> None:
+        envelope = {"playlistId": self.playlist_id, "revision": self.revision, "itemCount": len(self.items),
+                    "playlistUrl": self.manager.playlist_url(self.playlist_id)}
+        command = ["script-message-to", "web_playlist", "web-playlist-extend",
+                   json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))]
+        await self.exchange_ack(command, EXTEND_ACK_PROPERTY, envelope, {"itemCount": len(self.items)},
+                                self.extend_ack_timeout, "extension", .05)
+
+    async def finish_extension(self) -> None:
+        try:
+            deadline = time.monotonic() + self.attach_timeout
+            while not self.bootstrap_loaded:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("web playlist initial media did not attach")
+                await asyncio.sleep(.05)
+            if self.manifest_task is not None and not self.manifest_task.done():
+                self.manifest_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.manifest_task
+            self.extension_m3u_ready = True
+            await self.extension_exchange()
+            self.manifest_task = asyncio.create_task(self.publish_manifest(metadata_pending=False))
+            await self.manifest_task
+            if self.manifest_stage != "ready":
+                raise TimeoutError("web playlist complete manifest was not published")
+            self.metadata_pending, self.metadata_error = False, None
+            await self.send({"type": "webPlaylistMetadataReady", **self.description()})
+        except asyncio.CancelledError:
+            raise
+        except (OSError, RuntimeError, ValueError, TimeoutError):
+            await self.mark_metadata_failed("playlist_metadata_ipc_failed")
+
+    async def mark_metadata_failed(self, error: str) -> None:
+        self.metadata_pending, self.metadata_error = True, error
+        envelope = {"playlistId": self.playlist_id, "revision": self.revision, "error": "playlist_metadata_failed"}
+        with contextlib.suppress(OSError, RuntimeError, ValueError, TimeoutError):
+            await self.ipc.command(["script-message-to", "web_playlist", "web-playlist-metadata-error",
+                                    json.dumps(envelope, separators=(",", ":"))])
+        await self.send({"type": "webPlaylistMetadataFailed", **self.description()})
 
     async def send(self, message: dict[str, Any]) -> None:
         owner = self.owner
@@ -338,8 +430,7 @@ class WebPlaylistSession:
         envelope.update({"media": media} if media is not None else {"error": error or "playlist_resolve_failed"})
         encoded = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         command = ["script-message-to", "web_playlist", "web-playlist-resolved", encoded]
-        wire = json.dumps({"command": command, "request_id": 1}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(wire) > 65536:
+        if len(encode_mpv_command(command)) > MAX_MPV_COMMAND_BYTES:
             raise ValueError("web playlist IPC reply is too large")
         await self.ipc.command(command)
 
@@ -386,10 +477,14 @@ class WebPlaylistSession:
                 with contextlib.suppress(OSError, RuntimeError, ValueError, TimeoutError):
                     await progress.sample_progress()
             resume = self.manager.progress.store.get(entry["identity"])
+            sent_owner = self.owner
             await self.send({"type": "resolveWebPlaylistItem", "playlistId": self.playlist_id, "sessionId": self.session_id,
                              "itemId": item_id, "generation": generation, "item": dict(entry), "resumeRecord": resume,
                              "first": self.pending["first"], "initialPosition": self.initial_position if self.pending["first"] else None})
-            self.last_sent_owner = self.owner
+            # send() may yield while a refreshed browser claims this session.
+            # Only mark the browser that actually received this request; the
+            # new owner must still receive the matching pending generation.
+            self.last_sent_owner = sent_owner if self.owner is sent_owner else None
             self.phase = "browser-resolve"
 
     async def submit(self, payload: dict[str, Any], owner) -> dict[str, Any]:
@@ -432,6 +527,8 @@ class WebPlaylistSession:
             await self.resolve_reply(item_id, generation, error=payload["error"])
         else:
             await self.resolve_reply(item_id, generation, media=resolved_media(payload.get("media"), self.entries[item_id]))
+            if item_id == self.bootstrap_item_id:
+                self.bootstrap_loaded = True
         self.pending = None
         self.phase = "player-progress"
         return {"type": "webPlaylistItemSubmitted", "requestId": payload.get("requestId"), "playlistId": self.playlist_id,
@@ -463,7 +560,7 @@ class WebPlaylistSession:
                         self.reason = "ipc_retry_" + diagnostic["kind"]
                     request = None
                 await self.accept_request(request)
-                if self.attached and self.manifest_task is None:
+                if self.attached and self.manifest_task is None and self.metadata_task is None:
                     # The first media resolve is emitted before metadata starts.
                     # Manifest acknowledgements never block playback polling.
                     self.manifest_task = asyncio.create_task(self.publish_manifest())
@@ -477,6 +574,10 @@ class WebPlaylistSession:
             self.reason = "playlist_failed"
             LOG.warning("web playlist failed: session=%s", self.session_id)
         finally:
+            if self.metadata_task is not None and not self.metadata_task.done():
+                self.metadata_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.metadata_task
             if self.manifest_task is not None and not self.manifest_task.done():
                 self.manifest_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -528,11 +629,19 @@ class WebPlaylistManager:
         collection_id = optional_text(payload.get("collectionId"), "", 128)
         collection_title = optional_text(payload.get("collectionTitle"), "")
         saved = {key: payload[key] for key in ("playlistId", "sessionId", "pipeName", "selectedItemId")}
-        saved.update({"initialPosition": initial, "collectionId": collection_id, "collectionTitle": collection_title, "chunked": True})
+        extend_existing = payload.get("extendExisting") is True
+        if "extendExisting" in payload and type(payload["extendExisting"]) is not bool:
+            raise ValueError("invalid web playlist extension")
+        saved.update({"initialPosition": initial, "collectionId": collection_id, "collectionTitle": collection_title,
+                      "chunked": True, "extendExisting": extend_existing})
         self.sweep_uploads()
         async with self.lock:
             playlist_id = payload["playlistId"]
-            if playlist_id in self.sessions:
+            session = self.sessions.get(playlist_id)
+            if extend_existing:
+                if session is None or session.owner is not owner or session.session_id != payload["sessionId"] or session.pipe_name != payload["pipeName"] or not session.bootstrap_item_id or not session.metadata_pending or selected != session.bootstrap_item_id or (session.metadata_task and not session.metadata_task.done()):
+                    raise ValueError("web playlist extension does not match bootstrap session")
+            elif session is not None:
                 raise ValueError("web playlist is already committed")
             upload = self.uploads.get(playlist_id)
             if upload is not None:
@@ -540,7 +649,7 @@ class WebPlaylistManager:
                     raise ValueError("web playlist upload belongs to another session")
                 upload["owner"] = owner
             else:
-                if len(self.sessions) + len(self.uploads) >= 8 or any(session.session_id == payload["sessionId"] for session in self.sessions.values()) or any(item["payload"]["sessionId"] == payload["sessionId"] for item in self.uploads.values()):
+                if (not extend_existing and (len(set(self.sessions) | set(self.uploads)) >= 8 or any(session.session_id == payload["sessionId"] for session in self.sessions.values()))) or any(item["payload"]["sessionId"] == payload["sessionId"] for item in self.uploads.values()):
                     raise ValueError("web playlist session limit or IPC conflict")
                 upload = self.uploads[playlist_id] = {"payload": saved, "owner": owner, "items": [], "seen": set(),
                     "chunks": {}, "bytes": 0, "lastSeen": time.monotonic()}
@@ -586,21 +695,28 @@ class WebPlaylistManager:
             raise ValueError("web playlist requires a browser owner")
         async with self.lock:
             session = self.sessions.get(payload.get("playlistId"))
+            upload = self.uploads.get(payload.get("playlistId"))
+            extending = upload is not None and upload["payload"].get("extendExisting") is True
             expected = payload.get("expectedItemCount")
-            if type(expected) is not int or expected < 2:
+            if type(expected) is not int or expected < (1 if extending or (session and session.bootstrap_item_id) else 2):
                 raise ValueError("invalid web playlist expected item count")
-            if session is not None:
+            if session is not None and not extending:
                 if session.owner is not owner or len(session.items) != expected:
                     raise ValueError("web playlist commit does not match")
             else:
-                upload = self.uploads.get(payload.get("playlistId"))
                 if upload is None or upload["owner"] is not owner or len(upload["items"]) != expected:
                     raise ValueError("web playlist upload is incomplete")
+                if extending and (session is None or session.owner is not owner or session.session_id != upload["payload"]["sessionId"] or session.pipe_name != upload["payload"]["pipeName"] or not session.bootstrap_item_id or not session.metadata_pending or (session.metadata_task and not session.metadata_task.done())):
+                    raise ValueError("web playlist extension does not match bootstrap session")
                 entries = upload["items"]
                 selected = upload["payload"]["selectedItemId"]
                 index = next((index for index, item in enumerate(entries) if item["itemId"] == selected), None)
                 if index is None:
                     raise ValueError("web playlist selected item is missing")
+                if extending and (selected != session.bootstrap_item_id or session.current_item_id not in upload["seen"] or (session.pending and session.pending["itemId"] not in upload["seen"])):
+                    raise ValueError("web playlist extension omits current entry")
+                if extending and any(entries[index][field] != session.bootstrap_entry[field] for field in ("itemId", "aid", "cid", "bvid", "p", "identity", "pageUrl")):
+                    raise ValueError("web playlist extension changes initial identity")
                 counts = {}
                 pages = {}
                 for item in entries:
@@ -612,10 +728,14 @@ class WebPlaylistManager:
                         raise ValueError("web playlist video parts are incomplete")
                 for item in entries:
                     item["partCount"] = counts[(item["sectionId"], item["videoId"])]
-                session = self.session_factory(self, upload["payload"], entries, index, owner)
-                self.sessions[session.playlist_id] = session
+                if extending:
+                    session.apply_extension(upload["payload"], entries, index)
+                else:
+                    session = self.session_factory(self, upload["payload"], entries, index, owner)
+                    self.sessions[session.playlist_id] = session
                 self.uploads.pop(session.playlist_id, None)
-                session.start()
+                if not extending:
+                    session.start()
         return {"type": "webPlaylistRegistered", "requestId": payload.get("requestId"), "apiVersion": API_VERSION, **session.description()}
 
     async def get_items(self, payload: dict[str, Any], owner) -> dict[str, Any]:
@@ -649,7 +769,12 @@ class WebPlaylistManager:
             raise LookupError("web playlist is unavailable")
         base = self.playlist_url(playlist_id).rsplit("/", 1)[0]
         lines = ["#EXTM3U"]
-        for item in session.items:
+        items = session.items
+        # An unusually fast metadata response must not let MPV's initial GET
+        # skip the one-entry bootstrap before its first on_load resolution.
+        if session.bootstrap_item_id and not session.extension_m3u_ready:
+            items = [session.entries[session.bootstrap_item_id]]
+        for item in items:
             lines.extend([f'#EXTINF:{int(item["duration"])},{item["title"]}', base + "/item/" + item["itemId"]])
         return ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -662,17 +787,37 @@ class WebPlaylistManager:
         items, index = validate_items(payload)
         seconds(payload.get("initialPosition", 0))
         async with self.lock:
+            if payload["playlistId"] in self.uploads:
+                raise ValueError("web playlist upload is pending")
             session = self.sessions.get(payload["playlistId"])
             if session is not None:
                 if session.owner is not owner or session.session_id != payload["sessionId"] or session.items != items or session.selected_index != index:
                     raise ValueError("web playlist already belongs to another session")
             else:
-                if len(self.sessions) + len(self.uploads) >= 8 or any(item.session_id == payload["sessionId"] for item in self.sessions.values()) or any(upload["payload"]["sessionId"] == payload["sessionId"] for upload in self.uploads.values()):
+                if len(set(self.sessions) | set(self.uploads)) >= 8 or any(item.session_id == payload["sessionId"] for item in self.sessions.values()) or any(upload["payload"]["sessionId"] == payload["sessionId"] for upload in self.uploads.values()):
                     raise ValueError("web playlist session limit or IPC conflict")
                 session = self.session_factory(self, payload, items, index, owner)
                 self.sessions[session.playlist_id] = session
                 session.start()
         return {"type": "webPlaylistRegistered", "requestId": payload.get("requestId"), "apiVersion": API_VERSION, **session.description()}
+
+    async def fail_metadata(self, payload: dict[str, Any], owner) -> dict[str, Any]:
+        error = payload.get("error", "playlist_metadata_failed")
+        if not isinstance(error, str) or error not in METADATA_ERRORS:
+            raise ValueError("invalid web playlist metadata error")
+        async with self.lock:
+            session = self.sessions.get(payload.get("playlistId"))
+            if session is None or owner is None or session.owner is not owner or not session.bootstrap_item_id or not session.metadata_pending or (payload.get("sessionId") is not None and payload["sessionId"] != session.session_id):
+                raise ValueError("web playlist metadata owner does not match")
+            upload = self.uploads.get(session.playlist_id)
+            if upload is not None and upload["owner"] is owner:
+                self.uploads.pop(session.playlist_id, None)
+            if session.metadata_task and not session.metadata_task.done():
+                session.metadata_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await session.metadata_task
+            await session.mark_metadata_failed(error)
+        return {"type": "webPlaylistMetadataFailed", "requestId": payload.get("requestId"), **session.description()}
 
     async def submit(self, payload: dict[str, Any], owner) -> dict[str, Any]:
         session = self.sessions.get(payload.get("playlistId"))
@@ -681,22 +826,32 @@ class WebPlaylistManager:
         return await session.submit(payload, owner)
 
     async def rebind(self, playlist_id: str, owner) -> None:
-        session = self.sessions.get(playlist_id)
-        if session is None or owner is None or session.owner is owner:
-            return
-        previous = session.owner
+        async with self.lock:
+            session = self.sessions.get(playlist_id)
+            if session is None or owner is None or session.owner is owner:
+                return
+            previous = session.owner
+            upload = self.uploads.get(playlist_id)
+            if upload is not None and upload["payload"].get("extendExisting") is True and upload["payload"]["sessionId"] == session.session_id and upload["payload"]["pipeName"] == session.pipe_name and upload["owner"] is not owner:
+                # A refreshed browser starts its metadata transfer at chunk 0.
+                # Revoke only the previous unfinished upload; the registered
+                # player, media, pending resolver and progress remain intact.
+                self.uploads.pop(playlist_id, None)
+            session.owner = owner
+            session.last_sent_owner = None
+            progress = self.progress.sessions.get(session.session_id)
+            notify_progress = progress is not None and progress.playlist_id == playlist_id and previous is not None and progress.owner is previous
+            if progress is not None and progress.playlist_id == playlist_id:
+                progress.owner = owner
         if previous is not None:
-            await session.send({"type": "webPlaylistStopped", "playlistId": playlist_id, "sessionId": session.session_id,
-                                "reason": "browser_rebound"})
-        session.owner = owner
-        session.last_sent_owner = None
-        progress = self.progress.sessions.get(session.session_id)
-        if progress is not None and progress.playlist_id == playlist_id:
-            if previous is not None and progress.owner is previous:
-                await progress.send({"type": "playbackProgressStopped", "playlistId": playlist_id,
-                                     "sessionId": session.session_id, "identity": progress.identity,
-                                     "provider": progress.provider, "reason": "browser_rebound"})
-            progress.owner = owner
+            with contextlib.suppress(Exception):
+                await previous.send(json.dumps({"type": "webPlaylistStopped", "playlistId": playlist_id,
+                                               "sessionId": session.session_id, "reason": "browser_rebound"}))
+            if notify_progress:
+                with contextlib.suppress(Exception):
+                    await previous.send(json.dumps({"type": "playbackProgressStopped", "playlistId": playlist_id,
+                                                   "sessionId": session.session_id, "identity": progress.identity,
+                                                   "provider": progress.provider, "reason": "browser_rebound"}))
 
     async def get(self, payload: dict[str, Any], owner) -> dict[str, Any]:
         identity = payload.get("identity")
@@ -755,7 +910,8 @@ class WebPlaylistManager:
                  "ipc": session.ipc_availability.snapshot(),
                  "submissions": {"received": session.submissions_received, "accepted": session.submissions_accepted,
                                  "rejected": session.submissions_rejected, "lastError": session.last_submit_error},
-                 "manifest": {"revision": session.revision, "stage": session.manifest_stage, "sentItemCount": session.manifest_sent}}
+                "metadataPending": session.metadata_pending, "metadataError": session.metadata_error,
+                "manifest": {"revision": session.revision, "stage": session.manifest_stage, "sentItemCount": session.manifest_sent}}
                 for session in self.sessions.values()]
 
     async def close(self) -> None:

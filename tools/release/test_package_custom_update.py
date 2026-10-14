@@ -41,6 +41,7 @@ class PackageCustomUpdateTests(unittest.TestCase):
                          "frozenPlaybackHttpPassed": True,
                          "frozenWebPlaylistPassed": True,
                          "frozenWebPlaylistHierarchyPassed": True,
+                         "frozenWebPlaylistFastStartPassed": True,
                          "brotliBinaryIncluded": True, "sourceInputs": {name: pack.sha256((self.repo / name).read_bytes()) for name in pack.BRIDGE_INPUTS}}
         self.provenance.write_text(json.dumps(self.evidence))
         self.notices = self.root / "notices.txt"
@@ -120,6 +121,18 @@ class PackageCustomUpdateTests(unittest.TestCase):
                     self.evidence["frozenWebPlaylistHierarchyPassed"] = value
                 self.provenance.write_text(json.dumps(self.evidence))
                 with self.assertRaisesRegex(ValueError, "verification"):
+                    self.build()
+
+    def test_fast_start_requires_successful_frozen_verification(self):
+        for value in (None, False, 'true', 1):
+            with self.subTest(value=value):
+                evidence = dict(self.evidence)
+                if value is None:
+                    evidence.pop('frozenWebPlaylistFastStartPassed')
+                else:
+                    evidence['frozenWebPlaylistFastStartPassed'] = value
+                self.provenance.write_text(json.dumps(evidence))
+                with self.assertRaisesRegex(ValueError, 'verification'):
                     self.build()
 
     def test_non_pe_binary_is_rejected(self):

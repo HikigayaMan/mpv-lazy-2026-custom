@@ -62,6 +62,7 @@ function fixture({ url = 'https://www.bilibili.com/video/BVtest?p=1', position =
     vm.runInContext([
         between('const DOUYU_MD5_ROTATIONS =', 'function buildDouyuAuth('),
         between('// BILIBILI_LIVE_DANMAKU_HELPERS_START', '// BILIBILI_LIVE_DANMAKU_HELPERS_END'),
+        between('// BILIBILI_REQUEST_CACHE_HELPERS_START', '// BILIBILI_REQUEST_CACHE_HELPERS_END'),
         between('// PLAYBACK_PROGRESS_HELPERS_START', '// PLAYBACK_PROGRESS_HELPERS_END'),
         'globalThis.sync = playbackProgressSync; globalThis.Reporter = BilibiliProgressReporter;'
     ].join('\n'), context);
@@ -72,7 +73,7 @@ const content = { provider: 'bilibili', identity: 'bilibili:11:21', pageUrl: 'ht
 const record = (position, updatedAt = 1_000_000, extra = {}) => ({ position, duration: 300, updatedAt, paused: false, ended: false, source: 'mpv', ...extra });
 const media = (position = 0) => ({ video: 'https://cdn.test/video.m4s', time: position,
     bilibili: { aid: 11, cid: 21, bvid: 'BVtest', duration: 300 }, mpvOptions: ['--no-ytdl'] });
-const drain = async () => { for (let index = 0; index < 12; index++) await Promise.resolve(); };
+const drain = async () => { await new Promise(resolve => setImmediate(resolve)); };
 
 test('latest timestamp preserves backwards and zero-second seeks and rejects malformed records', () => {
     const { context } = fixture();

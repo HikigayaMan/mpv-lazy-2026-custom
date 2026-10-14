@@ -215,6 +215,9 @@ end
 
 -- 为 bilibli 网站的视频播放加载弹幕
 function load_danmaku_for_bilibili(path, callback)
+    -- Autoload calls this function without a completion callback. CID lookup
+    -- failures must report normally rather than throwing in the async handler.
+    callback = callback or function() end
     local cid, danmaku_id = get_cid()
     local playlist = mp.get_property_native('user-data/mpv-lazy/web-playlist/current')
     if type(playlist) == 'table' and playlist.path == path

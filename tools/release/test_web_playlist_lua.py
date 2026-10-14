@@ -28,10 +28,12 @@ SNAPSHOT = "user-data/mpv-lazy/playback-progress"
 QUALITY_SWITCH = "user-data/mpv-lazy/web-playlist/quality-switch"
 MANIFEST = "user-data/mpv-lazy/web-playlist-manifest"
 MANIFEST_ACK = "user-data/mpv-lazy/web-playlist/manifest-ack"
+EXTEND_ACK = "user-data/mpv-lazy/web-playlist/extend-ack"
+METADATA_STATE = "user-data/mpv-lazy/web-playlist/metadata-state"
 
 MOCK = r'''
 T = {props={}, opts={}, option_values={}, events={}, observers={}, hooks={},
-     messages={}, timers={}, commands={}, clock=0, downloads={}, saved={}, loaded=0}
+     messages={}, timers={}, commands={}, clock=0, downloads={}, saved={}, loaded=0, async={}}
 mp = {}
 function mp.get_property_native(k,d) if T.props[k] == nil then return d end return T.props[k] end
 mp.get_property = mp.get_property_native
@@ -51,8 +53,23 @@ function mp.observe_property(k,kind,f) T.observers[k]=f end
 function mp.add_hook(k,priority,f)
     T.hooks[k]=T.hooks[k] or {}; table.insert(T.hooks[k],{priority=priority,callback=f})
 end
-function mp.commandv(...) table.insert(T.commands,{...}) end
+function mp.commandv(...)
+    local args={...}; table.insert(T.commands,args)
+    if not T.simulate_playlist then return end
+    local playlist=T.props.playlist
+    if args[1]=='playlist-remove' then table.remove(playlist,tonumber(args[2])+1)
+    elseif args[1]=='playlist-move' then
+        local from,to=tonumber(args[2]),tonumber(args[3])
+        local entry=table.remove(playlist,from+1)
+        if from<to then to=to-1 end
+        table.insert(playlist,to+1,entry)
+    end
+end
 function mp.command_native(args) return args[2] end
+function mp.command_native_async(args,callback)
+    T.async[#T.async+1]={args=args,callback=callback}; return #T.async
+end
+function mp.abort_async_command(id) T.async[id].aborted=true end
 function mp.add_timeout(seconds,f)
     local timer={due=T.clock+seconds,enabled=true,callback=f,seconds=seconds}
     function timer:kill() self.enabled=false end
@@ -329,6 +346,45 @@ class WebPlaylistLuaTests(LuaPlayerHarness, unittest.TestCase):
         self.assertIsNone(self.t.props[QUALITY_SWITCH])
         self.assertEqual(self.t.props[CURRENT].stage, "ready")
 
+    def test_quality_click_during_initial_load_does_not_replace_saved_resume_with_zero(self):
+        self.load()
+        self.begin()
+        self.resolve(self.media(position=47.25))
+        self.t.props["time-pos"] = None
+        self.t.messages["web-playlist-quality"]("https://media.example.test/high.m4s")
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(float(self.t.props["file-local-options/start"]), 47.25)
+        self.assertIsNone(self.t.props[QUALITY_SWITCH])
+
+    def test_rapid_quality_clicks_only_schedule_one_reload_before_on_load(self):
+        self.load()
+        self.begin()
+        self.resolve()
+        self.t.event("file-loaded")
+        self.t.props["time-pos"] = 47.25
+        for target in ("high", "video", "high"):
+            self.t.messages["web-playlist-quality"](f"https://media.example.test/{target}.m4s")
+        self.assertEqual(self.commands(), [["playlist-play-index", "current"]])
+        self.assertEqual(self.t.props[QUALITY_SWITCH].position, 47.25)
+
+    def test_quality_click_during_reload_waits_until_file_loaded(self):
+        self.load()
+        self.begin()
+        self.resolve()
+        self.t.event("file-loaded")
+        self.t.props["time-pos"] = 47.25
+        self.t.messages["web-playlist-quality"]("https://media.example.test/high.m4s")
+        self.begin()
+        self.t.props["time-pos"] = None
+        self.t.messages["web-playlist-quality"]("https://media.example.test/video.m4s")
+        self.assertEqual(self.commands(), [["playlist-play-index", "current"]])
+        self.assertEqual(float(self.t.props["file-local-options/start"]), 47.25)
+        self.t.event("file-loaded")
+        self.t.props["time-pos"] = 48
+        self.t.messages["web-playlist-quality"]("https://media.example.test/video.m4s")
+        self.assertEqual(self.commands(), [["playlist-play-index", "current"], ["playlist-play-index", "current"]])
+        self.assertEqual(self.t.props[QUALITY_SWITCH].position, 48)
+
     def test_unknown_quality_does_not_replace_playlist_entry(self):
         self.load()
         self.begin()
@@ -462,6 +518,192 @@ class WebPlaylistManifestLuaTests(LuaPlayerHarness, unittest.TestCase):
         self.assertTrue(self.commit().ok)
         self.assertEqual(self.t.manifestWrites, 0)
 
+    def test_bootstrap_manifest_is_explicitly_pending_until_full_manifest_commits(self):
+        args = {"itemCount": 1, "collectionId": "collection-1", "collectionTitle": "Complete collection"}
+        self.assertTrue(self.message("begin", metadataPending=True, **args).ok)
+        self.chunk([self.item(1)])
+        self.assertTrue(self.commit(count=1).ok)
+        self.assertTrue(self.t.props[MANIFEST].metadataPending)
+        self.assertEqual(self.t.props[METADATA_STATE].status, "pending")
+        self.assertFalse(self.message("begin", metadataPending=False, **args).ok)
+        self.assertTrue(self.message("begin", revision=2, metadataPending=False, **args).ok)
+        self.chunk([self.item(1)], revision=2)
+        self.assertTrue(self.commit(count=1, revision=2).ok)
+        self.assertFalse(self.t.props[MANIFEST].metadataPending)
+        self.assertEqual(self.t.props[METADATA_STATE].status, "ready")
+
+    def test_invalid_pending_field_is_rejected_without_publishing_manifest(self):
+        self.assertFalse(self.message("begin", itemCount=1, metadataPending="true").ok)
+        self.assertIsNone(self.t.props[MANIFEST])
+
+    def test_late_bootstrap_commit_cannot_replace_metadata_failure_with_loading(self):
+        self.assertTrue(self.message('begin', itemCount=1, metadataPending=True).ok)
+        self.chunk([self.item(1)])
+        self.t.messages['web-playlist-metadata-error'](json.dumps({
+            'playlistId': PLAYLIST_ID, 'revision': 1, 'error': 'playlist_metadata_failed'}))
+        self.assertEqual(self.t.props[METADATA_STATE].status, 'failed')
+        self.assertTrue(self.commit(count=1).ok)
+        self.assertEqual(self.t.props[METADATA_STATE].status, 'failed')
+        self.assertTrue(self.message('begin', itemCount=1, metadataPending=False, revision=2).ok)
+        self.chunk([self.item(1)], revision=2)
+        self.assertTrue(self.commit(count=1, revision=2).ok)
+        self.assertEqual(self.t.props[METADATA_STATE].status, 'ready')
+
+
+@unittest.skipIf(LuaRuntime is None, "lupa.lua51 is required")
+class WebPlaylistExtensionTests(LuaPlayerHarness, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.load()
+        self.t.simulate_playlist = True
+        self.original = {"id": 17, "filename": self.path("123:789"), "current": True}
+        self.t.props.path = self.original["filename"]
+        self.t.props.playlist = self.to_lua([self.original])
+        self.begin("123:789")
+        self.resolve(self.media("123:789"))
+        self.t.event("file-loaded")
+        self.t.props["time-pos"] = 47.25
+        self.t.props.pause = True
+        self.t.props["file-local-options/audio-files"] = self.to_lua(["audio-sentinel"])
+        self.t.props["file-local-options/sub-files"] = self.to_lua(["ass-sentinel"])
+        self.t.props[CURRENT] = self.to_lua({**self.media("123:789"), "stage": "ready", "generation": 8})
+
+    def extend(self, revision=2, count=3, url=None, **changes):
+        data = {"playlistId": PLAYLIST_ID, "revision": revision, "itemCount": count,
+                "playlistUrl": url or f"http://127.0.0.1:9002/web-playlist/{PLAYLIST_ID}/list.m3u"}
+        data.update(changes)
+        self.t.messages["web-playlist-extend"](json.dumps(data))
+        return self.t.props[EXTEND_ACK]
+
+    def complete(self, items=("123:456", "123:789", "123:999"), success=True):
+        native = [self.original, *[{"id": 20 + index, "filename": self.path(item), "current": False}
+                                 for index, item in enumerate(items)]]
+        self.t.props.playlist = self.to_lua(native)
+        self.t["async"][1].callback(success)
+        return self.t.props[EXTEND_ACK]
+
+    def native(self):
+        return [dict(entry.items()) for entry in self.t.props.playlist.values()]
+
+    def test_complete_list_moves_original_current_entry_without_reload_or_lost_state(self):
+        self.extend()
+        self.assertIsNone(self.t.props[EXTEND_ACK])
+        self.assertEqual(list(self.t["async"][1].args.values()),
+                         ["loadlist", f"http://127.0.0.1:9002/web-playlist/{PLAYLIST_ID}/list.m3u", "append"])
+        ack = self.complete()
+        self.assertTrue(ack.ok)
+        self.assertEqual([entry["filename"] for entry in self.native()],
+                         [self.path(item) for item in ("123:456", "123:789", "123:999")])
+        self.assertEqual(self.native()[1]["id"], 17)
+        self.assertTrue(self.native()[1]["current"])
+        self.assertEqual(self.t.props["time-pos"], 47.25)
+        self.assertTrue(self.t.props.pause)
+        self.assertEqual(list(self.t.props["file-local-options/audio-files"].values()), ["audio-sentinel"])
+        self.assertEqual(list(self.t.props["file-local-options/sub-files"].values()), ["ass-sentinel"])
+        self.assertEqual(self.t.props[CURRENT].generation, 8)
+        self.assertEqual(self.t.props[METADATA_STATE].status, "pending")
+        self.assertEqual(self.commands(), [["playlist-remove", "2"], ["playlist-move", "0", "2"]])
+
+    def test_current_entry_can_be_first_or_last_in_full_collection(self):
+        for items in (("123:789", "123:456", "123:999"), ("123:456", "123:999", "123:789")):
+            with self.subTest(items=items):
+                self.setUp()
+                self.extend()
+                self.assertTrue(self.complete(items).ok)
+                self.assertEqual([entry["filename"] for entry in self.native()], [self.path(item) for item in items])
+                self.assertEqual(next(entry["id"] for entry in self.native() if entry["current"]), 17)
+
+    def test_same_revision_retries_during_and_after_extension_do_not_append_again(self):
+        self.extend()
+        self.extend()
+        self.assertEqual(len(self.t["async"]), 1)
+        self.assertIsNone(self.t.props[EXTEND_ACK])
+        self.complete()
+        self.assertTrue(self.extend().ok)
+        self.assertEqual(len(self.t["async"]), 1)
+        self.assertFalse(self.extend(revision=1).ok)
+        self.assertFalse(self.extend(count=4).ok)
+        self.assertEqual(len(self.t["async"]), 1)
+
+    def test_early_extension_waits_for_initial_file_loaded_without_re_resolving(self):
+        self.begin("123:789")
+        self.resolve(self.media("123:789", position=47.25))
+        self.extend()
+        self.assertEqual(len(self.t["async"]), 0)
+        self.assertIsNone(self.t.props[EXTEND_ACK])
+        self.extend()
+        self.assertEqual(len(self.t["async"]), 0)
+        self.t.event("file-loaded")
+        self.assertEqual(len(self.t["async"]), 1)
+        self.assertTrue(self.complete().ok)
+        self.assertEqual(self.t.props["time-pos"], 47.25)
+
+    def test_foreign_port_or_playlist_cannot_append(self):
+        self.assertFalse(self.extend(url=f"http://127.0.0.1:9003/web-playlist/{PLAYLIST_ID}/list.m3u").ok)
+        self.extend(playlistId="playlist-" + "b" * 32)
+        self.assertEqual(len(self.t["async"]), 0)
+
+    def test_user_modified_initial_native_list_is_preserved(self):
+        self.t.props.playlist = self.to_lua([self.original, {"id": 30, "filename": "user-added.mp4"}])
+        self.assertFalse(self.extend().ok)
+        self.assertEqual(len(self.t["async"]), 0)
+        self.assertEqual(self.native()[1]["filename"], "user-added.mp4")
+
+    def test_incomplete_or_duplicate_append_rolls_back_only_added_entries(self):
+        for items in (("123:456", "123:789"), ("123:456", "123:789", "123:456")):
+            with self.subTest(items=items):
+                self.setUp()
+                self.extend()
+                self.assertFalse(self.complete(items).ok)
+                self.assertEqual(self.native(), [self.original])
+                self.assertEqual(self.t.props[METADATA_STATE].status, "failed")
+
+    def test_failed_append_and_timeout_leave_original_current_playing(self):
+        self.extend()
+        self.assertFalse(self.complete(success=False).ok)
+        self.assertEqual(self.native(), [self.original])
+        self.setUp()
+        self.extend()
+        self.t.advance(16)
+        self.assertFalse(self.t.props[EXTEND_ACK].ok)
+        self.assertTrue(self.t["async"][1].aborted)
+        before = self.commands()
+        self.t["async"][1].callback(True)
+        self.assertEqual(self.commands(), before)
+        self.assertEqual(self.native(), [self.original])
+
+    def test_unrelated_media_added_during_append_is_not_removed_on_failure(self):
+        self.extend()
+        other = {"id": 99, "filename": "user-added.mp4", "current": False}
+        self.t.props.playlist = self.to_lua([self.original, other,
+                                            {"id": 20, "filename": self.path("123:789")}])
+        self.t["async"][1].callback(True)
+        self.assertFalse(self.t.props[EXTEND_ACK].ok)
+        self.assertEqual(self.native(), [self.original, other])
+
+    def test_current_native_id_replacement_is_rejected_even_for_same_path(self):
+        self.extend()
+        replacement = {**self.original, "id": 90}
+        self.t.props.playlist = self.to_lua([replacement,
+                                            {"id": 20, "filename": self.path("123:456")},
+                                            {"id": 21, "filename": self.path("123:789")},
+                                            {"id": 22, "filename": self.path("123:999")}])
+        self.t["async"][1].callback(True)
+        self.assertFalse(self.t.props[EXTEND_ACK].ok)
+        self.assertEqual(self.native(), [replacement])
+
+    def test_metadata_error_is_scoped_and_does_not_change_playback(self):
+        error = {"playlistId": PLAYLIST_ID, "revision": 2, "error": "playlist_metadata_failed"}
+        self.t.messages["web-playlist-metadata-error"](json.dumps(error))
+        self.assertEqual(self.t.props[METADATA_STATE].status, "failed")
+        self.assertEqual(self.native(), [self.original])
+        self.assertEqual(self.t.props["time-pos"], 47.25)
+        self.assertTrue(self.t.props.pause)
+        self.extend(revision=3)
+        self.complete()
+        self.t.messages["web-playlist-metadata-error"](json.dumps(error))
+        self.assertEqual(self.t.props[METADATA_STATE].status, "pending")
+
 
 @unittest.skipIf(LuaRuntime is None, "lupa.lua51 is required")
 class PlaylistDanmakuIsolationTests(LuaPlayerHarness, unittest.TestCase):
@@ -483,6 +725,25 @@ class PlaylistDanmakuIsolationTests(LuaPlayerHarness, unittest.TestCase):
         path = self.context("123:789")
         self.g.load_danmaku_for_bilibili(path, lambda _: None)
         self.assertEqual(self.t.downloads[1].args[len(self.t.downloads[1].args)], "https://comment.bilibili.com/789.xml")
+
+    def test_automatic_load_without_callback_handles_failed_cid_request(self):
+        path = "https://www.bilibili.com/video/BV1CabT6vEdp/"
+        self.t.option_values.cid = None
+        self.t.props.path = path
+        self.g.load_danmaku_for_bilibili(path)
+        self.assertEqual(len(self.t.downloads), 1)
+        self.t.downloads[1].callback("network failure", None)
+        self.assertEqual(len(self.t.saved), 0)
+        self.assertEqual(self.t.loaded, 0)
+
+    def test_automatic_load_without_callback_handles_empty_cid_api_data(self):
+        path = "https://www.bilibili.com/video/BV1CabT6vEdp/"
+        self.t.option_values.cid = None
+        self.t.props.path = path
+        self.g.load_danmaku_for_bilibili(path)
+        self.t.downloads[1].callback(None, '{"code":-404}')
+        self.assertEqual(len(self.t.saved), 0)
+        self.assertEqual(self.t.loaded, 0)
 
     def test_danmaku_response_for_prior_item_is_discarded_after_switch(self):
         result = []

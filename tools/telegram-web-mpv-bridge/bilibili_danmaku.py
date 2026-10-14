@@ -32,6 +32,7 @@ MAX_PACKET_COUNT = 4096
 MAX_PENDING = 300
 MAX_BATCH = 120
 MAX_AGE = 2.0
+MAX_MPV_COMMAND_BYTES = 65536
 STREAM_SWITCH_PROPERTY = "user-data/quality-menu/stream-switch"
 STREAM_SWITCH_ACK_PROPERTY = "user-data/uosc_danmaku/live-switch-ack"
 STREAM_SWITCH_SECONDS = 15
@@ -281,6 +282,12 @@ def validate_start(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, An
     return room_id, session_id, pipe_name, validate_auth(payload.get("auth"))
 
 
+def encode_mpv_command(command: list[Any]) -> bytes:
+    """Use the same wire representation for byte budgets and pipe writes."""
+    return json.dumps({"command": command, "request_id": 1}, ensure_ascii=False,
+                      separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
+
+
 def _write_pipe_request(pipe, request: bytes, deadline: float) -> None:
     """Write one complete newline-delimited command to a nonblocking pipe.
 
@@ -288,7 +295,7 @@ def _write_pipe_request(pipe, request: bytes, deadline: float) -> None:
     envelope must be split into chunks, including when the pipe is a message
     pipe that cannot accept the whole remaining request in one WriteFile call.
     """
-    if len(request) > 65536:
+    if len(request) > MAX_MPV_COMMAND_BYTES:
         raise ValueError("oversized MPV command")
     offset = 0
     while offset < len(request):
@@ -344,8 +351,8 @@ class MpvPipe:
         kernel.SetNamedPipeHandleState.restype = wintypes.BOOL
         kernel.PeekNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
         kernel.PeekNamedPipe.restype = wintypes.BOOL
-        request = json.dumps({"command": command, "request_id": 1}, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
-        if len(request) > 65536:
+        request = encode_mpv_command(command)
+        if len(request) > MAX_MPV_COMMAND_BYTES:
             raise ValueError("oversized MPV command")
         with open(self.path, "r+b", buffering=0) as pipe:
             handle = wintypes.HANDLE(msvcrt.get_osfhandle(pipe.fileno()))
@@ -421,13 +428,20 @@ class BilibiliSession:
             self.dropped += 1
         batch = []
         encoded_size = 2
+        wire_size = len(encode_mpv_command(["script-message-to", "uosc_danmaku", "live-batch", self.session_id, "[]"]))
         while self.pending and len(batch) < MAX_BATCH:
             item = self.pending[0][1]
-            item_size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1
-            if encoded_size + item_size > 60000:
+            encoded_item = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            separator_size = 1 if batch else 0
+            item_size = len(encoded_item.encode("utf-8")) + separator_size
+            # The batch itself is a JSON string in the IPC command. Quotes,
+            # backslashes and control escapes are therefore encoded twice.
+            wire_item_size = len(json.dumps(encoded_item, ensure_ascii=False).encode("utf-8")) - 2 + separator_size
+            if encoded_size + item_size > 60000 or wire_size + wire_item_size > MAX_MPV_COMMAND_BYTES:
                 break
             batch.append(self.pending.popleft()[1])
             encoded_size += item_size
+            wire_size += wire_item_size
         return batch
 
     async def start(self) -> None:

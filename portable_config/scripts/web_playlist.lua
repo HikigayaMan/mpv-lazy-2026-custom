@@ -13,8 +13,21 @@ local STATE = 'user-data/mpv-lazy/web-playlist/state'
 -- Keep the large manifest outside the small parent read by the IPC watcher.
 local MANIFEST = 'user-data/mpv-lazy/web-playlist-manifest'
 local MANIFEST_ACK = 'user-data/mpv-lazy/web-playlist/manifest-ack'
+local METADATA_STATE = 'user-data/mpv-lazy/web-playlist/metadata-state'
+local EXTEND_ACK = 'user-data/mpv-lazy/web-playlist/extend-ack'
 local generation, pending, current, quality_reload = 0, nil, nil, nil
 local manifest_upload, manifest_revision = nil, 0
+local extending, last_extension = nil, nil
+
+local function metadata_state(status, revision, code)
+    local old = mp.get_property_native(METADATA_STATE)
+    if type(old) == 'table' and old.playlistId == opts.id and old.revision > revision then return end
+    -- A late bootstrap commit can arrive after its metadata failure notice.
+    -- Only a newer metadata transaction may replace that failure with loading.
+    if type(old) == 'table' and old.playlistId == opts.id and old.revision == revision
+        and old.status == 'failed' and status == 'pending' then return end
+    mp.set_property_native(METADATA_STATE, {playlistId = opts.id, revision = revision, status = status, error = code})
+end
 
 local function integer(value, minimum)
     return type(value) == 'number' and value >= (minimum or 0) and value <= 9007199254740991 and value == math.floor(value)
@@ -50,17 +63,20 @@ mp.register_script_message('web-playlist-manifest-begin', function(raw)
     local data = decode_manifest(raw)
     if not data then return end
     if data.revision < manifest_revision or not integer(data.itemCount, 1)
-        or not label(data.collectionId, true, 128) or not label(data.collectionTitle, true) then
+        or not label(data.collectionId, true, 128) or not label(data.collectionTitle, true)
+        or data.metadataPending ~= nil and type(data.metadataPending) ~= 'boolean' then
         manifest_ack(data, 'begin', false, 'invalid_manifest'); return
     end
     if manifest_upload and data.revision == manifest_upload.revision then
         local same = data.itemCount == manifest_upload.itemCount and data.collectionId == manifest_upload.collectionId
             and data.collectionTitle == manifest_upload.collectionTitle
+            and (data.metadataPending == true) == manifest_upload.metadataPending
         manifest_ack(data, 'begin', same, not same and 'manifest_conflict' or nil); return
     end
     manifest_revision = data.revision
     manifest_upload = {revision = data.revision, itemCount = data.itemCount, collectionId = data.collectionId,
-        collectionTitle = data.collectionTitle, items = {}, seen = {}, chunks = {}, nextChunk = 0, bytes = 0}
+        collectionTitle = data.collectionTitle, metadataPending = data.metadataPending == true,
+        items = {}, seen = {}, chunks = {}, nextChunk = 0, bytes = 0}
     manifest_ack(data, 'begin', true)
 end)
 mp.register_script_message('web-playlist-manifest-chunk', function(raw)
@@ -110,8 +126,10 @@ mp.register_script_message('web-playlist-manifest-commit', function(raw)
     end
     if not upload.committed then
         mp.set_property_native(MANIFEST, {playlistId = opts.id, revision = upload.revision, itemCount = upload.itemCount,
-            collectionId = upload.collectionId, collectionTitle = upload.collectionTitle, items = upload.items})
+            collectionId = upload.collectionId, collectionTitle = upload.collectionTitle,
+            metadataPending = upload.metadataPending, items = upload.items})
         upload.committed = true
+        metadata_state(upload.metadataPending and 'pending' or 'ready', upload.revision)
     end
     manifest_ack(data, 'commit', true)
 end)
@@ -130,6 +148,136 @@ local function http_url(value)
     return type(value) == 'string' and #value <= 32768
         and value:match('^https?://[^%s]+$') and not value:find('[\r\n]')
 end
+
+local function extend_ack(data, ok, code)
+    mp.set_property_native(EXTEND_ACK, {playlistId = opts.id, revision = data.revision,
+        itemCount = data.itemCount, ok = ok, error = code})
+end
+local function native_entry(playlist, id)
+    for index, entry in ipairs(playlist) do if entry.id == id then return index, entry end end
+end
+local function rollback_extension(request)
+    -- Only remove this session's appended entries. Never remove the entry now
+    -- playing or media that the user added independently while the URL loaded.
+    local playlist = mp.get_property_native('playlist') or {}
+    for index = #playlist, 1, -1 do
+        local entry = playlist[index]
+        if entry.id ~= request.nativeId and not entry.current and item_from_path(entry.filename)
+            and not request.before[entry.id] then mp.commandv('playlist-remove', tostring(index - 1)) end
+    end
+end
+local function finish_extension(request, ok, code)
+    if extending ~= request then return end
+    extending = nil
+    if request.timer then request.timer:kill() end
+    if not ok then
+        rollback_extension(request)
+        metadata_state('failed', request.data.revision, code)
+    else
+        -- The full public manifest follows the native list ACK separately.
+        metadata_state('pending', request.data.revision)
+        last_extension = request.data
+    end
+    extend_ack(request.data, ok, code)
+end
+local function arrange_extension(request)
+    local playlist = mp.get_property_native('playlist') or {}
+    local original_index, original = native_entry(playlist, request.nativeId)
+    if not original or not original.current or original.filename ~= request.path
+        or mp.get_property('path') ~= request.path then return false, 'playlist_extension_player_changed' end
+    if #playlist ~= request.data.itemCount + 1 then return false, 'playlist_extension_incomplete' end
+    local ordered, seen, duplicate, target = {}, {}, nil, nil
+    for _, entry in ipairs(playlist) do
+        if entry.id ~= request.nativeId then
+            local item = item_from_path(entry.filename)
+            if not item or entry.id == nil or request.before[entry.id] or seen[item] then
+                return false, 'playlist_extension_invalid'
+            end
+            seen[item] = true
+            ordered[#ordered + 1] = item
+            if entry.filename == request.path then duplicate, target = entry.id, #ordered - 1 end
+        end
+    end
+    if not duplicate then return false, 'playlist_extension_missing_current' end
+    local duplicate_index = native_entry(playlist, duplicate)
+    mp.commandv('playlist-remove', tostring(duplicate_index - 1))
+    playlist = mp.get_property_native('playlist') or {}
+    original_index, original = native_entry(playlist, request.nativeId)
+    if not original or not original.current then return false, 'playlist_extension_player_changed' end
+    local from = original_index - 1
+    if from ~= target then mp.commandv('playlist-move', tostring(from), tostring(target + (from < target and 1 or 0))) end
+    playlist = mp.get_property_native('playlist') or {}
+    if #playlist ~= request.data.itemCount then return false, 'playlist_extension_incomplete' end
+    for index, entry in ipairs(playlist) do
+        if item_from_path(entry.filename) ~= ordered[index] then return false, 'playlist_extension_invalid' end
+    end
+    local _, preserved = native_entry(playlist, request.nativeId)
+    if not preserved or not preserved.current or mp.get_property('path') ~= request.path then
+        return false, 'playlist_extension_player_changed'
+    end
+    return true
+end
+local function start_extension(request)
+    if extending ~= request or request.command then return end
+    -- A tiny collection can finish its metadata before the initial video has
+    -- opened. Let that deferred on_load finish and its first file-loaded fire.
+    if not current or current.path ~= request.path or current.stage ~= 'ready' then return end
+    local _, original = native_entry(mp.get_property_native('playlist') or {}, request.nativeId)
+    if not original or not original.current or mp.get_property('path') ~= request.path then
+        finish_extension(request, false, 'playlist_extension_player_changed'); return
+    end
+    request.command = mp.command_native_async({'loadlist', request.data.playlistUrl, 'append'}, function(success)
+        if extending ~= request then return end
+        if not success then finish_extension(request, false, 'playlist_extension_load_failed'); return end
+        local ok, code = arrange_extension(request)
+        finish_extension(request, ok, code)
+    end)
+end
+mp.register_script_message('web-playlist-extend', function(raw)
+    local data = decode_manifest(raw)
+    if not data or not integer(data.itemCount, 1) then return end
+    local port, id
+    if type(data.playlistUrl) == 'string' then
+        port, id = data.playlistUrl:match('^http://127%.0%.0%.1:(%d+)/web%-playlist/(playlist%-%x+)/list%.m3u$')
+    end
+    if id ~= opts.id or not port or tonumber(port) < 1 or tonumber(port) > 65535 then
+        extend_ack(data, false, 'playlist_extension_invalid'); return
+    end
+    local prior = extending and extending.data or last_extension
+    if prior and data.revision <= prior.revision then
+        local same = data.revision == prior.revision and data.itemCount == prior.itemCount and data.playlistUrl == prior.playlistUrl
+        if not same then extend_ack(data, false, 'playlist_extension_stale')
+        elseif not extending then extend_ack(data, true) end
+        return
+    end
+    if extending or data.revision <= manifest_revision then extend_ack(data, false, 'playlist_extension_stale'); return end
+    local playlist = mp.get_property_native('playlist') or {}
+    local original = playlist[1]
+    if #playlist ~= 1 or not original or original.id == nil or not original.current
+        or not item_from_path(original.filename) or mp.get_property('path') ~= original.filename then
+        extend_ack(data, false, 'playlist_extension_player_changed'); return
+    end
+    if data.playlistUrl ~= original.filename:gsub('/item/%d+:%d+$', '/list.m3u') then
+        extend_ack(data, false, 'playlist_extension_invalid'); return
+    end
+    local request = {data = data, nativeId = original.id, path = original.filename, before = {[original.id] = true}}
+    extending = request
+    metadata_state('pending', data.revision)
+    request.timer = mp.add_timeout(15, function()
+        if extending ~= request then return end
+        if request.command and mp.abort_async_command then mp.abort_async_command(request.command) end
+        finish_extension(request, false, 'playlist_extension_timeout')
+    end)
+    start_extension(request)
+end)
+mp.register_script_message('web-playlist-metadata-error', function(raw)
+    local data = decode_manifest(raw)
+    if not data or data.error ~= 'playlist_metadata_failed' or data.revision < manifest_revision
+        or last_extension and data.revision < last_extension.revision
+        or extending and data.revision < extending.data.revision then return end
+    metadata_state('failed', data.revision, data.error)
+    mp.commandv('show-text', '完整合集加载失败；当前视频继续播放，请保留原网页并重试', 5000)
+end)
 local function state(stage, item, code)
     mp.set_property_native(STATE, {playlistId = opts.id, itemId = item, generation = generation,
         stage = stage, error = code})
@@ -219,7 +367,11 @@ mp.register_script_message('web-playlist-resolved', function(raw)
 end)
 
 mp.register_script_message('web-playlist-quality', function(target_url)
-    if pending or not current or current.path ~= mp.get_property('path') then return end
+    -- Do not restart a stream that has not reached file-loaded yet. Its
+    -- time-pos can still be absent/zero, including during a quality reload.
+    -- Reserve one reload immediately, before MPV dispatches its on_load hook.
+    if pending or quality_reload or not current or current.stage ~= 'ready'
+        or current.path ~= mp.get_property('path') then return end
     local selected
     for _, variant in ipairs(current.variants or {}) do
         if variant.url == target_url then selected = variant break end
@@ -245,6 +397,7 @@ mp.register_event('file-loaded', function()
     mp.set_property_native(CURRENT, current)
     state('ready', current.itemId)
     mp.set_property_native('user-data/mpv-lazy/web-playlist/quality-switch', nil)
+    if extending then start_extension(extending) end
 end)
 mp.register_event('end-file', function(event)
     if event and event.reason == 'error' then state('failed', current and current.itemId, 'web_playlist_media_failed') end

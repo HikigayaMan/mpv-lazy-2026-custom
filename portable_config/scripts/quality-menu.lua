@@ -240,6 +240,38 @@ end
 
 local begin_stream_switch
 local pending_browser_switch = nil
+local reload_resume_cleanup = nil
+
+-- Use one scoped resume callback for both native reloads and URL replacements.
+-- A failed/abandoned reload must never seek a later, unrelated playlist item.
+local function prepare_reload_resume(target_url, reload_duration, time_pos)
+    if reload_resume_cleanup then reload_resume_cleanup() end
+    if mp.get_property_bool('user-data/uosc_danmaku/live-active', false)
+        or not reload_duration or reload_duration <= 0 or not time_pos then return end
+
+    local seeker, failed, cleanup_timer
+    local cleaned = false
+    local function cleanup()
+        if cleaned then return end
+        cleaned = true
+        mp.unregister_event(seeker)
+        mp.unregister_event(failed)
+        if cleanup_timer then cleanup_timer:kill() end
+        if reload_resume_cleanup == cleanup then reload_resume_cleanup = nil end
+    end
+    seeker = function()
+        local matches = mp.get_property('path') == target_url
+        cleanup()
+        if matches then mp.commandv('seek', time_pos, 'absolute+exact') end
+    end
+    failed = function(event)
+        if event and event.reason == 'error' then cleanup() end
+    end
+    mp.register_event('file-loaded', seeker)
+    mp.register_event('end-file', failed)
+    cleanup_timer = mp.add_timeout(15, cleanup)
+    reload_resume_cleanup = cleanup
+end
 
 local function stream_switch_in_progress()
     if pending_browser_switch then return true end
@@ -267,23 +299,14 @@ local function reload_resume()
     local reload_duration = mp.get_property_native('duration')
     local time_pos = mp.get_property('time-pos')
 
-    if begin_stream_switch then begin_stream_switch(mp.get_property('path'), time_pos) end
-    mp.command('playlist-play-index current')
-
     -- Tries to determine live stream vs. pre-recorded VOD. VOD has non-zero
     -- duration property. When reloading VOD, to keep the current time position
     -- we should provide offset from the start. Stream doesn't have fixed start.
     -- Decent choice would be to reload stream from it's current 'live' position.
     -- That's the reason we don't pass the offset when reloading streams.
-    if not mp.get_property_bool('user-data/uosc_danmaku/live-active', false)
-        and reload_duration and reload_duration > 0 then
-        local function seeker()
-            mp.commandv('seek', time_pos, 'absolute+exact')
-            mp.unregister_event(seeker)
-        end
-
-        mp.register_event('file-loaded', seeker)
-    end
+    prepare_reload_resume(mp.get_property('path'), reload_duration, time_pos)
+    if begin_stream_switch then begin_stream_switch(mp.get_property('path'), time_pos) end
+    mp.command('playlist-play-index current')
 end
 
 ---@type { video_menu: UIState, audio_menu: UIState, video_fetching: UIState, audio_fetching: UIState }
@@ -1271,7 +1294,6 @@ local function format_string(video_id, audio_id)
     end
 end
 
-local hls_switch_cleanup = nil
 local browser_switch_timer = nil
 local stream_switch_timer = nil
 local stream_switch_generation = 0
@@ -1336,32 +1358,7 @@ local function load_hls_variant_resume(target_url)
     local reload_duration = mp.get_property_native('duration')
     local time_pos = mp.get_property('time-pos')
 
-    if hls_switch_cleanup then hls_switch_cleanup() end
-
-    if not mp.get_property_bool('user-data/uosc_danmaku/live-active', false)
-        and reload_duration and reload_duration > 0 and time_pos then
-        local seeker
-        local cleanup_timer
-        local cleaned = false
-        local cleanup
-
-        cleanup = function()
-            if cleaned then return end
-            cleaned = true
-            if seeker then mp.unregister_event(seeker) end
-            if cleanup_timer then cleanup_timer:kill() end
-            if hls_switch_cleanup == cleanup then hls_switch_cleanup = nil end
-        end
-
-        seeker = function()
-            if mp.get_property('path') ~= target_url then return end
-            cleanup()
-            mp.commandv('seek', time_pos, 'absolute+exact')
-        end
-        mp.register_event('file-loaded', seeker)
-        cleanup_timer = mp.add_timeout(15, cleanup)
-        hls_switch_cleanup = cleanup
-    end
+    prepare_reload_resume(target_url, reload_duration, time_pos)
 
     msg.verbose('switching browser-resolved stream')
     pending_browser_switch = target_url

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from bridge import BridgeState, handle_http_client
 from playback_progress import FINALS_PROPERTY, SNAPSHOT_PROPERTY, HttpProgressTransport, PlaybackProgressManager, PlaybackProgressSession, ProgressStore
 from test_playback_progress import Owner, eventually
-from web_playlist import DATA_PROPERTY, REQUEST_PROPERTY, MANIFEST_API_PROPERTY, MANIFEST_ACK_PROPERTY, WebPlaylistManager, WebPlaylistSession, media_url, resolved_media, validate_items
+from web_playlist import DATA_PROPERTY, REQUEST_PROPERTY, MANIFEST_API_PROPERTY, MANIFEST_ACK_PROPERTY, EXTEND_ACK_PROPERTY, WebPlaylistManager, WebPlaylistSession, media_url, resolved_media, validate_items
 
 PID = "playlist-" + "a" * 32
 CLIENT = "progress-http-" + "a" * 32
@@ -104,6 +104,10 @@ class Ipc:
                         return None
             self.props[MANIFEST_ACK_PROPERTY] = {"playlistId": body["playlistId"], "revision": body["revision"],
                 "stage": stage, "chunkIndex": body.get("chunkIndex"), "itemCount": body["itemCount"] if stage == "begin" else len(self.manifest_items), "ok": True}
+        if command[0] == "script-message-to" and command[2] == "web-playlist-extend":
+            body = json.loads(command[3])
+            self.props[EXTEND_ACK_PROPERTY] = {"playlistId": body["playlistId"], "revision": body["revision"],
+                                               "itemCount": body["itemCount"], "ok": True}
         return None
 
 
@@ -191,6 +195,258 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
             await self.playlists.append_items({"playlistId": PID, "chunkIndex": index, "items": entries[offset:offset + 50]}, self.owner)
         return await self.playlists.commit_upload({"playlistId": PID, "expectedItemCount": len(entries)}, self.owner)
 
+    async def start_bootstrap(self, **updates):
+        return await self.register(**{"bootstrap": True, "items": [item()], **updates})
+
+    async def begin_extension(self, entries, **updates):
+        payload = registration(chunked=True, extendExisting=True, **updates)
+        payload.pop("items")
+        await self.playlists.register(payload, self.owner)
+        for index, offset in enumerate(range(0, len(entries), 50)):
+            await self.playlists.append_items({"playlistId": PID, "chunkIndex": index, "items": entries[offset:offset + 50]}, self.owner)
+
+    async def test_bootstrap_registers_current_single_part_without_claiming_complete_collection(self):
+        reply = await self.start_bootstrap()
+        self.assertEqual((reply["itemCount"], reply["selectedIndex"], reply["metadataPending"]), (1, 0, True))
+        self.assertEqual(self.playlists.m3u(PID).count(b"#EXTINF:"), 1)
+        self.assertFalse(any(command[0] == "loadlist" for command in self.ipc.commands))
+        with self.assertRaises(ValueError):
+            validate_items(registration(items=[item()]))
+        with self.assertRaises(ValueError):
+            validate_items(registration(bootstrap=True))
+        await eventually(lambda: self.playlists.sessions[PID].attached)
+        session = self.playlists.sessions[PID]
+        await session.accept_request(lazy_request())
+        await self.playlists.submit(submission(), self.owner)
+        self.assertTrue(session.bootstrap_loaded)
+
+    async def test_complete_extension_preserves_session_pending_resolution_and_per_part_progress(self):
+        self.ipc.manifest_api = True
+        await self.start_bootstrap()
+        session = self.playlists.sessions[PID]
+        original_task, original_revision = session.task, session.revision
+        await self.progress.start(progress_request(), self.owner, defer=True)
+        progress = self.progress.sessions[SID]
+        await progress.accept_snapshot(snapshot(position=33))
+        await session.accept_request(lazy_request())
+        await self.playlists.submit(submission(), self.owner)
+        await session.accept_request(lazy_request(generation=2))
+        pending = session.pending
+        # Keep the bootstrap part's content identity and page stable.
+        entries = [item(cid=2002, page=1, partCount=3), item(cid=2003, page=2, partCount=3), item(cid=2004, page=3, partCount=3)]
+        await self.begin_extension(entries, collectionId="season-main", collectionTitle="完整合集")
+        reply = await self.playlists.commit_upload({"playlistId": PID, "expectedItemCount": 3}, self.owner)
+        self.assertIs(self.playlists.sessions[PID], session)
+        self.assertIs(session.task, original_task)
+        self.assertIs(session.pending, pending)
+        self.assertEqual((session.generation, session.current_item_id), (2, "1001:2002"))
+        self.assertGreater(session.revision, original_revision)
+        self.assertEqual(reply["itemCount"], 3)
+        self.assertEqual(len(progress.playlist_entries), 3)
+        self.assertEqual(progress.record["position"], 33)
+        await eventually(lambda: session.metadata_pending is False)
+        self.assertEqual(session.manifest_stage, "ready")
+        self.assertEqual(self.playlists.m3u(PID).count(b"#EXTINF:"), 3)
+        extension = [command for command in self.ipc.commands if command[:3] == ["script-message-to", "web_playlist", "web-playlist-extend"]]
+        self.assertEqual(len(extension), 1)
+        begin = [json.loads(command[3]) for command in self.ipc.commands if len(command) > 2 and command[2] == "web-playlist-manifest-begin"][-1]
+        self.assertIs(begin["metadataPending"], False)
+        await progress.accept_snapshot(snapshot("bilibili:1001:2004", position=9))
+        self.assertEqual(self.store.get("bilibili:1001:2004")["position"], 9)
+        await self.playlists.submit(submission(generation=2), self.owner)
+
+    async def test_extension_keeps_selected_middle_part_and_does_not_double_count_session_limit(self):
+        self.ipc.manifest_api = True
+        for number in range(1, 8):
+            other_id, other_sid = "playlist-" + format(number, "032x"), "progress-extra-" + str(number)
+            await self.playlists.register(registration(bootstrap=True, items=[item()], playlistId=other_id,
+                sessionId=other_sid, pipeName="mpv-lazy-" + other_sid), self.owner)
+        await self.start_bootstrap(items=[item(2003, 2, partCount=3)], selectedItemId="1001:2003")
+        session = self.playlists.sessions[PID]
+        await session.accept_request(lazy_request("1001:2003"))
+        await self.playlists.submit(submission("1001:2003"), self.owner)
+        entries = [item(partCount=3), item(2003, 2, partCount=3), item(2004, 3, partCount=3)]
+        await self.begin_extension(entries, selectedItemId="1001:2003")
+        reply = await self.playlists.commit_upload({"playlistId": PID, "expectedItemCount": 3}, self.owner)
+        self.assertEqual((reply["selectedIndex"], reply["currentItemId"]), (1, "1001:2003"))
+        self.assertEqual(len(self.playlists.sessions), 8)
+        await eventually(lambda: not session.metadata_pending)
+        with self.assertRaises(ValueError):
+            await self.playlists.register(registration(bootstrap=True, items=[item()], playlistId="playlist-" + "f" * 32,
+                sessionId="progress-over-limit", pipeName="mpv-lazy-progress-over-limit"), self.owner)
+
+    async def test_lua_rejecting_extension_reports_metadata_error_without_stopping_media(self):
+        self.ipc.manifest_api = True
+        await self.start_bootstrap()
+        session = self.playlists.sessions[PID]
+        await session.accept_request(lazy_request())
+        await self.playlists.submit(submission(), self.owner)
+        original = self.ipc.command
+
+        async def rejecting(command):
+            result = await original(command)
+            if command[:2] == ["get_property", EXTEND_ACK_PROPERTY] and isinstance(result, dict):
+                return {**result, "ok": False, "error": "native_playlist_changed"}
+            return result
+
+        self.ipc.command = rejecting
+        await self.begin_extension([item(partCount=2), item(2003, 2, partCount=2)])
+        await self.playlists.commit_upload({"playlistId": PID, "expectedItemCount": 2}, self.owner)
+        await eventually(lambda: session.metadata_error is not None)
+        self.assertTrue(session.metadata_pending)
+        self.assertEqual(session.metadata_error, "playlist_metadata_ipc_failed")
+        self.assertFalse(session.task.done())
+        self.assertTrue(session.bootstrap_loaded)
+        self.assertIsNone(session.pending)
+        self.assertFalse(any(command[0] in ("quit", "loadfile", "loadlist") for command in self.ipc.commands))
+
+    async def test_fast_complete_metadata_cannot_replace_initial_bootstrap_m3u_before_media_resolves(self):
+        self.ipc.manifest_api = True
+        await self.start_bootstrap()
+        session = self.playlists.sessions[PID]
+        await self.begin_extension([item(partCount=2), item(2003, 2, partCount=2)])
+        await self.playlists.commit_upload({"playlistId": PID, "expectedItemCount": 2}, self.owner)
+        await asyncio.sleep(.01)
+        self.assertEqual(self.playlists.m3u(PID).count(b"#EXTINF:"), 1)
+        self.assertFalse(any(command[:3] == ["script-message-to", "web_playlist", "web-playlist-extend"] for command in self.ipc.commands))
+        await session.accept_request(lazy_request())
+        await self.playlists.submit(submission(), self.owner)
+        await eventually(lambda: not session.metadata_pending)
+        self.assertEqual(self.playlists.m3u(PID).count(b"#EXTINF:"), 2)
+        begins = [json.loads(command[3]) for command in self.ipc.commands if len(command) > 2 and command[2] == "web-playlist-manifest-begin"]
+        self.assertTrue(begins)
+        self.assertTrue(all(begin["metadataPending"] is False for begin in begins if begin["revision"] == session.revision))
+
+    async def test_early_extension_waits_for_initially_missing_ack_properties_without_false_failure(self):
+        self.ipc.manifest_api = True
+        await self.start_bootstrap()
+        session = self.playlists.sessions[PID]
+        session.extend_ack_timeout = session.manifest_ack_timeout = .5
+        await self.begin_extension([item(partCount=2), item(2003, 2, partCount=2)])
+        await self.playlists.commit_upload({"playlistId": PID, "expectedItemCount": 2}, self.owner)
+        original = self.ipc.command
+        remaining = {EXTEND_ACK_PROPERTY: 4, MANIFEST_ACK_PROPERTY: 4}
+
+        async def asynchronous_ack(command):
+            if command[0] == "get_property" and remaining.get(command[1], 0):
+                remaining[command[1]] -= 1
+                raise RuntimeError("MPV IPC command failed: property not found")
+            return await original(command)
+
+        self.ipc.command = asynchronous_ack
+        await session.accept_request(lazy_request())
+        await self.playlists.submit(submission(), self.owner)
+        await asyncio.wait_for(session.metadata_task, 1)
+        self.assertFalse(session.metadata_pending)
+        self.assertIsNone(session.metadata_error)
+        self.assertEqual(session.manifest_stage, "ready")
+        self.assertEqual(remaining, {EXTEND_ACK_PROPERTY: 0, MANIFEST_ACK_PROPERTY: 0})
+        extensions = [command for command in self.ipc.commands if command[:3] ==
+                      ["script-message-to", "web_playlist", "web-playlist-extend"]]
+        self.assertEqual(len(extensions), 1)
+        self.assertFalse(any(command[:3] == ["script-message-to", "web_playlist", "web-playlist-metadata-error"]
+                             for command in self.ipc.commands))
+
+    async def test_extension_requires_bootstrap_owner_session_pipe_and_selected_identity(self):
+        await self.start_bootstrap()
+        payload = registration(chunked=True, extendExisting=True)
+        payload.pop("items")
+        for owner, updates in ((Owner(), {}), (self.owner, {"sessionId": "progress-other", "pipeName": "mpv-lazy-progress-other"}),
+                               (self.owner, {"pipeName": "mpv-lazy-progress-other"}), (self.owner, {"selectedItemId": "1001:2003"})):
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                await self.playlists.register({**payload, **updates}, owner)
+        self.assertEqual(self.playlists.uploads, {})
+
+    async def test_refreshed_owner_restarts_partial_extension_from_zero_and_preserves_initial_position(self):
+        self.ipc.manifest_api = True
+        for detached in (False, True):
+            with self.subTest(detached=detached):
+                await self.start_bootstrap(initialPosition=12.5)
+                session = self.playlists.sessions[PID]
+                player_task = session.task
+                await session.accept_request(lazy_request())
+                self.assertEqual(self.owner.messages[-1]["initialPosition"], 12.5)
+                await self.playlists.submit(submission(), self.owner)
+                await self.progress.start(progress_request(position=12.5), self.owner, defer=True)
+                progress = self.progress.sessions[SID]
+                await progress.accept_snapshot(snapshot(position=13))
+                partial = registration(chunked=True, extendExisting=True, initialPosition=12.5)
+                partial.pop("items")
+                await self.playlists.register(partial, self.owner)
+                old_chunk = {"playlistId": PID, "chunkIndex": 0, "items": [item(partCount=2)]}
+                await self.playlists.append_items(old_chunk, self.owner)
+                if detached:
+                    self.playlists.detach_owner(self.owner)
+                    self.progress.detach_owner(self.owner)
+                new = Owner()
+                restored = await self.playlists.get({"playlistId": PID, "identity": "bilibili:1001:2002", "rebind": True}, new)
+                self.assertEqual(restored["initialPosition"], 12.5)
+                self.assertNotIn(PID, self.playlists.uploads)
+                self.assertIs(self.playlists.sessions[PID], session)
+                self.assertIs(session.task, player_task)
+                self.assertIs(progress.owner, new)
+                self.assertEqual(progress.record["position"], 13)
+                restarted = await self.playlists.register({**partial, "initialPosition": restored["initialPosition"]}, new)
+                self.assertEqual((restarted["nextChunkIndex"], restarted["itemCount"]), (0, 0))
+                with self.assertRaises(ValueError):
+                    await self.playlists.append_items(old_chunk, self.owner)
+                await self.playlists.append_items({"playlistId": PID, "chunkIndex": 0,
+                    "items": [item(partCount=2), item(2003, 2, partCount=2)]}, new)
+                await self.playlists.commit_upload({"playlistId": PID, "expectedItemCount": 2}, new)
+                await eventually(lambda: not session.metadata_pending)
+                self.assertEqual(len(session.items), 2)
+                self.assertIs(session.task, player_task)
+                self.assertEqual(session.initial_position, 12.5)
+                await self.playlists.stop({"playlistId": PID}, new)
+
+    async def test_metadata_failure_ipc_uses_fixed_code_and_description_retains_diagnostic(self):
+        await self.start_bootstrap()
+        session = self.playlists.sessions[PID]
+        await session.mark_metadata_failed("playlist_metadata_ipc_failed")
+        messages = [json.loads(command[3]) for command in self.ipc.commands if command[:3] ==
+                    ["script-message-to", "web_playlist", "web-playlist-metadata-error"]]
+        self.assertEqual(messages[-1]["error"], "playlist_metadata_failed")
+        self.assertEqual(session.description()["metadataError"], "playlist_metadata_ipc_failed")
+        self.assertTrue(session.description()["metadataPending"])
+        self.assertEqual(session.description()["metadataStage"], "failed")
+
+    async def test_missing_parts_or_changed_initial_identity_cannot_commit_extension(self):
+        for entries in ([item(partCount=3), item(2003, 3, partCount=3)],
+                        [item(partCount=2, bvid="BVchanged", pageUrl="https://www.bilibili.com/video/BVchanged?p=1"), item(2003, 2, partCount=2)]):
+            with self.subTest(entries=entries):
+                await self.start_bootstrap()
+                session = self.playlists.sessions[PID]
+                revision = session.revision
+                await self.begin_extension(entries)
+                with self.assertRaises(ValueError):
+                    await self.playlists.commit_upload({"playlistId": PID, "expectedItemCount": 2}, self.owner)
+                self.assertEqual(len(session.items), 1)
+                self.assertEqual(session.revision, revision)
+                await self.playlists.stop({"playlistId": PID}, self.owner)
+
+    async def test_metadata_failure_keeps_playback_and_reports_pending_instead_of_truncated_completion(self):
+        await self.start_bootstrap()
+        session = self.playlists.sessions[PID]
+        await session.accept_request(lazy_request())
+        await self.playlists.submit(submission(), self.owner)
+        task, generation = session.task, session.generation
+        await self.begin_extension([item(partCount=2)])
+        for owner, updates in ((Owner(), {}), (self.owner, {"sessionId": "progress-other"}),
+                               (self.owner, {"error": SOURCE}), (self.owner, {"error": []})):
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                await self.playlists.fail_metadata({"playlistId": PID, **updates}, owner)
+        reply = await self.playlists.fail_metadata({"playlistId": PID, "error": "playlist_metadata_failed", "requestId": "fail-request"}, self.owner)
+        self.assertEqual(reply["requestId"], "fail-request")
+        self.assertTrue(reply["metadataPending"])
+        self.assertEqual(reply["metadataError"], "playlist_metadata_failed")
+        self.assertIs(self.playlists.sessions[PID], session)
+        self.assertIs(session.task, task)
+        self.assertFalse(task.done())
+        self.assertEqual(session.generation, generation)
+        self.assertNotIn(PID, self.playlists.uploads)
+        self.assertFalse(any(command[0] in ("quit", "loadfile", "loadlist") for command in self.ipc.commands))
+        self.assertTrue(any(command[:3] == ["script-message-to", "web_playlist", "web-playlist-metadata-error"] for command in self.ipc.commands))
+
     async def test_chunked_1501_leaf_manifest_is_complete_and_restored_in_bounded_pages(self):
         entries = [item(cid=number, page=number, partCount=1501, videoId="1001", videoTitle="完整投稿", partTitle=f"P{number}",
             sectionId="section-main", sectionTitle="正片", order=number - 1) for number in range(1, 1502)]
@@ -236,6 +492,17 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         retry = await self.playlists.commit_upload({"playlistId": PID, "expectedItemCount": 2}, self.owner)
         self.assertEqual(reply["revision"], retry["revision"])
         self.assertNotIn(PID, self.playlists.uploads)
+
+    async def test_pending_upload_id_cannot_also_register_a_legacy_session(self):
+        payload = registration(chunked=True)
+        payload.pop("items")
+        await self.playlists.register(payload, self.owner)
+        other_sid = "progress-other-player"
+        for owner in (self.owner, Owner()):
+            with self.subTest(owner=owner), self.assertRaisesRegex(ValueError, "upload is pending"):
+                await self.playlists.register(registration(sessionId=other_sid, pipeName="mpv-lazy-" + other_sid), owner)
+        self.assertEqual(list(self.playlists.uploads), [PID])
+        self.assertEqual(self.playlists.sessions, {})
 
     async def test_upload_budget_or_invalid_hierarchy_rejects_entire_chunk_without_truncation(self):
         payload = registration(chunked=True)
@@ -457,6 +724,35 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(new.messages[-1]["type"], "resolveWebPlaylistItem")
         self.assertFalse(session.task.done())
 
+    async def test_owner_rebind_during_send_resends_request_to_new_browser(self):
+        entries, index = validate_items(registration())
+        session = WebPlaylistSession(self.playlists, registration(), entries, index, self.owner,
+                                     ipc=self.ipc, resolve_timeout=2)
+        self.playlists.sessions[PID] = session
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.owner.send
+
+        async def blocked_send(raw):
+            await original(raw)
+            if json.loads(raw).get("type") == "resolveWebPlaylistItem":
+                entered.set()
+                await release.wait()
+
+        self.owner.send = blocked_send
+        sending = asyncio.create_task(session.accept_request(lazy_request()))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            new = Owner()
+            await self.playlists.get({"identity": "bilibili:1001:2003", "rebind": True}, new)
+        finally:
+            release.set()
+            await sending
+        await session.accept_request(lazy_request())
+        requests = [message for message in new.messages if message["type"] == "resolveWebPlaylistItem"]
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["generation"], 1)
+        self.assertIs(session.last_sent_owner, new)
+
     async def test_explicit_rebind_notifies_old_owner_and_transfers_progress_owner(self):
         await self.register()
         self.ipc.props[SNAPSHOT_PROPERTY] = snapshot()
@@ -489,7 +785,8 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         await self.progress.start(progress_request(), self.owner)
         await eventually(lambda: self.progress.sessions[SID].attached)
         self.ipc.closed = True
-        await eventually(lambda: PID not in self.playlists.sessions and SID not in self.progress.sessions)
+        await eventually(lambda: PID not in self.playlists.sessions and SID not in self.progress.sessions and
+                         any(message["type"] == "webPlaylistStopped" for message in self.owner.messages))
         self.assertTrue(any(message["type"] == "webPlaylistStopped" and message["reason"] == "player_closed" for message in self.owner.messages))
 
     async def test_removed_request_property_after_load_does_not_look_like_a_closed_player(self):
@@ -583,7 +880,8 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
             return await original(command)
         self.ipc.command = unresponsive
         with self.assertLogs(level="WARNING") as captured:
-            await eventually(lambda: PID not in self.playlists.sessions and SID not in self.progress.sessions)
+            await eventually(lambda: PID not in self.playlists.sessions and SID not in self.progress.sessions and
+                             any(message["type"] == "webPlaylistStopped" for message in self.owner.messages))
         notices = [message for message in self.owner.messages if message["type"] == "webPlaylistStopped"]
         self.assertEqual(notices[-1]["reason"], "player_ipc_unresponsive")
         self.assertEqual(notices[-1]["ipcError"]["kind"], "response_timeout")
@@ -747,6 +1045,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
                 return raw.partition(b"\r\n\r\n")[::2]
             headers, body = await http("GET", "/health")
             self.assertEqual(json.loads(body)["webPlaylistApiVersion"], 1)
+            self.assertEqual(json.loads(body)["webPlaylistFastStartApiVersion"], 1)
             headers, body = await http("POST", "/playback-progress", {"clientId": CLIENT, "request": {"type": "registerWebPlaylist", **registration()}})
             self.assertIn(b"200 OK", headers)
             self.assertNotIn(b"Access-Control-Allow-Origin", headers)
@@ -801,6 +1100,21 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         await state.handle_ws_message(json.dumps({"type": "stopWebPlaylist", "playlistId": PID}), self.owner)
         self.assertEqual(self.owner.messages[-1]["type"], "webPlaylistStopped")
         self.assertNotIn(PID, self.playlists.sessions)
+
+    async def test_faststart_and_metadata_failure_route_over_both_browser_transports(self):
+        result, owner, _ = await self.transport.request({"clientId": CLIENT,
+            "request": {"type": "registerWebPlaylist", **registration(bootstrap=True, items=[item()])}})
+        self.assertTrue(result["reply"]["metadataPending"])
+        result, _, _ = await self.transport.request({"clientId": CLIENT, "request": {
+            "type": "failWebPlaylistMetadata", "playlistId": PID, "requestId": "http-fail", "error": "playlist_metadata_failed"}})
+        self.assertEqual(result["reply"]["requestId"], "http-fail")
+        self.assertTrue(result["reply"]["metadataPending"])
+        state = BridgeState(1, 1024, "mpv.exe", "127.0.0.1", 9002, progress_store=self.store)
+        state.progress, state.playlists = self.progress, self.playlists
+        await state.handle_ws_message(json.dumps({"type": "failWebPlaylistMetadata", "playlistId": PID,
+            "requestId": "ws-fail", "error": "playlist_metadata_timeout"}), owner)
+        self.assertTrue(any(message.get("requestId") == "ws-fail" and message.get("type") == "webPlaylistMetadataFailed" for message in owner.drain()))
+        self.assertIn(PID, self.playlists.sessions)
 
 
 if __name__ == "__main__":
