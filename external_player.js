@@ -3,7 +3,7 @@
 // @name:zh-CN              外部播放器
 // @namespace               https://github.com/LuckyPuppy514/external-player
 // @copyright               2024, Grant LuckyPuppy514 (https://github.com/LuckyPuppy514)
-// @version                 1.2.14.24
+// @version                 1.2.14.26
 // @license                 MIT
 // @description             Play web video via external player
 // @description:zh-CN       使用外部播放器播放网页中的视频
@@ -2556,11 +2556,13 @@ function newestPlaybackRecord(...records) {
 function readLocalPlaybackRecord(identity) {
     try { return GM_getValue(PLAYBACK_PROGRESS_STORAGE, {})?.[identity]; } catch (error) { return undefined; }
 }
-function saveLocalPlaybackRecord(identity, record) {
+function saveLocalPlaybackRecord(identity, record, orderedMpv = false) {
     if (!identity || !validPlaybackRecord(record)) return;
     try {
         const stored = GM_getValue(PLAYBACK_PROGRESS_STORAGE, {}) || {};
-        if (newestPlaybackRecord(stored[identity], record) !== record) return;
+        if (newestPlaybackRecord(stored[identity], record) !== record &&
+            !(orderedMpv && stored[identity]?.source === 'mpv' && record.source === 'mpv' &&
+                Number(stored[identity].updatedAt) === Number(record.updatedAt))) return;
         stored[identity] = { position: Number(record.position), duration: Number(record.duration) || 0,
             updatedAt: Number(record.updatedAt), paused: record.paused === true,
             ended: record.ended === true, completed: record.completed === true,
@@ -2780,11 +2782,15 @@ class PlaybackProgressSync {
     constructor(bridge) {
         this.bridge = bridge; this.generation = 0; this.reporter = new BilibiliProgressReporter();
         this.listeners = []; this.warningShown = false;
-        document.addEventListener('pointerdown', event => {
+        const notePlayerAction = event => {
             if (event.target === this.video || event.target?.closest?.('.bpx-player-container,.bilibili-player-video-wrap')) this.userActionAt = Date.now();
-        }, true);
+        };
+        document.addEventListener('pointerdown', notePlayerAction, true);
+        document.addEventListener('pointerup', notePlayerAction, true);
         document.addEventListener('keydown', event => {
-            if (this.video && /^(?:Space|ArrowLeft|ArrowRight|Home|End|KeyK|KeyJ|KeyL)$/.test(event.code || '')) this.userActionAt = Date.now();
+            const playerEnter = event.code === 'Enter' &&
+                (event.target === this.video || event.target?.closest?.('.bpx-player-container,.bilibili-player-video-wrap'));
+            if (this.video && (playerEnter || /^(?:Space|ArrowLeft|ArrowRight|Home|End|KeyK|KeyJ|KeyL|MediaPlayPause|MediaPlay|MediaPause)$/.test(event.code || ''))) this.userActionAt = Date.now();
         }, true);
         window.addEventListener('pagehide', () => { this.saveBrowser(true); this.bridge.detachPlaybackHttp?.(); });
         document.addEventListener('visibilitychange', () => { if (document.hidden) this.saveBrowser(true); });
@@ -2805,7 +2811,8 @@ class PlaybackProgressSync {
         const generation = ++this.generation;
         for (const [video, event, handler] of this.listeners) video.removeEventListener(event, handler);
         this.listeners = []; this.content = undefined; this.video = undefined; this.sessionId = undefined;
-        this.record = undefined; this.echoUntil = 0; this.echoPosition = undefined; this.suspendBrowserUntil = 0;
+        this.record = undefined; this.mpvProgressDeferred = false;
+        this.echoUntil = 0; this.echoPosition = undefined; this.suspendBrowserUntil = 0;
         this.userActionAt = 0;
         this.initializing = true;
         this.sequence = -1; this.browserTouched = false; this.lastBrowserSave = 0;
@@ -2821,6 +2828,7 @@ class PlaybackProgressSync {
             const bridge = await this.bridge.requestPlayback({ type: 'getPlaybackProgress', ...this.bridgeContent(content) }).catch(() => undefined);
             if (generation !== this.generation || this.content?.identity !== content.identity) return;
             this.sessionId = this.browserTouched ? undefined : bridge?.activeSessionId;
+            this.mpvProgressDeferred = Boolean(this.sessionId);
             if (bridge?.playlist && typeof bilibiliWebPlaylists !== 'undefined') bilibiliWebPlaylists.adopt(bridge.playlist);
             this.record = newestPlaybackRecord(this.record, readLocalPlaybackRecord(content.identity), bridge?.record);
             if (this.browserTouched) this.saveBrowser(true, true, true);
@@ -2851,6 +2859,9 @@ class PlaybackProgressSync {
                     Math.abs(Number(video.currentTime) - Number(this.echoPosition)) < 0.25) return;
                 if (this.suspendBrowserUntil > Date.now() && event === 'pause' && !userAction) return;
                 if (this.initializing && !userAction) return;
+                // A page player can autoplay or restore its own position after
+                // initialization. It must not detach MPV unless the user acts.
+                if (this.sessionId && !userAction && (event === 'play' || event === 'seeked')) return;
                 if (event === 'play' || event === 'seeked') this.browserTouched = true;
                 const takeover = (this.sessionId || this.initializing) && (event === 'play' || event === 'seeked');
                 if (event === 'play' || event === 'seeked') { this.echoUntil = 0; this.suspendBrowserUntil = 0; }
@@ -2861,6 +2872,12 @@ class PlaybackProgressSync {
         if (this.record && !this.browserTouched) this.applyToVideo(this.record);
     }
     applyToVideo(record) {
+        // MPV keeps saving resume/history while it plays. Only a live pause
+        // snapshot may move the page; normal close releases this guard below.
+        // Keep the guard after EOF/disconnect so video replacement and late
+        // loadedmetadata cannot replay a deferred playing position.
+        if ((this.sessionId || this.mpvProgressDeferred) &&
+            (record.source !== 'mpv' || record.paused !== true || record.ended === true)) return;
         const video = this.video;
         if (!video || this.browserTouched && !video.paused || !Number.isFinite(Number(video.duration)) || video.duration <= 0) return;
         const position = record.completed ? 0 : Number(record.position);
@@ -2883,7 +2900,7 @@ class PlaybackProgressSync {
         this.record = record; this.lastBrowserSave = record.updatedAt;
         this.reporter.cancel(content.identity);
         saveLocalPlaybackRecord(content.identity, record);
-        if (takeover) { this.sessionId = undefined; this.sequence = -1; }
+        if (takeover) { this.sessionId = undefined; this.sequence = -1; this.mpvProgressDeferred = false; }
         // Page watching is reported by Bilibili itself. Only MPV records need our account heartbeat.
         void this.bridge.requestPlayback({ type: 'updatePlaybackProgress', ...this.bridgeContent(content),
             ...record, takeover }).catch(() => undefined);
@@ -2897,18 +2914,20 @@ class PlaybackProgressSync {
             void this.resetPage(location.href); return;
         }
         if (!this.content) {
-            if (Date.now() - (this.lastResolve || 0) > 3000) void this.resetPage(location.href);
+            if (!this.initializing && Date.now() - (this.lastResolve || 0) > 3000) void this.resetPage(location.href);
             return;
         }
         this.bindVideo(); this.saveBrowser();
         if (this.sessionId && !(this.bridge.isPlaybackConnected?.() ?? this.bridge.socket?.readyState === 1) && !this.reconnecting &&
             Date.now() - (this.lastReconnect || 0) >= 5000) {
-            const content = this.content, generation = this.generation;
+            const content = this.content, generation = this.generation, sessionId = this.sessionId;
             this.lastReconnect = Date.now();
             this.reconnecting = this.bridge.requestPlayback({ type: 'getPlaybackProgress', ...this.bridgeContent(content) })
                 .then(state => {
-                    if (generation !== this.generation || content.identity !== this.content?.identity) return;
+                    if (generation !== this.generation || content.identity !== this.content?.identity ||
+                        this.sessionId !== sessionId || this.browserTouched) return;
                     this.sessionId = state.activeSessionId;
+                    this.mpvProgressDeferred ||= Boolean(this.sessionId);
                     const latest = newestPlaybackRecord(this.record, state.record);
                     if (latest) {
                         this.record = latest; saveLocalPlaybackRecord(content.identity, latest); this.applyToVideo(latest);
@@ -2930,30 +2949,41 @@ class PlaybackProgressSync {
                 updatedAt: Number(message.updatedAt), paused: message.paused === true, ended: message.ended === true,
                 completed: message.completed === true, source: 'mpv' };
             state.sequences.set(item.itemId, message.sequence);
-            if (newestPlaybackRecord(previous, record) !== record) return;
-            saveLocalPlaybackRecord(content.identity, record);
+            if (newestPlaybackRecord(previous, record) !== record &&
+                !(previous?.source === 'mpv' && Number(previous.updatedAt) === record.updatedAt)) return;
+            saveLocalPlaybackRecord(content.identity, record, true);
             this.reporter.enqueue(content, record, record.ended || record.paused && !previous?.paused ||
                 previous && record.position < previous.position - 2);
             return;
         }
-        if (!this.content || message.identity !== this.content.identity ||
-            !this.sessionId || message.sessionId !== this.sessionId) return;
+        if (!this.content || !this.sessionId || message.sessionId !== this.sessionId) return;
         if (getAutoHandoffPageKey(this.content.pageUrl) !== getAutoHandoffPageKey(location.href) ||
             typeof getAutomaticHandoffKey === 'function' && this.boundAutomaticKey !== getAutomaticHandoffKey()) return;
         if (message.type === 'playbackProgressStopped') {
+            if (message.playlistId && !playlistProgress) return;
+            if (!message.playlistId && message.identity !== this.content.identity) return;
             this.sessionId = undefined;
-            if (message.reason === 'browser_rebound') this.reporter.cancel(this.content.identity);
+            if (message.reason === 'player_closed' && !this.browserTouched && this.record?.source === 'mpv') {
+                this.mpvProgressDeferred = false;
+                this.applyToVideo(this.record);
+                this.reporter.enqueue(this.content, this.record, true);
+            } else if (message.reason === 'browser_rebound') this.reporter.cancel(this.content.identity);
             return;
         }
+        if (message.identity !== this.content.identity) return;
         if (message.source !== 'mpv' || !Number.isInteger(message.sequence) || message.sequence <= this.sequence || !validPlaybackRecord(message)) return;
         this.sequence = message.sequence;
         const record = { position: Number(message.position), duration: Number(message.duration) || this.content.duration,
             updatedAt: Number(message.updatedAt), paused: message.paused === true, ended: message.ended === true,
             completed: message.completed === true, source: 'mpv' };
-        if (newestPlaybackRecord(this.record, record) !== record) return;
+        // A queued pause and subsequent resume can be sampled in the same
+        // millisecond. The validated session sequence orders those snapshots.
+        if (newestPlaybackRecord(this.record, record) !== record &&
+            !(this.record?.source === 'mpv' && Number(this.record.updatedAt) === record.updatedAt)) return;
         const force = record.ended || record.paused && !this.record?.paused ||
             this.record && record.position < this.record.position - 2;
-        this.record = record; this.browserTouched = false; saveLocalPlaybackRecord(this.content.identity, record);
+        this.record = record; this.browserTouched = false; this.mpvProgressDeferred = true;
+        saveLocalPlaybackRecord(this.content.identity, record, true);
         this.applyToVideo(record); this.reporter.enqueue(this.content, record, force);
     }
     async prepareLaunch(media, player) {
@@ -2963,6 +2993,11 @@ class PlaybackProgressSync {
         if (!content || generation !== this.generation) return media;
         media = { ...media, playbackProgressSync: true };
         if (this.content?.identity !== content.identity) { this.content = content; this.record = undefined; this.browserTouched = false; this.bindVideo(); }
+        // A fast automatic launch can resolve this content before resetPage.
+        // Bind its page key now so tick() does not reset the same page while
+        // startPlaybackProgress is awaiting its acknowledgement.
+        this.boundAutomaticKey = typeof getAutomaticHandoffKey === 'function' ? getAutomaticHandoffKey() :
+            getAutoHandoffPageKey(location.href);
         this.saveBrowser(true);
         let local = newestPlaybackRecord(this.record, readLocalPlaybackRecord(content.identity));
         const restartCompleted = record => record?.completed ? { ...record, position: 0, completed: false, ended: false,
@@ -2988,7 +3023,8 @@ class PlaybackProgressSync {
                 this.bridge.sendJson({ type: 'stopPlaybackProgress', sessionId }); return media;
             }
             if (started.sessionId !== sessionId || started.identity !== content.identity || Number(started.apiVersion) < 1) throw new Error('Invalid playback bridge acknowledgement');
-            this.sessionId = sessionId; this.sequence = -1; this.record = newestPlaybackRecord(latest, started.record);
+            this.sessionId = sessionId; this.sequence = -1; this.mpvProgressDeferred = true;
+            this.record = newestPlaybackRecord(latest, started.record);
             this.suspendBrowserUntil = Date.now() + 6000;
             return makePlaybackLaunch(media, sessionId, content.identity, this.record?.position ?? position);
         } catch (error) {

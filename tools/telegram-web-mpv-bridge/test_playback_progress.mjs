@@ -127,6 +127,46 @@ test('new global sync starts MPV at webpage progress despite legacy syncTime fal
     assert.ok(!JSON.stringify(f.requests).includes('csrf')); assert.ok(!JSON.stringify(f.requests).includes('SESSDATA'));
 });
 
+test('a cold automatic launch binds its content key before a concurrent tick can cancel progress registration', async () => {
+    const f = fixture({ position: 48 });
+    f.context.getAutomaticHandoffKey = () => f.context.getAutoHandoffPageKey(f.context.location.href);
+    let release;
+    f.bridge.ensurePlaybackBridge = () => new Promise(resolve => { release = resolve; });
+    const launching = f.sync.prepareLaunch(media(48), { name: 'MPV' });
+    await drain();
+    const generation = f.sync.generation;
+    await f.sync.tick();
+    assert.equal(f.sync.generation, generation);
+    release();
+    const prepared = await launching;
+    const started = f.requests.find(request => request.type === 'startPlaybackProgress');
+    assert.ok(started); assert.equal(f.sync.sessionId, started.sessionId);
+    assert.equal(prepared.playbackProgressSync, true);
+    assert.ok(prepared.mpvOptions.some(option => option.includes('web_progress-session_id=')));
+    assert.equal(f.requests.filter(request => request.type === 'stopPlaybackProgress').length, 0);
+});
+
+test('a slow initial content request is not reset by ticks waiting for the same automatic launch', async () => {
+    const f = fixture({ position: 48 });
+    f.context.getAutomaticHandoffKey = () => f.context.getAutoHandoffPageKey(f.context.location.href);
+    const original = f.context.fetch;
+    let release;
+    f.context.fetch = (url, options) => url.includes('/web-interface/view') ?
+        new Promise(resolve => { release = () => resolve(original(url, options)); }) : original(url, options);
+    const resetting = f.sync.resetPage(f.context.location.href);
+    const input = media(48); delete input.bilibili;
+    const launching = f.sync.prepareLaunch(input, { name: 'MPV' });
+    await drain();
+    const generation = f.sync.generation;
+    f.advance(4000); await f.sync.tick();
+    assert.equal(f.sync.generation, generation);
+    assert.equal(f.sync.initializing, true);
+    release(); await resetting;
+    const prepared = await launching;
+    assert.equal(f.requests.filter(request => request.type === 'startPlaybackProgress').length, 1);
+    assert.ok(prepared.mpvOptions.some(option => option.includes('web_progress-session_id=')));
+});
+
 test('MPV starts at zero after an explicit backwards webpage seek and removes duplicate IPC options', async () => {
     const f = fixture({ position: 0, paused: true });
     f.context.saveLocalPlaybackRecord(content.identity, record(100));
@@ -173,7 +213,7 @@ test('remote progress checks identity, session and sequence; mirrored seeks neve
     const f = fixture(); await f.sync.resetPage(f.context.location.href); f.sync.sessionId = 'progress-owned';
     f.requests.length = 0;
     const notification = { type: 'playbackProgress', provider: 'bilibili', identity: content.identity,
-        sessionId: 'progress-owned', sequence: 1, ...record(80, 2_000_001) };
+        sessionId: 'progress-owned', sequence: 1, ...record(80, 2_000_001, { paused: true }) };
     f.sync.handleBridgeMessage({ ...notification, identity: 'bilibili:11:22' });
     f.sync.handleBridgeMessage({ ...notification, sessionId: 'progress-other' });
     assert.equal(f.video.currentTime, 0);
@@ -186,17 +226,141 @@ test('remote progress checks identity, session and sequence; mirrored seeks neve
 test('paused webpage cannot overwrite active MPV progress; deliberate browser seek takes over', async () => {
     const f = fixture(); await f.sync.resetPage(f.context.location.href); f.sync.sessionId = 'progress-owned';
     f.requests.length = 0; f.sync.saveBrowser(true); assert.equal(f.requests.length, 0);
+    f.documentListeners.get('pointerdown')({ target: f.video });
     f.video.currentTime = 25; await drain();
     const update = f.requests.find(request => request.type === 'updatePlaybackProgress');
     assert.equal(update.position, 25); assert.equal(update.takeover, true); assert.equal(f.sync.sessionId, undefined);
 });
 
+test('late page autoplay and resume seeks cannot detach an active MPV progress session', async () => {
+    const f = fixture(); await f.sync.resetPage(f.context.location.href);
+    f.bridge.isPlaybackConnected = () => true;
+    f.sync.sessionId = 'progress-owned'; f.sync.mpvProgressDeferred = true;
+    f.advance(10_000); f.requests.length = 0;
+    f.video.paused = false; f.videoListeners.get('play')();
+    f.video.currentTime = 48;
+    await f.sync.tick(); await drain();
+    assert.equal(f.sync.sessionId, 'progress-owned');
+    assert.equal(f.sync.browserTouched, false);
+    assert.equal(f.requests.filter(request => request.type === 'updatePlaybackProgress').length, 0);
+    f.sync.handleBridgeMessage({ type: 'playbackProgress', identity: content.identity,
+        sessionId: 'progress-owned', sequence: 1, ...record(125, 2_010_001, { paused: true }) });
+    assert.equal(f.video.currentTime, 125);
+    f.documentListeners.get('keydown')({ code: 'Space' });
+    f.videoListeners.get('play')(); await drain();
+    assert.equal(f.sync.sessionId, undefined);
+    assert.equal(f.requests.find(request => request.type === 'updatePlaybackProgress')?.takeover, true);
+});
+
+test('focused player Enter and media keys allow deliberate browser takeover', async () => {
+    for (const code of ['Enter', 'MediaPlayPause']) {
+        const f = fixture(); await f.sync.resetPage(f.context.location.href);
+        f.sync.sessionId = 'progress-owned'; f.requests.length = 0;
+        if (code === 'Enter') {
+            f.documentListeners.get('keydown')({ code, target: { closest: () => undefined } });
+            f.videoListeners.get('play')();
+            assert.equal(f.sync.sessionId, 'progress-owned');
+        }
+        f.documentListeners.get('keydown')({ code, target: f.video });
+        f.video.paused = false; f.videoListeners.get('play')(); await drain();
+        assert.equal(f.sync.sessionId, undefined, code);
+        assert.equal(f.requests.find(request => request.type === 'updatePlaybackProgress')?.takeover, true, code);
+    }
+});
+
+test('a long pointer drag still hands control back to the webpage on release', async () => {
+    const f = fixture(); await f.sync.resetPage(f.context.location.href);
+    f.sync.sessionId = 'progress-owned'; f.requests.length = 0;
+    f.documentListeners.get('pointerdown')({ target: f.video });
+    f.advance(4000);
+    f.documentListeners.get('pointerup')({ target: f.video });
+    f.video.currentTime = 15; await drain();
+    assert.equal(f.sync.sessionId, undefined);
+    assert.equal(f.requests.find(request => request.type === 'updatePlaybackProgress')?.takeover, true);
+});
+
+test('playing progress is saved and reported but the page moves only on pause and close', async () => {
+    const f = fixture({ position: 7 }); await f.sync.resetPage(f.context.location.href);
+    f.sync.sessionId = 'progress-owned';
+    const reports = []; f.sync.reporter.enqueue = (identity, saved) => reports.push(saved.position);
+    const send = (sequence, position, extra = {}) => f.sync.handleBridgeMessage({ type: 'playbackProgress',
+        identity: content.identity, sessionId: 'progress-owned', sequence, ...record(position, 2_000_000 + sequence, extra) });
+    send(1, 20); send(2, 25); send(3, 2);
+    assert.equal(f.video.currentTime, 7);
+    assert.equal(f.context.readLocalPlaybackRecord(content.identity).position, 2);
+    assert.deepEqual(reports, [20, 25, 2]);
+    send(4, 30, { paused: true }); assert.equal(f.video.currentTime, 30);
+    send(5, 18, { paused: true }); assert.equal(f.video.currentTime, 18);
+    send(6, 19); send(7, 22); assert.equal(f.video.currentTime, 18);
+    f.sync.handleBridgeMessage({ type: 'playbackProgressStopped', identity: content.identity,
+        sessionId: 'progress-owned', reason: 'player_closed' });
+    assert.equal(f.video.currentTime, 22); assert.equal(f.sync.sessionId, undefined);
+    assert.equal(f.requests.filter(request => request.type === 'updatePlaybackProgress').length, 0);
+});
+
+test('active player on page refresh cannot restore a playing cache or seek on loadedmetadata', async () => {
+    const f = fixture({ position: 8 });
+    f.bridge.activeSessionId = 'progress-owned'; f.bridge.record = record(90, 1_900_000);
+    await f.sync.resetPage(f.context.location.href);
+    assert.equal(f.video.currentTime, 8);
+    f.videoListeners.get('loadedmetadata')(); assert.equal(f.video.currentTime, 8);
+    const replacement = { ...f.video, currentTime: 12 };
+    f.context.document.querySelectorAll = () => [replacement]; f.sync.bindVideo();
+    assert.equal(replacement.currentTime, 12);
+    f.videoListeners.get('loadedmetadata')(); assert.equal(replacement.currentTime, 12);
+    assert.equal(f.context.readLocalPlaybackRecord(content.identity).position, 90);
+});
+
+test('same-millisecond paused seeks and resume snapshots follow validated sequence order', async () => {
+    const f = fixture(); await f.sync.resetPage(f.context.location.href); f.sync.sessionId = 'progress-owned';
+    const send = (sequence, position, paused) => f.sync.handleBridgeMessage({ type: 'playbackProgress',
+        identity: content.identity, sessionId: 'progress-owned', sequence, ...record(position, 2_000_001, { paused }) });
+    send(1, 40, true); assert.equal(f.video.currentTime, 40);
+    send(2, 31, true); assert.equal(f.video.currentTime, 31);
+    send(3, 34, false); assert.equal(f.video.currentTime, 31);
+    assert.equal(f.context.readLocalPlaybackRecord(content.identity).position, 34);
+    send(4, 0, true); assert.equal(f.video.currentTime, 0);
+    send(2, 200, true); assert.equal(f.video.currentTime, 0);
+    assert.equal(f.context.readLocalPlaybackRecord(content.identity).position, 0);
+});
+
+test('EOF and non-close stop reasons do not seek even after the video element is replaced', async () => {
+    for (const reason of ['playback_ended', 'player_file_changed', 'relay_closed', 'browser_rebound',
+        'player_replaced', 'browser_stop', 'player_ipc_unresponsive']) {
+        const f = fixture({ position: 11 }); await f.sync.resetPage(f.context.location.href);
+        f.sync.sessionId = 'progress-owned';
+        f.sync.handleBridgeMessage({ type: 'playbackProgress', identity: content.identity,
+            sessionId: 'progress-owned', sequence: 1, ...record(300, 2_000_001, { ended: true, completed: true, paused: true }) });
+        assert.equal(f.video.currentTime, 11);
+        f.sync.handleBridgeMessage({ type: 'playbackProgressStopped', identity: content.identity,
+            sessionId: 'progress-owned', reason });
+        f.videoListeners.get('loadedmetadata')(); assert.equal(f.video.currentTime, 11, reason);
+        assert.equal(f.context.readLocalPlaybackRecord(content.identity).completed, true);
+    }
+});
+
+test('deliberate webpage takeover rejects later MPV close and paused progress', async () => {
+    const f = fixture(); await f.sync.resetPage(f.context.location.href); f.sync.sessionId = 'progress-owned';
+    f.sync.handleBridgeMessage({ type: 'playbackProgress', identity: content.identity,
+        sessionId: 'progress-owned', sequence: 1, ...record(99, 2_000_001) });
+    f.documentListeners.get('pointerdown')({ target: f.video });
+    f.video.currentTime = 25;
+    f.sync.handleBridgeMessage({ type: 'playbackProgressStopped', identity: content.identity,
+        sessionId: 'progress-owned', reason: 'player_closed' });
+    f.sync.handleBridgeMessage({ type: 'playbackProgress', identity: content.identity,
+        sessionId: 'progress-owned', sequence: 2, ...record(101, 2_000_003, { paused: true }) });
+    assert.equal(f.video.currentTime, 25);
+    assert.equal(f.context.readLocalPlaybackRecord(content.identity).source, 'browser');
+});
+
 test('a user seek or play inside an active remote echo window takes over immediately', async () => {
     const f = fixture(); await f.sync.resetPage(f.context.location.href); f.sync.sessionId = 'progress-owned';
     f.sync.handleBridgeMessage({ type: 'playbackProgress', provider: 'bilibili', identity: content.identity,
-        sessionId: 'progress-owned', sequence: 1, ...record(80, 2_000_001) });
+        sessionId: 'progress-owned', sequence: 1, ...record(80, 2_000_001, { paused: true }) });
     assert.ok(f.sync.echoUntil > f.context.Date.now());
-    f.requests.length = 0; f.video.currentTime = 25; await drain();
+    f.requests.length = 0;
+    f.documentListeners.get('pointerdown')({ target: f.video });
+    f.video.currentTime = 25; await drain();
     assert.equal(f.requests.find(request => request.type === 'updatePlaybackProgress')?.takeover, true);
     assert.equal(f.context.readLocalPlaybackRecord(content.identity).position, 25);
     f.sync.sessionId = 'progress-again'; f.sync.echoUntil = f.context.Date.now() + 1800; f.sync.echoPosition = 25;
@@ -212,12 +376,39 @@ test('turning progress sync off stops its owned MPV session but ordinary navigat
     assert.deepEqual(f.requests.find(request => request.type === 'stopPlaybackProgress'), { type: 'stopPlaybackProgress', sessionId: 'progress-owned' });
 });
 
-test('an established session reconnects without bootstrapping and imports its latest backend position', async () => {
+test('reconnection caches playing progress without seeking, then applies paused progress', async () => {
     const f = fixture(); await f.sync.resetPage(f.context.location.href); f.sync.sessionId = 'progress-owned';
     f.bridge.socket = { readyState: 3 }; f.bridge.activeSessionId = 'progress-owned'; f.bridge.record = record(92, 2_000_002);
     await f.sync.tick(); await drain();
-    assert.equal(f.video.currentTime, 92); assert.equal(f.sync.sessionId, 'progress-owned');
+    assert.equal(f.video.currentTime, 0); assert.equal(f.sync.sessionId, 'progress-owned');
+    assert.equal(f.context.readLocalPlaybackRecord(content.identity).position, 92);
     assert.equal(f.requests.at(-1).type, 'getPlaybackProgress');
+    f.advance(6000); f.bridge.record = record(94, 2_006_002, { paused: true });
+    await f.sync.tick(); await drain();
+    assert.equal(f.video.currentTime, 94);
+});
+
+test('late reconnect replies cannot reclaim the page after browser takeover or player close', async () => {
+    for (const action of ['takeover', 'close']) {
+        const f = fixture(); await f.sync.resetPage(f.context.location.href); f.sync.sessionId = 'progress-owned';
+        f.sync.handleBridgeMessage({ type: 'playbackProgress', identity: content.identity,
+            sessionId: 'progress-owned', sequence: 1, ...record(88, 2_000_001) });
+        f.bridge.socket = { readyState: 3 };
+        let release;
+        f.bridge.requestPlayback = () => new Promise(resolve => { release = resolve; });
+        await f.sync.tick();
+        if (action === 'takeover') {
+            f.documentListeners.get('pointerdown')({ target: f.video });
+            f.video.currentTime = 22;
+        }
+        else f.sync.handleBridgeMessage({ type: 'playbackProgressStopped', identity: content.identity,
+            sessionId: 'progress-owned', reason: 'player_closed' });
+        release({ activeSessionId: 'progress-owned', record: record(99, 2_000_010, { paused: true }) });
+        await drain();
+        assert.equal(f.sync.sessionId, undefined, action);
+        assert.equal(f.video.currentTime, action === 'takeover' ? 22 : 88, action);
+        assert.equal(f.context.readLocalPlaybackRecord(content.identity).position, action === 'takeover' ? 22 : 88, action);
+    }
 });
 
 test('changing P clears old record and cannot apply old session messages to a new video', async () => {
@@ -240,7 +431,8 @@ test('initial autoplay cannot supersede saved MPV progress while account history
     f.bridge.activeSessionId = 'progress-existing'; f.bridge.record = record(85, 1_900_000);
     const initializing = f.sync.resetPage(f.context.location.href); await drain();
     f.video.paused = false; f.videoListeners.get('play')?.(); f.sync.saveBrowser(true);
-    f.sync.handleBridgeMessage({ type: 'playbackProgressStopped', identity: content.identity, sessionId: 'progress-existing' });
+    f.sync.handleBridgeMessage({ type: 'playbackProgressStopped', identity: content.identity,
+        sessionId: 'progress-existing', reason: 'player_closed' });
     release(); await initializing;
     assert.equal(f.sync.browserTouched, false); assert.equal(f.video.currentTime, 85);
     assert.equal(f.sync.sessionId, undefined);
@@ -345,7 +537,9 @@ test('browser takeover cancels an old failed MPV account update instead of rewri
         return original(url, options);
     };
     f.sync.reporter.enqueue(content, record(73, 2_000_000, { ended: true, completed: false }), true); await drain();
-    f.sync.sessionId = 'progress-owned'; f.advance(1); f.video.currentTime = 0; await drain();
+    f.sync.sessionId = 'progress-owned'; f.advance(1);
+    f.documentListeners.get('pointerdown')({ target: f.video });
+    f.video.currentTime = 0; await drain();
     assert.equal(f.context.readLocalPlaybackRecord(content.identity).position, 0);
     f.advance(15000); await f.sync.tick(); await drain();
     assert.equal(f.posts.length, 0); assert.equal(f.sync.reporter.states.get(content.identity).pending, undefined);
@@ -358,7 +552,9 @@ test('a pending account request rechecks authority after nav and skips POST when
         release = async () => resolve(await original(url, options));
     }) : original(url, options);
     f.sync.reporter.enqueue(content, record(73, 2_000_000), true); await drain();
-    f.sync.sessionId = 'progress-owned'; f.video.currentTime = 10;
+    f.sync.sessionId = 'progress-owned';
+    f.documentListeners.get('pointerdown')({ target: f.video });
+    f.video.currentTime = 10;
     await release(); await drain(); assert.equal(f.posts.length, 0);
 });
 

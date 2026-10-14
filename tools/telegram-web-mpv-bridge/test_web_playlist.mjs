@@ -898,5 +898,35 @@ test('native playlist preparation occurs before progress setup and old saved pla
     const parser = between('class BaseParser {', 'function isRelayPlayer(');
     assert.ok(parser.indexOf('prepareBilibiliPlaylistLaunch(media, player)') < parser.indexOf('playbackProgressSync.prepareLaunch(media, player)'));
     assert.ok(parser.indexOf('if (media.webPlaylist) media.time = undefined') > parser.indexOf('playbackProgressSync.prepareLaunch(media, player)'));
-    assert.match(source, /@version\s+1\.2\.14\.24/);
+    assert.match(source, /@version\s+1\.2\.14\.26/);
+});
+
+test('closing on another playlist CID syncs only the original page cached position', async () => {
+    const f = fixture(); await f.sync.resetPage(f.context.location.href);
+    f.sync.sessionId = sessionId; f.playlists.adopt(manifest());
+    f.sync.handleBridgeMessage({ type: 'playbackProgress', source: 'mpv', playlistId, sessionId,
+        identity: 'bilibili:11:21', position: 84, duration: 194, updatedAt: 3000000, sequence: 1, paused: false });
+    assert.equal(f.video.currentTime, 70);
+    f.sync.handleBridgeMessage({ type: 'playbackProgress', source: 'mpv', playlistId, sessionId,
+        identity: 'bilibili:11:22', position: 30, duration: 158, updatedAt: 3000001, sequence: 2, paused: true });
+    assert.equal(f.video.currentTime, 70);
+    f.sync.handleBridgeMessage({ type: 'playbackProgressStopped', playlistId: `playlist-${'b'.repeat(32)}`, sessionId,
+        identity: 'bilibili:11:22', reason: 'player_closed' });
+    assert.equal(f.video.currentTime, 70); assert.equal(f.sync.sessionId, sessionId);
+    f.sync.handleBridgeMessage({ type: 'playbackProgressStopped', playlistId, sessionId,
+        identity: 'bilibili:11:22', reason: 'player_closed' });
+    assert.equal(f.video.currentTime, 84); assert.equal(f.sync.sessionId, undefined);
+    assert.equal(f.context.readLocalPlaybackRecord('bilibili:11:22').position, 30);
+});
+
+test('same-millisecond queued progress for other playlist CIDs saves the latest sequence without moving the page', async () => {
+    const f = fixture(); await f.sync.resetPage(f.context.location.href);
+    f.sync.sessionId = sessionId; f.playlists.adopt(manifest());
+    for (const [sequence, position, paused] of [[1, 40, true], [2, 30, true], [3, 32, false]]) {
+        f.sync.handleBridgeMessage({ type: 'playbackProgress', source: 'mpv', playlistId, sessionId,
+            identity: 'bilibili:11:22', position, duration: 158, updatedAt: 3000000, sequence, paused });
+    }
+    assert.equal(f.context.readLocalPlaybackRecord('bilibili:11:22').position, 32);
+    assert.equal(f.context.readLocalPlaybackRecord('bilibili:11:22').paused, false);
+    assert.equal(f.video.currentTime, 70);
 });

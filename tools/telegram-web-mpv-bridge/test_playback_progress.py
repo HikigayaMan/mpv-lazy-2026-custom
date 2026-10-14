@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from bridge import BridgeState, handle_http_client, ws_handler
 from playback_progress import (
-    API_VERSION, SNAPSHOT_PROPERTY, PlaybackProgressManager, PlaybackProgressSession,
+    API_VERSION, FINALS_PROPERTY, SNAPSHOT_PROPERTY, PlaybackProgressManager, PlaybackProgressSession,
     ProgressStore, canonical_page_url, default_store_path, make_record,
 )
 
@@ -49,6 +49,7 @@ class Ipc:
         self.commands = []
         self.closed = False
         self.errors = {}
+        self.finals = []
 
     async def command(self, command):
         self.commands.append(command)
@@ -58,6 +59,8 @@ class Ipc:
             raise self.errors[command[1]].pop(0)
         if command == ["get_property", "pid"]:
             return 12345
+        if command == ["get_property", FINALS_PROPERTY]:
+            return copy.deepcopy(self.finals)
         return copy.deepcopy(self.value)
 
 
@@ -178,6 +181,52 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.sequence, 1)
         self.assertEqual(len(self.owner.messages), 1)
 
+    async def test_quick_pause_then_resume_is_consumed_before_current_playback_once(self):
+        session = self.session()
+        self.ipc.value = snapshot(position=27, pauseEventsApiVersion=1)
+        self.ipc.finals = [{"finalSequence": 1, "snapshot": snapshot(position=25.5, paused=True)}]
+        self.assertEqual(await session.sample_progress(), "ok")
+        self.assertEqual([(item["position"], item["paused"]) for item in self.owner.messages],
+                         [(25.5, True), (27, False)])
+        self.assertEqual(self.ipc.commands, [["get_property", SNAPSHOT_PROPERTY], ["get_property", FINALS_PROPERTY]])
+        self.assertEqual(session.final_sequence, 1)
+        self.assertEqual(self.store.get(session.identity)["position"], 27)
+        self.assertEqual(await session.sample_progress(), "ok")
+        self.assertEqual(len(self.owner.messages), 2)
+
+    async def test_legacy_snapshot_never_reads_absent_pause_queue(self):
+        session = self.session()
+        for version in (None, True, "1", 2):
+            self.ipc.value = snapshot(**({} if version is None else {"pauseEventsApiVersion": version}))
+            self.assertEqual(await session.sample_progress(), "ok")
+        self.assertEqual(self.ipc.commands, [["get_property", SNAPSHOT_PROPERTY]] * 4)
+
+    async def test_foreign_and_invalid_pause_finals_cannot_advance_watermark(self):
+        session = self.session()
+        await session.accept_snapshot(snapshot())
+        for updates in ({"identity": "bilibili:1001:9999"}, {"sessionId": "progress-other"},
+                        {"active": False}, {"ready": False}, {"paused": "true"}):
+            await session.accept_finals([{"finalSequence": 9, "snapshot": snapshot(**{"paused": True, **updates})}])
+            self.assertEqual(session.final_sequence, 0)
+        await session.accept_finals([{"finalSequence": 1, "snapshot": snapshot(position=12, paused=True)}])
+        self.assertEqual(session.final_sequence, 1)
+        self.assertEqual(self.store.get(session.identity)["position"], 12)
+        self.assertIsNone(self.store.get("bilibili:1001:9999"))
+
+    async def test_pause_finals_accept_valid_sequence_order_and_reject_unbounded_queue(self):
+        session = self.session()
+        finals = [{"finalSequence": 2, "snapshot": snapshot(position=7, paused=True)},
+                  {"finalSequence": 1, "snapshot": snapshot(position=12, paused=True)}]
+        await session.accept_finals(finals)
+        self.assertEqual([(item["position"], item["paused"]) for item in self.owner.messages],
+                         [(12, True), (7, True)])
+        self.assertEqual(session.final_sequence, 2)
+        await session.accept_finals(finals)
+        await session.accept_finals([{"finalSequence": True, "snapshot": snapshot(paused=True)}])
+        await session.accept_finals(finals * 17)
+        self.assertEqual(len(self.owner.messages), 2)
+        self.assertEqual(session.final_sequence, 2)
+
     async def test_snapshot_identity_and_session_change_never_poll_other_player_position(self):
         session = self.session()
         session.start()
@@ -218,6 +267,47 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await eventually(lambda: session.task.done())
         self.assertEqual(ProgressStore(self.store.path).get(session.identity)["position"], 26)
         self.assertEqual(session.reason, "player_closed")
+
+    async def test_eof_stops_with_playback_ended_instead_of_player_closed(self):
+        for reason in (None, "eof", "stop", "player_closed"):
+            with self.subTest(reason=reason):
+                session = self.session()
+                self.ipc.value = snapshot(position=120, ended=True, completed=True,
+                                          **({} if reason is None else {"terminalReason": reason}))
+                session.start()
+                await eventually(lambda: session.task.done())
+                self.assertEqual(session.reason, "playback_ended")
+                self.assertEqual(self.owner.messages[-1]["reason"], "playback_ended")
+                self.assertEqual(ProgressStore(self.store.path).get(session.identity)["position"], 120)
+
+    async def test_verified_graceful_quit_and_shutdown_snapshot_report_player_closed(self):
+        for reason in ("quit", "shutdown"):
+            with self.subTest(reason=reason):
+                session = self.session()
+                self.ipc.value = snapshot(position=44.5, ended=True, terminalReason=reason)
+                session.start()
+                await eventually(lambda: session.task.done())
+                self.assertEqual(session.reason, "player_closed")
+                self.assertEqual(self.owner.messages[-1]["reason"], "player_closed")
+                self.assertEqual(self.owner.messages[-2]["position"], 44.5)
+                self.assertEqual(ProgressStore(self.store.path).get(session.identity)["position"], 44.5)
+                self.assertNotIn("terminalReason", self.store.path.read_text())
+
+    async def test_unattached_foreign_or_unready_shutdown_marker_cannot_report_player_closed(self):
+        session = self.session()
+        for updates in ({"identity": "bilibili:1001:9999"}, {"sessionId": "progress-other"},
+                        {"active": False}, {"ready": False}, {"duration": 0}):
+            with self.subTest(updates=updates):
+                self.assertEqual(await session.accept_snapshot(snapshot(ended=True, terminalReason="shutdown", **updates)),
+                                 "waiting")
+        self.assertFalse(session.attached)
+        self.assertEqual(self.owner.messages, [])
+
+    async def test_shutdown_marker_without_ended_does_not_stop_live_playback(self):
+        session = self.session()
+        for reason in ("quit", "shutdown"):
+            self.assertEqual(await session.accept_snapshot(snapshot(terminalReason=reason)), "ok")
+        self.assertFalse(self.owner.messages[-1]["ended"])
 
     async def test_missing_lua_snapshot_times_out_without_false_progress(self):
         session = self.session()

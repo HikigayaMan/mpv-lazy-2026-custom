@@ -379,10 +379,15 @@ class PlaybackProgressSession:
             self.last_flush = time.monotonic()
         # EOF closes this item, while the same IPC pipe continues with another
         # native playlist entry (or loops the current one).
-        return "ended" if record["ended"] and not self.playlist_id else "ok"
+        if record["ended"] and not self.playlist_id:
+            # A graceful quit can publish its final snapshot before the pipe
+            # disappears. Only an explicit Lua terminal marker distinguishes
+            # player shutdown from EOF or stopping/replacing one file.
+            return "closed" if snapshot.get("terminalReason") in ("quit", "shutdown") else "ended"
+        return "ok"
 
     async def accept_finals(self, finals: Any) -> None:
-        if not self.playlist_id or not isinstance(finals, list) or len(finals) > 32:
+        if not isinstance(finals, list) or len(finals) > 32:
             return
         pending = []
         for item in finals:
@@ -405,7 +410,15 @@ class PlaybackProgressSession:
         async with self.sample_lock:
             if self.playlist_id:
                 await self.accept_finals(await self.ipc.command(["get_property", FINALS_PROPERTY]))
-            return await self.accept_snapshot(await self.ipc.command(["get_property", SNAPSHOT_PROPERTY]))
+                return await self.accept_snapshot(await self.ipc.command(["get_property", SNAPSHOT_PROPERTY]))
+            snapshot = await self.ipc.command(["get_property", SNAPSHOT_PROPERTY])
+            # New Lua scripts retain short pause boundaries between polls. Old
+            # scripts do not create FINALS, so only read it after capability
+            # negotiation through the ordinary snapshot.
+            version = snapshot.get("pauseEventsApiVersion") if isinstance(snapshot, dict) else None
+            if version == 1 and not isinstance(version, bool):
+                await self.accept_finals(await self.ipc.command(["get_property", FINALS_PROPERTY]))
+            return await self.accept_snapshot(snapshot)
 
     async def run(self) -> None:
         deadline = time.monotonic() + self.attach_timeout
@@ -432,7 +445,8 @@ class PlaybackProgressSession:
                     outcome = "waiting"
                 if outcome not in ("ok", "waiting"):
                     self.reason = {"changed": "player_file_changed", "inactive": "player_file_changed",
-                                   "invalid": "player_snapshot_invalid", "ended": "playback_ended"}[outcome]
+                                   "invalid": "player_snapshot_invalid", "ended": "playback_ended",
+                                   "closed": "player_closed"}[outcome]
                     return
                 if not self.attached and time.monotonic() >= deadline:
                     self.reason = "player_attach_timeout"
@@ -602,9 +616,13 @@ class HttpProgressOwner:
     async def send(self, raw: str) -> None:
         message = json.loads(raw)
         if message.get("type") == "playbackProgress":
+            # A later resume must not swallow a queued pause before the browser
+            # has had a chance to apply it. Keep pause/paused-seek boundaries in
+            # order, while normal playing samples still coalesce to the latest.
             self.events = deque((item for item in self.events if not (
                 item.get("type") == "playbackProgress" and item.get("sessionId") == message.get("sessionId")
-                and item.get("identity") == message.get("identity"))), maxlen=64)
+                and item.get("identity") == message.get("identity")
+                and not (item.get("paused") is True and item.get("ended") is not True))), maxlen=64)
         self.events.append(message)
 
     def drain(self) -> list[dict]:

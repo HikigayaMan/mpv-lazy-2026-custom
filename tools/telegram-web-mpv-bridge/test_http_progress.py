@@ -45,6 +45,57 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]['position'], 0)
         self.assertEqual((await self.action('pollPlaybackProgress'))[0]['events'], [])
 
+    async def test_quick_pause_resume_and_paused_seek_keep_order_until_http_poll(self):
+        _, owner, sid = await self.action('startPlaybackProgress')
+        session = self.manager.sessions[sid]
+        self.ipc.value = snapshot(position=27, pauseEventsApiVersion=1)
+        self.ipc.finals = [{'finalSequence': 1, 'snapshot': snapshot(position=25.5, paused=True)}]
+        await session.sample_progress()
+        self.ipc.value = snapshot(position=28, pauseEventsApiVersion=1)
+        await session.sample_progress()
+        self.ipc.finals.append({'finalSequence': 2, 'snapshot': snapshot(position=12, paused=True)})
+        self.ipc.value = snapshot(position=13, pauseEventsApiVersion=1)
+        await session.sample_progress()
+        result, _, _ = await self.action('pollPlaybackProgress')
+        events = result['events']
+        self.assertEqual([(event['position'], event['paused']) for event in events],
+                         [(25.5, True), (12, True), (13, False)])
+        self.assertEqual([event['sequence'] for event in events], [1, 4, 5])
+        self.assertEqual(self.store.get(request()['identity'])['position'], 13)
+        self.assertEqual((await self.action('pollPlaybackProgress'))[0]['events'], [])
+
+    async def test_pause_boundary_queue_is_bounded_and_eof_is_not_a_pause_boundary(self):
+        owner = HttpProgressOwner()
+        for position in range(80):
+            await owner.send(json.dumps({'type': 'playbackProgress', 'sessionId': 'progress-fixture',
+                                        'identity': request()['identity'], 'position': position,
+                                        'paused': True, 'ended': False}))
+        await owner.send(json.dumps({'type': 'playbackProgress', 'sessionId': 'progress-fixture',
+                                    'identity': request()['identity'], 'position': 80,
+                                    'paused': True, 'ended': True}))
+        await owner.send(json.dumps({'type': 'playbackProgress', 'sessionId': 'progress-fixture',
+                                    'identity': request()['identity'], 'position': 81,
+                                    'paused': False, 'ended': False}))
+        events = owner.drain()
+        self.assertEqual(len(events), 64)
+        self.assertEqual([event['position'] for event in events], [*range(17, 80), 81])
+        self.assertFalse(events[-1]['paused'])
+        self.assertFalse(any(event['ended'] for event in events))
+
+    async def test_http_close_notice_follows_retained_pause_and_latest_playing_record(self):
+        owner = HttpProgressOwner()
+        for position, paused in ((12, True), (13, False), (14, False)):
+            await owner.send(json.dumps({'type': 'playbackProgress', 'sessionId': 'progress-fixture',
+                                        'identity': request()['identity'], 'position': position,
+                                        'paused': paused, 'ended': False}))
+        await owner.send(json.dumps({'type': 'playbackProgressStopped', 'sessionId': 'progress-fixture',
+                                    'identity': request()['identity'], 'reason': 'player_closed'}))
+        events = owner.drain()
+        self.assertEqual([event['type'] for event in events],
+                         ['playbackProgress', 'playbackProgress', 'playbackProgressStopped'])
+        self.assertEqual([event.get('position') for event in events], [12, 14, None])
+        self.assertEqual(events[-1]['reason'], 'player_closed')
+
     async def test_new_page_can_explicitly_rebind_http_owner_but_not_websocket_owner(self):
         _, owner, sid = await self.action('startPlaybackProgress')
         self.assertNotIn('activeSessionId', (await self.action('getPlaybackProgress', OTHER))[0]['reply'])

@@ -142,6 +142,27 @@ async def run(args):
     try:
         ws = await channel()
         ipc, first, sid, snap = await launch(12.5)
+        if args.pause_boundaries:
+            require(snap.get('pauseEventsApiVersion') == 1, 'Pause boundary capability missing')
+            # Prevent the periodic poll from observing the brief live pause.
+            # The retained event must survive resume and reach either transport.
+            async with state.progress.sessions[sid].sample_lock:
+                await ipc.command(['set_property', 'pause', False])
+                await wait_property(ipc, PROPERTY, lambda s: s and s.get('ready') and not s.get('paused'))
+                await ipc.command(['seek', 19.25, 'absolute+exact'])
+                await wait_property(ipc, PROPERTY, lambda s: s and s.get('ready') and abs(s['position'] - 19.25) < .3)
+                await ipc.command(['set_property', 'pause', True])
+                boundaries = await wait_property(ipc, 'user-data/mpv-lazy/playback-progress-finals',
+                    lambda values: values and values[-1]['snapshot'].get('paused') and
+                    abs(values[-1]['snapshot']['position'] - 19.25) < .3)
+                paused_position = boundaries[-1]['snapshot']['position']
+                await ipc.command(['set_property', 'pause', False])
+                await wait_property(ipc, PROPERTY, lambda s: s and s.get('ready') and not s.get('paused'))
+            await receive(ws, 'playbackProgress', lambda m: m['sessionId'] == sid and m.get('paused') and
+                abs(m['position'] - paused_position) < .1)
+            await receive(ws, 'playbackProgress', lambda m: m['sessionId'] == sid and not m.get('paused') and
+                m['position'] >= paused_position)
+            await ipc.command(['set_property', 'pause', True])
         for position in (7.25, 0, 23.9):
             await ipc.command(['seek', position, 'absolute+exact'])
             await receive(ws, 'playbackProgress', lambda m: m['sessionId'] == sid and abs(m['position'] - position) < .1)
@@ -162,7 +183,9 @@ async def run(args):
         require(other_part['record'] is None, 'Another part inherited unrelated progress')
         await ipc.command(['quit'])
         first.wait(timeout=8)
-        await receive(ws, 'playbackProgressStopped', lambda m: m['sessionId'] == sid)
+        stopped = await receive(ws, 'playbackProgressStopped', lambda m: m['sessionId'] == sid)
+        if args.pause_boundaries:
+            require(stopped['reason'] == 'player_closed', 'Normal quit was mistaken for EOF')
         reopened_store = ProgressStore(store_path)
         resume = reopened_store.get(content['identity'])
         ipc2, second, sid2, snap2 = await launch(resume['position'])
@@ -175,6 +198,8 @@ async def run(args):
                   'qualitySwitchPosition': 23.9, 'savedWithBrowserClosed': saved['position'],
                   'reopenedMpvPosition': snap2['position'], 'differentPartIsolated': True,
                   'differentFileStopsRecording': True, 'networkScope': 'Local HTTP and real MPV; no actual website history request.'}
+        if args.pause_boundaries:
+            result.update({'briefPauseSurvivesResume': True, 'normalQuitReason': stopped['reason']})
         (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
         return result
     finally:
@@ -200,6 +225,7 @@ def main():
     parser.add_argument('--output-dir', required=True, type=Path)
     parser.add_argument('--transport', choices=['ws', 'http'], default='ws')
     parser.add_argument('--legacy-options', action='store_true', help='Verify .16-.18 combined -append compatibility')
+    parser.add_argument('--pause-boundaries', action='store_true', help='Verify a brief pause retained between IPC polls and normal quit classification')
     print(json.dumps(asyncio.run(run(parser.parse_args())), indent=2))
 
 

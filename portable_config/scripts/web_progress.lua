@@ -30,6 +30,7 @@ local active, ready, ended, completed = true, false, false, false
 local last_path, position, duration = nil, 0, 0
 local waiting_switch = nil
 local waiting_resume = nil
+local terminal_reason = nil
 
 local function finite(value)
     return type(value) == 'number' and value == value and value >= 0 and value < math.huge
@@ -49,13 +50,14 @@ local function playlist_switch()
         and marker.identity == opts.identity and finite(marker.expiresAt) and marker.expiresAt >= mp.get_time()
 end
 local function snapshot()
-    return {apiVersion = 1, identity = opts.identity, sessionId = opts.session_id,
+    return {apiVersion = 1, pauseEventsApiVersion = 1, identity = opts.identity, sessionId = opts.session_id,
         playlistId = playlist_mode and playlist_id or nil,
         active = active, ready = ready and duration > 0, position = position, duration = duration,
-        paused = mp.get_property_bool('pause', false), ended = ended, completed = completed}
+        paused = mp.get_property_bool('pause', false), ended = ended, completed = completed,
+        terminalReason = terminal_reason}
 end
 local function queue_final()
-    if not playlist_mode or not active or not ready or duration <= 0 or playlist_switch() then return end
+    if not active or not ready or duration <= 0 or waiting_switch or playlist_switch() then return end
     final_sequence = final_sequence + 1
     finals[#finals + 1] = {finalSequence = final_sequence, snapshot = snapshot()}
     if #finals > 32 then table.remove(finals, 1) end
@@ -69,6 +71,7 @@ local function adopt_playlist_context()
         position = finite(tonumber(context.position)) and tonumber(context.position) or 0
         duration = finite(tonumber(context.duration)) and tonumber(context.duration) or 0
         last_path, ended, completed = context.path, false, false
+        terminal_reason = nil
         waiting_resume = position > 0 and {position = position, expiresAt = mp.get_time() + 15} or nil
     end
     active = true
@@ -102,6 +105,7 @@ end
 
 mp.register_event('start-file', function()
     local path = mp.get_property('path')
+    terminal_reason = nil
     if playlist_mode then
         local id = path and path:match('^http://127%.0%.0%.1:%d+/web%-playlist/(playlist%-%x+)/')
         active, ready, ended, completed = id == playlist_id, false, false, false
@@ -147,6 +151,7 @@ mp.register_event('end-file', function(event)
         if playlist_switch() then ready = false; publish(false); return end
         if active and ready then
             ended = true
+            terminal_reason = event and event.reason or nil
             completed = event and event.reason == 'eof' or false
             if completed and duration > 0 then position = duration end
             publish(false)
@@ -162,6 +167,7 @@ mp.register_event('end-file', function(event)
         ready, waiting_switch = false, marker.to
     elseif active then
         ended = true
+        terminal_reason = event and event.reason or nil
         completed = event and event.reason == 'eof' or false
         if completed and duration > 0 then position = duration end
         ready = duration > 0
@@ -169,8 +175,8 @@ mp.register_event('end-file', function(event)
     publish(false)
 end)
 
+mp.set_property_native(FINALS, finals)
 if playlist_mode then
-    mp.set_property_native(FINALS, {})
     mp.observe_property(PLAYLIST_CURRENT, 'native', function()
         local old_generation, old_identity = playlist_generation, opts.identity
         if adopt_playlist_context() and (old_generation ~= playlist_generation or old_identity ~= opts.identity) then ready = false end
@@ -182,11 +188,19 @@ if playlist_mode then
     end)
 end
 
-mp.observe_property('pause', 'bool', function() publish(true) end)
+mp.observe_property('pause', 'bool', function(_, paused)
+    publish(true)
+    -- Retain a pause boundary independently from later resume/seek samples.
+    -- Quality replacement can pause while loading; that is not user progress.
+    local marker = mp.get_property_native(SWITCH)
+    local replacing = type(marker) == 'table' and switch_allowed(marker.to)
+    if paused == true and not ended and not replacing then queue_final() end
+end)
 mp.register_event('seek', function() publish(true) end)
 mp.register_event('playback-restart', function() publish(true) end)
 mp.register_event('shutdown', function()
     ended = true
+    terminal_reason = 'shutdown'
     publish(true)
 end)
 mp.add_periodic_timer(1, function()
