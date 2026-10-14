@@ -1,6 +1,6 @@
 # 网页视频列表移交 MPV
 
-源码版 External Player **1.2.14.24** 与配套播放器 Lua／中继支持 B站完整合集及分 P 的层级播放列表，以及当前视频快启、后台补齐合集。先前发布的 `.19` 累计 Release 不包含本功能；需要同步更新本说明列出的文件。
+本次 [v2026.10.14-update 累计 Release](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.14-update) 包含 External Player **1.2.14.26**、中继 **2026.10.14** 与配套播放器 Lua／uosc，支持 B站完整合集及分 P 的层级播放列表，以及当前视频快启、后台补齐合集。先前的 `.19` Release 不包含本功能；安装本次累计包即可一次更新本说明列出的文件，完整范围见 [发行说明](../releases/v2026.10.14-update.md)。
 
 ## 使用
 
@@ -16,7 +16,7 @@
 
 ## 进度与浏览器
 
-每个 `aid + cid` 分别保存位置。切换回未看完条目可续播，已完成条目从零开始；加载中的临时零秒不覆盖续播记录。已启用 B站账号历史时，也按实际播放的条目写入账号记录；只有正在播放的 CID 与原网页相同时才更新该网页的进度条。
+每个 `aid + cid` 分别保存位置。切换回未看完条目可续播，已完成条目从零开始；加载中的临时零秒不覆盖续播记录。已启用 B站账号历史时，也按实际播放的条目写入账号记录。暂停时，只有当前播放的 CID 与原网页相同才更新该网页的进度条；关闭播放器时，使用原网页所属 CID 的最后缓存位置，即使此时正在播放另一个 CID，也不会把另一条目的位置写入原网页。播放中继续保存本机与账号记录，不移动网页进度；换集及片尾不会被当成关闭播放器。详见 [进度同步](./playback-progress.md)。
 
 请保留原网页，后续条目需要它进行账号鉴权解析。关闭网页后当前已经打开的媒体可以继续播放，但后续新条目的解析可能失败；重新打开相同视频页可重新接管列表。失败与超时会释放加载，不让播放器无限等待。关闭进度同步不会关闭列表解析。
 
@@ -24,7 +24,9 @@
 
 ## 更新文件
 
-- `external_player.js`／对应 `.24.user.js`：导入用户脚本管理器，禁用重复旧版并完整刷新页面。
+下载累计包 `mpv-lazy-2026-custom-cumulative-update-v2026.10.14.zip` 并用 `SHA256SUMS-v2026.10.14-update.txt` 校验，关闭本安装的 MPV 和中继后合并到 `mpv.exe` 所在目录。包内包括：
+
+- `external_player.js`／`external_player.user.js`（**1.2.14.26**）：导入用户脚本管理器，禁用重复旧版并完整刷新页面。
 - `portable_config/scripts/web_playlist.lua`、`web_progress.lua`、`quality-menu.lua`。
 - `portable_config/scripts/uosc_danmaku/main.lua`、`sites/bilibili.lua`。
 - `portable_config/scripts/uosc/main.lua`、`elements/Menu.lua`、`lib/web_playlist_tree.lua`、`lib/web_playlist_menu.lua`。

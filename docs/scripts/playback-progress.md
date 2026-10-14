@@ -1,8 +1,8 @@
 # 网页与 MPV 双向播放进度
 
-当前源码版 External Player **1.2.14.26** 调整了 MPV → 网页的同步时机：**MPV 暂停或关闭时才更新原网页的播放位置**。播放中只保存本机续播位置并按原有节奏写入 B站账号历史，网页播放条不会跟随 MPV 持续跳动。需要同步更新用户脚本、`web_progress.lua` 和 B站中继；本次调整尚未发布新的累计 Release。
+本次 [v2026.10.14-update 累计 Release](https://github.com/HikigayaMan/mpv-lazy-2026-custom/releases/tag/v2026.10.14-update) 包含 External Player **1.2.14.26** 与中继 **2026.10.14**，调整了 MPV → 网页的同步时机：**MPV 暂停或关闭时才更新原网页的播放位置**。播放中只保存本机续播位置并按原有节奏写入 B站账号历史，网页播放条不会跟随 MPV 持续跳动。更新包已包含用户脚本、`web_progress.lua` 和配套中继，完整范围见 [发行说明](../releases/v2026.10.14-update.md)。
 
-已发布的 `v2026.10.12-progress-update` 包内为 External Player **1.2.14.19** 与中继 **2026.10.12**，包含此前 .15 累计修改及最初的双向进度功能，网页更新时机仍为旧机制。此前的 `v2026.10.12-update` 本身不包含进度功能。
+此前的 `v2026.10.12-progress-update` 包内为 External Player **1.2.14.19** 与中继 **2026.10.12**，包含此前 .15 累计修改及最初的双向进度功能，网页更新时机仍为旧机制。更早的 `v2026.10.12-update` 本身不包含进度功能。
 
 ## 使用行为
 
@@ -26,7 +26,7 @@
 
 ## 安装
 
-1. 使用本次源码更新时，更新 `external_player.js`，将对应 **.26** `.user.js` 导入 Tampermonkey／Violentmonkey，禁用重复旧版并完整刷新网页。仅导入已发布累计包内的 .19 不会启用新的暂停／关闭机制。
+1. 下载本次累计更新包 `mpv-lazy-2026-custom-cumulative-update-v2026.10.14.zip`，用 `SHA256SUMS-v2026.10.14-update.txt` 校验，关闭本安装的播放器和中继后，将包内文件合并到 `mpv.exe` 所在目录。把包内 **.26** `external_player.user.js` 导入 Tampermonkey／Violentmonkey，禁用重复旧版并完整刷新网页。旧 .19 包不会启用新的暂停／关闭机制。
 2. 更新 `portable_config/scripts/web_progress.lua` 和 `quality-menu.lua`。
 3. 更新 `tools/telegram-web-mpv-bridge/` 的中继 EXE、源码和 `start_browser_relay.ps1`，重启本安装的中继与播放器。
 4. 保留原来的 `MPV` 与 `BrowserRelay` 注册。进度服务与 B站弹幕共享 HTTP `9002`／WebSocket `9001`。脚本 .18 起在 WebSocket 不可连接时自动使用匿名扩展 HTTP 请求和轮询。只开放 `/health` 的无凭据 CORS，进度接口不向普通网页开放 CORS。随机 HTTP 客户端标识只保留在内存，刷新后可以重新订阅同一视频。

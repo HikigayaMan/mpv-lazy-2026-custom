@@ -16,32 +16,34 @@
 
 打包脚本负责结构验证，播放验证脚本负责行为验证。
 
-## 本仓库累计更新包（2026-10-12）
+## 本仓库累计更新包（2026-10-14）
 
-本次 `v2026.10.12-progress-update` 使用 `package_custom_update.py`，从原仓库共同起点 `547e3d7f7a1aa44538ab55fdba3a36e5bcb61984` 计算到发布提交的全部修改。补齐耦合脚本目录，加入已验证的 B站 EXE、可导入用户脚本、逐文件哈希和 manifest；不复制本地运行目录、偏好、日志或旧补丁。仅支持无删除的覆盖升级；若未来删除源文件，必须先明确迁移方案。
+本次 `v2026.10.14-update` 使用 `package_custom_update.py`，从原仓库共同起点 `547e3d7f7a1aa44538ab55fdba3a36e5bcb61984` 计算到发布提交的全部修改。补齐耦合脚本目录，加入已验证的 B站 EXE、可导入用户脚本、逐文件哈希和 manifest；不复制本地运行目录、偏好、日志或旧补丁。仅支持无删除的覆盖升级；若未来删除源文件，必须先明确迁移方案。
+
+本次包含 External Player **1.2.14.26** 与中继 **2026.10.14**，一次整合此前累计功能、完整合集与分 P 层级列表、当前视频快启、重复项清理，以及暂停／关闭时更新网页进度的机制。资产为 `mpv-lazy-2026-custom-cumulative-update-v2026.10.14.zip` 和 `SHA256SUMS-v2026.10.14-update.txt`；完整范围见 [发行说明](../../docs/releases/v2026.10.14-update.md)。旧 `v2026.10.12-update` 与 `.19` 的 `v2026.10.12-progress-update` 保持原样。
 
 先提交源码，再构建 EXE、验证并打包。以下命令在仓库根目录执行，EXE 构建应使用同一份已提交的源码：
 
 ```powershell
 .\tools\telegram-web-mpv-bridge\build_windows.ps1 -InstallDependencies
-$releaseDir = 'tools/telegram-web-mpv-bridge/build/custom-update'
+$releaseDir = 'tools/telegram-web-mpv-bridge/build/custom-update-20261014'
 $releasePython = '.\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe'
 & $releasePython tools/release/smoke_test_bridge_exe.py --exe tools/telegram-web-mpv-bridge/bilibili-live-bridge.exe --output "$releaseDir/verification"
-& $releasePython tools/release/package_custom_update.py --ref HEAD --version v2026.10.12-progress-update --exe tools/telegram-web-mpv-bridge/bilibili-live-bridge.exe --provenance "$releaseDir/verification/bridge-build-provenance.json" --notices "$releaseDir/verification/BRIDGE-THIRD-PARTY-NOTICES.txt" --output "$releaseDir/artifacts"
-& $releasePython tools/release/package_custom_update.py --verify "$releaseDir/artifacts/mpv-lazy-2026-custom-cumulative-update-v2026.10.12-progress.zip"
+& $releasePython tools/release/package_custom_update.py --ref HEAD --version v2026.10.14-update --exe tools/telegram-web-mpv-bridge/bilibili-live-bridge.exe --provenance "$releaseDir/verification/bridge-build-provenance.json" --notices "$releaseDir/verification/BRIDGE-THIRD-PARTY-NOTICES.txt" --output "$releaseDir/artifacts"
+& $releasePython tools/release/package_custom_update.py --verify "$releaseDir/artifacts/mpv-lazy-2026-custom-cumulative-update-v2026.10.14.zip"
 ```
 
-验证工具启动自己创建的冻结 EXE，使用随机本机端口检查 health、WebSocket hello 和诊断，并确认原生 Brotli 模块已收录。生成的公开构建信息只包含版本和哈希。打包工具同时校验它与 EXE、发布提交的编译输入匹配。
+验证工具启动自己创建的冻结 EXE，使用随机本机端口检查 health、WebSocket hello、HTTP 进度、完整列表注册、分块层级及快启协议，并确认原生 Brotli 模块已收录。生成的公开构建信息只包含版本和哈希。打包工具同时校验它与 EXE、发布提交的编译输入匹配。开发时生成的 `sourceRef: working-tree` 验证记录不能用于正式打包；应从已提交源码重新构建并验证，不能只修改旧记录的标志。
 
 发到本仓库的新 Release 时，显式指定目标仓库并使用新 tag。例如安装 GitHub CLI 后可在源提交已推送的情况下执行：
 
 ```powershell
-gh release create v2026.10.12-progress-update "$releaseDir/artifacts/mpv-lazy-2026-custom-cumulative-update-v2026.10.12-progress.zip" "$releaseDir/artifacts/SHA256SUMS-v2026.10.12-progress-update.txt" --repo HikigayaMan/mpv-lazy-2026-custom --target (git rev-parse HEAD) --title '2026-10-12 累计更新：双向续播与 B站历史' --notes-file docs/releases/v2026.10.12-progress-update.md
+gh release create v2026.10.14-update "$releaseDir/artifacts/mpv-lazy-2026-custom-cumulative-update-v2026.10.14.zip" "$releaseDir/artifacts/SHA256SUMS-v2026.10.14-update.txt" --repo HikigayaMan/mpv-lazy-2026-custom --target (git rev-parse HEAD) --title '2026-10-14 累计更新：完整合集、快启与暂停关闭同步' --notes-file docs/releases/v2026.10.14-update.md
 ```
 
 下面的分类包工具保留原作者默认仓库和版本，不能将其默认上传命令直接用于本仓库累计更新。
 
-当前 `.24` 源码／本机更新新增完整合集快启、重复项清理和失败恢复，尚未包含在上方 `.19` Release 中。以后打包此版时使用新的 tag 和对应构建输入，保留旧 Release；范围见 [清理与快启报告](../../docs/reports/2026-10-14-cleanup-and-fast-start.md)。当前累计包校验还要求 `frozenWebPlaylistPassed`、`frozenWebPlaylistHierarchyPassed`、`frozenWebPlaylistFastStartPassed` 均为布尔 `true`，不能仅凭源码测试替代冻结 EXE 验证。
+`.24` 引入的完整合集快启、重复项清理和失败恢复已包含在本次 `.26` 累计 Release 中；既有验证范围见 [清理与快启报告](../../docs/reports/2026-10-14-cleanup-and-fast-start.md)，同步时机调整见 [暂停／关闭报告](../../docs/reports/2026-10-14-pause-close-progress.md)。当前累计包校验还要求 `frozenWebPlaylistPassed`、`frozenWebPlaylistHierarchyPassed`、`frozenWebPlaylistFastStartPassed` 均为布尔 `true`，不能仅凭源码测试替代冻结 EXE 验证。
 
 ## `package_release.py`：分类打包脚本
 
@@ -254,7 +256,7 @@ python tools\release\smoke_test_mpv.py --no-window
 
 ## 完整合集层级与 1001 条目验证
 
-External Player **1.2.14.24** 的源码／本机更新使用完整合集、视频、分 P 层级菜单，并支持先播当前 CID、后台补齐完整列表，尚未包含在上述 `.19` 累计 Release 中。完整分 P 不设两条或 500 条硬限；每份清单公开元数据预算为 32 MiB，最多 8 个会话，通过分块注册、分页恢复和分块 IPC 传递，超过预算明确拒绝，避免输出被静默截断的合集。扩展沿用已有会话，不额外占名额。
+External Player **1.2.14.26** 与配套中继及播放器已经包含在上述 `v2026.10.14-update` 累计 Release 中，使用完整合集、视频、分 P 层级菜单，并保留 .24 引入的先播当前 CID、后台补齐完整列表。完整分 P 不设两条或 500 条硬限；每份清单公开元数据预算为 32 MiB，最多 8 个会话，通过分块注册、分页恢复和分块 IPC 传递，超过预算明确拒绝，避免输出被静默截断的合集。扩展沿用已有会话，不额外占名额。
 
 在 Windows 仓库根目录、已安装中继 Python 开发依赖的环境运行：
 
