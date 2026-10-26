@@ -32,7 +32,14 @@ class Browser:
         self.port, self.fixtures = port, fixtures
         self.client = 'progress-http-' + uuid.uuid4().hex
         self.events, self.requests, self.errors = [], [], []
+        self.next_failures = {}
         self.task = None
+
+    def fail_once(self, item_id, *, error=None, video=None):
+        require(item_id not in self.next_failures, 'A fixture failure is already pending')
+        require(bool(error) != bool(video), 'Choose a resolver error or a broken media URL')
+        self.next_failures[item_id] = {'error': error} if error else {
+            'media': {'video': video, 'audio': None, 'subtitle': None, 'variants': []}}
 
     async def post(self, request):
         data = json.dumps({'clientId': self.client, 'request': request}).encode()
@@ -56,11 +63,14 @@ class Browser:
                 for event in self.events[handled:]:
                     if event['type'] == 'resolveWebPlaylistItem':
                         self.requests.append(event)
+                        failure = self.next_failures.pop(event['itemId'], {})
                         media = dict(self.fixtures[event['itemId']])
+                        media.update(failure.get('media', {}))
                         record = event.get('resumeRecord')
                         media['position'] = (0 if record.get('completed') else record['position']) if record else (event.get('initialPosition') or 0)
                         await self.post({'type': 'submitWebPlaylistItem', 'requestId': 'resolve-' + str(event['generation']),
-                            'playlistId': event['playlistId'], 'itemId': event['itemId'], 'generation': event['generation'], 'media': media})
+                            'playlistId': event['playlistId'], 'itemId': event['itemId'], 'generation': event['generation'],
+                            **({'error': failure['error']} if 'error' in failure else {'media': media})})
                 handled = len(self.events)
                 await asyncio.sleep(.1)
         except asyncio.CancelledError:
@@ -98,6 +108,8 @@ async def run(args):
     def test_url(name):
         return base + '/' + name + '?test_signature=' + 'x' * 2600
     allowed_urls = {test_url(path.name) for path in fixtures.iterdir()}
+    broken_media = test_url('missing.mov')
+    allowed_urls.add(broken_media)
     # Only this test server's exact paths are allowed. Production retains its CDN whitelist.
     real_media_url = web_playlist.media_url
     def fixture_url(value, *, subtitle=False):
@@ -132,7 +144,7 @@ async def run(args):
         ipc = MpvPipe(pipe)
         command = [str(args.mpv), '--no-config', '--load-scripts=no', '--idle=yes', '--no-ytdl', '--pause=yes', '--vo=null', '--ao=null', '--terminal=no',
             '--input-ipc-server=' + ipc.path, '--playlist-start=1', '--log-file=' + str(run_dir / 'mpv-details.log'),
-            *['--script=' + str(REPO / 'portable_config/scripts' / name) for name in ('web_playlist.lua', 'web_progress.lua', 'quality-menu.lua')],
+            *['--script=' + str(REPO / 'portable_config/scripts' / name) for name in ('web_playlist.lua', 'web_progress.lua', 'quality-menu.lua', 'ytdl-retry.lua')],
             '--script=' + str(REPO / 'portable_config/scripts/uosc'),
             '--script-opts-append=web_playlist-id=' + playlist_id, '--script-opts-append=web_playlist-session_id=' + sid,
             '--script-opts-append=web_progress-identity=bilibili:1001:2003', '--script-opts-append=web_progress-session_id=' + sid,
@@ -145,6 +157,7 @@ async def run(args):
         require(await ipc.command(['get_property', 'playlist-count']) == 2, 'MPV did not receive two native entries')
         entries = await ipc.command(['get_property', 'playlist'])
         require([entry.get('title') for entry in entries] == ['Fixture A', 'Fixture B'], 'Native playlist titles were not preserved')
+        native_ids = [entry['id'] for entry in entries]
         await ipc.command(['set_property', 'playlist-pos', 0])
         await wait_property(ipc, prop, lambda s: s and s.get('ready') and s['identity'] == 'bilibili:1001:2002')
         await ipc.command(['seek', 7.25, 'absolute+exact'])
@@ -179,10 +192,59 @@ async def run(args):
         await ipc.command(['set_property', 'pause', False])
         await wait_property(ipc, prop, lambda s: s and s.get('ready') and s['identity'] == 'bilibili:1001:2002')
         await ipc.command(['set_property', 'pause', True])
+
+        # Include the production retry script: a failed loopback entry must not
+        # become a loadfile/replace retry that erases the complete native list.
+        await ipc.command(['set_property', 'loop-playlist', 'no'])
+        playlist_state = 'user-data/mpv-lazy/web-playlist/state'
+        playlist_current = 'user-data/mpv-lazy/web-playlist/current'
+
+        async def assert_native_ids(detail):
+            actual = await ipc.command(['get_property', 'playlist'])
+            require([entry['id'] for entry in actual] == native_ids, detail)
+
+        for kind, failure in (('resolver', {'error': 'playlist_media_unavailable'}),
+                              ('media', {'video': broken_media})):
+            # A rejected resolver is released into memory://; its end-file can
+            # replace the first resolution-failed status with media-failed.
+            expected_errors = {'web_playlist_media_failed'}
+            if kind == 'resolver':
+                expected_errors.add('web_playlist_resolution_failed')
+            before = await ipc.command(['get_property', playlist_state])
+            browser.fail_once('1001:2003', **failure)
+            await ipc.command(['set_property', 'playlist-pos', 1])
+            failed = await wait_property(ipc, playlist_state, lambda s: s and s.get('stage') == 'failed'
+                and s.get('generation', 0) > before['generation'] and s.get('error') in expected_errors)
+            require('1001:2003' not in browser.next_failures, kind + ' fixture failure was not delivered')
+            await wait_property(ipc, 'idle-active', True)
+            await asyncio.sleep(2.5)
+            await assert_native_ids(kind + ' failure/retry erased native playlist IDs')
+            after_failure = await ipc.command(['get_property', playlist_state])
+            require(after_failure.get('generation') == failed['generation'], kind + ' failure scheduled an unwanted retry')
+
+            # Fail again, then immediately select the other P. An already queued
+            # timer must never reload that healthy entry or change its native ID.
+            browser.fail_once('1001:2003', **failure)
+            await ipc.command(['playlist-play-index', '1'])
+            await wait_property(ipc, playlist_state, lambda s: s and s.get('stage') == 'failed'
+                and s.get('generation', 0) > failed['generation'] and s.get('error') in expected_errors)
+            require('1001:2003' not in browser.next_failures, kind + ' repeated fixture failure was not delivered')
+            await ipc.command(['set_property', 'playlist-pos', 0])
+            healthy = await wait_property(ipc, playlist_current, lambda s: s and s.get('stage') == 'ready'
+                and s.get('itemId') == '1001:2002')
+            await asyncio.sleep(2.5)
+            await assert_native_ids(kind + ' failure followed by selection changed native playlist IDs')
+            after_switch = await ipc.command(['get_property', playlist_current])
+            require(after_switch and after_switch.get('generation') == healthy['generation']
+                and after_switch.get('itemId') == '1001:2002', kind + ' failure timer reloaded the newly selected P')
+            require(await ipc.command(['get_property', 'playlist-pos']) == 0, kind + ' failure timer changed the selected P')
+
         require(not browser.errors, str(browser.errors))
         result = {'passed': True, 'nativePlaylistCount': 2, 'selectedSecondEntryStart': 12.5, 'manualSelection': True,
             'shuffle': True, 'uoscShuffleButtonAndNext': True, 'singleFileRepeat': True, 'playlistRepeat': True, 'qualityPreservesPlaylistAndPosition': True,
             'perItemMetadataAndProgress': True, 'longSyntheticMediaUrls': True, 'transport': 'HTTP + actual Windows IPC',
+            'retryScriptLoaded': True, 'resolverFailurePreservesNativeIds': True, 'mediaFailurePreservesNativeIds': True,
+            'failureThenSelectionHasNoLateReload': True,
             'scope': 'Isolated local media and simulated browser resolver; no actual website/account request.'}
         (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
         return result
