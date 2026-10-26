@@ -19,6 +19,12 @@ VIDEO_720 = "https://media.example.test/720.m4s?token=a%2Cb"
 VIDEO_1080 = "https://media.example.test/1080.m4s?token=c"
 AUDIO = "https://media.example.test/audio.m4s?token=d"
 
+
+def dash_edl(video, audio):
+    return (f"memory://# mpv EDL v0\n!no_clip;!no_chapters;%{len(video.encode('utf-8'))}%{video}"
+            f";!new_stream;!no_clip;!no_chapters;%{len(audio.encode('utf-8'))}%{audio}")
+
+
 MOCK = r'''
 TEST = {clock = 0, props = {}, commands = {}, messages = {}, events = {},
         observers = {}, timers = {}, bindings = {}, logs = {}, options = {}}
@@ -174,6 +180,9 @@ class QualityMenuLuaTests(unittest.TestCase):
         self.state.fire("file-loaded")
         headers = self.lua.table_from(["referer: https://www.bilibili.com/", "cookie: private"])
         self.state.props["http-header-fields"] = headers
+        playlist = self.lua.table_from([{"id": 7, "filename": VIDEO_720},
+                                        {"id": 8, "filename": VIDEO_1080}], recursive=True)
+        self.state.props.playlist = playlist
         self.open()
         items = self.menu_items()
         self.assertEqual([item.title for item in items[1:]], ["1080P", "720P"])
@@ -192,7 +201,10 @@ class QualityMenuLuaTests(unittest.TestCase):
         self.assertEqual(diagnostic.status, "loading")
         self.assertIsNone(diagnostic.activeHeight)
         self.state.fire("on_load")
-        self.assertEqual(list(self.state.props["file-local-options/audio-files"].values()), [AUDIO])
+        self.assertEqual(len(self.state.props["file-local-options/audio-files"]), 0)
+        self.assertEqual(self.state.props["stream-open-filename"], dash_edl(VIDEO_1080, AUDIO))
+        self.assertEqual(self.state.props.path, VIDEO_1080)
+        self.assertEqual([entry.id for entry in self.state.props.playlist.values()], [7, 8])
         self.assertFalse(self.state.props["file-local-options/ytdl"])
         self.assertEqual(list(self.state.props["http-header-fields"].values()),
                          ["referer: https://www.bilibili.com/", "cookie: private"])
@@ -209,6 +221,51 @@ class QualityMenuLuaTests(unittest.TestCase):
         self.state.props.path = VIDEO_1080
         self.state.fire("on_load")
         self.assertEqual(len(self.state.props["file-local-options/audio-files"]), 0)
+        self.assertEqual(self.state.props["stream-open-filename"], VIDEO_1080)
+
+    def test_initial_browser_dash_edl_quotes_signed_delimiters_and_utf8_bytes(self):
+        video = "https://media.example.test/画面.m4s?sig=a,b;!new_stream&token=%25"
+        audio = "https://media.example.test/声音.m4s?sig=c,d;!no_clip"
+        self.load(video, variants=[{"url": video, "audio_url": audio}])
+        self.state.props["file-local-options/audio-files"] = self.lua.table_from([audio])
+        self.state.fire("on_load")
+        self.assertEqual(self.state.props["stream-open-filename"], dash_edl(video, audio))
+        self.assertEqual(self.state.props.path, video)
+        self.assertEqual(len(self.state.props["file-local-options/audio-files"]), 0)
+        self.assertFalse(any(command[0] in ("loadfile", "audio-add") for command in self.commands()))
+
+    def test_initial_bilibili_pair_without_optional_variants_uses_edl(self):
+        video = "https://upos-sz.example.bilivideo.com/video.m4s?sig=a,b;c"
+        audio = "https://upos-hz.example.bilivideo.cn/audio.m4s?sig=d,e;f"
+        for option in ("file-local-options/audio-files", "options/audio-files"):
+            with self.subTest(option=option):
+                self.load(video)
+                self.state.props[option] = self.lua.table_from([audio])
+                headers = self.lua.table_from(["referer: https://www.bilibili.com/"])
+                self.state.props["http-header-fields"] = headers
+                self.state.fire("on_load")
+                self.assertEqual(self.state.props["stream-open-filename"], dash_edl(video, audio))
+                self.assertEqual(len(self.state.props["file-local-options/audio-files"]), 0)
+                self.assertEqual(list(self.state.props["http-header-fields"].values()),
+                                 ["referer: https://www.bilibili.com/"])
+                self.assertEqual(self.state.props.path, video)
+
+    def test_bilibili_pair_fallback_preserves_unrelated_or_multiple_external_audio(self):
+        video = "https://upos.example.bilivideo.com/video.m4s"
+        audio = "https://upos.example.bilivideo.com/audio.m4s"
+        for path, audios, ytdl in ((VIDEO_720, [AUDIO], False),
+                                   (video, [AUDIO], False),
+                                   (video, [audio, audio + "?second"], False),
+                                   (video, [audio], True),
+                                   ("https://bilivideo.com.evil.test/video.m4s", [audio], False),
+                                   ("https://user@bilivideo.com/video.m4s", [audio], False)):
+            with self.subTest(path=path, audios=audios, ytdl=ytdl):
+                self.load(path)
+                self.state.props.ytdl = ytdl
+                self.state.props["file-local-options/audio-files"] = self.lua.table_from(audios)
+                self.state.fire("on_load")
+                self.assertIsNone(self.state.props["stream-open-filename"])
+                self.assertEqual(list(self.state.props["file-local-options/audio-files"].values()), audios)
 
     def test_vod_switch_resumes_position_but_live_switch_does_not_seek(self):
         for duration, live_active, expected_seek in [(120, False, True), (None, False, False), (120, True, False)]:

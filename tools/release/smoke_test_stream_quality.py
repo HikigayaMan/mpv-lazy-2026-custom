@@ -194,11 +194,14 @@ async def run(args) -> dict:
                                 "sent": session.sent})
                 tracks = await ipc.command(['get_property', 'track-list'])
                 audio_tracks = [track for track in tracks if track.get('type') == 'audio' and track.get('selected')]
-                require(bool(audio_tracks) == bool(variant.get('audio_url')), 'external audio selection failed')
+                require(bool(audio_tracks) == bool(variant.get('audio_url')), 'DASH audio selection failed')
                 if audio_tracks:
-                    require(audio_tracks[0].get('external') and
-                            audio_tracks[0].get('external-filename') == variant['audio_url'],
-                            'independent audio did not survive quality reload')
+                    source = await ipc.command(['get_property', 'stream-open-filename'])
+                    require(not audio_tracks[0].get('external') and source.startswith('memory://# mpv EDL v0\n')
+                            and variant['audio_url'] in source,
+                            'DASH audio did not join the video seek timeline after quality reload')
+                    require(not await ipc.command(['get_property', 'options/audio-files']),
+                            'EDL retained a duplicate external audio track')
             await ipc.command(['script-message-to', 'quality_menu', 'video-format-set',
                                variants[-1]['url'], variants[0]['url']])
             await wait_property(ipc, 'height', 360)

@@ -718,6 +718,25 @@ local function is_valid_stream_url(url)
         and not url:find('[%c%s]') and url:match('^https?://[^/?#]+/.+') ~= nil
 end
 
+local function dash_source(video, audio)
+    if not audio then return video end
+    -- A shared demuxer timeline keeps keyframe seeks in the two DASH tracks
+    -- aligned. Memory-backed EDL also works for network-playlist entries without
+    -- relaxing their origin restrictions. Length quoting preserves signed URLs.
+    return 'memory://# mpv EDL v0\n!no_clip;!no_chapters;%' .. #video .. '%' .. video
+        .. ';!new_stream;!no_clip;!no_chapters;%' .. #audio .. '%' .. audio
+end
+
+local function is_bilibili_stream_url(url)
+    if not is_valid_stream_url(url) then return false end
+    local host = url:match('^https?://([^/?#]+)'):lower():gsub(':%d+$', '')
+    if host:find('@', 1, true) then return false end
+    for _, domain in ipairs({'bilivideo.com', 'bilivideo.cn', 'bilivideo.net', 'hdslb.com'}) do
+        if host == domain or host:sub(-#domain - 1) == '.' .. domain then return true end
+    end
+    return false
+end
+
 local function parse_stream_variants(value, raw_json)
     if value == '' then return nil end
     if type(value) ~= 'string' or #value > 24576 + OPTION_LENGTH_PREFIX_LIMIT then
@@ -1952,11 +1971,22 @@ mp.add_hook('on_load', 9, function()
     local data = url_data[path]
     local browser_variant = stream_variants and find_hls_variant(path, stream_variants)
     if browser_variant then
-        -- file-local options prevent a previous DASH audio track leaking into
-        -- a muxed FLV/HLS quality. HTTP headers remain those supplied at launch.
-        mp.set_property_native('file-local-options/audio-files',
-            browser_variant.audio_url and {browser_variant.audio_url} or {})
+        mp.set_property('stream-open-filename', dash_source(path, browser_variant.audio_url))
+        -- The EDL includes audio; clear inherited --audio-file as well as the
+        -- previous DASH track when switching to a muxed FLV/HLS quality.
+        mp.set_property_native('file-local-options/audio-files', {})
         mp.set_property_bool('file-local-options/ytdl', false)
+        return
+    end
+
+    -- A long Windows launch may omit the optional variant list. The current
+    -- browser-authenticated Bilibili video/audio pair still needs one timeline.
+    local audio_files = mp.get_property_native('file-local-options/audio-files')
+        or mp.get_property_native('options/audio-files')
+    if mp.get_property_bool('ytdl', true) == false and is_bilibili_stream_url(path)
+        and type(audio_files) == 'table' and #audio_files == 1 and is_bilibili_stream_url(audio_files[1]) then
+        mp.set_property('stream-open-filename', dash_source(path, audio_files[1]))
+        mp.set_property_native('file-local-options/audio-files', {})
         return
     end
 

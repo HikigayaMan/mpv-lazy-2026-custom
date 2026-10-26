@@ -6,6 +6,7 @@ used. The hooks model MPV's explicit defer/cont contract, including late replies
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import unittest
 
@@ -30,6 +31,26 @@ MANIFEST = "user-data/mpv-lazy/web-playlist-manifest"
 MANIFEST_ACK = "user-data/mpv-lazy/web-playlist/manifest-ack"
 EXTEND_ACK = "user-data/mpv-lazy/web-playlist/extend-ack"
 METADATA_STATE = "user-data/mpv-lazy/web-playlist/metadata-state"
+
+
+def edl_sources(source):
+    """Read length-quoted EDL URLs as bytes, including literal separators."""
+    data = source.encode("utf-8").removeprefix(b"memory://# mpv EDL v0\n")
+    sources = []
+    while data:
+        data = data.removeprefix(b"!no_clip;!no_chapters;")
+        prefix = re.match(rb"%(\d+)%", data)
+        if not prefix:
+            raise AssertionError("missing EDL URL byte length")
+        size = int(prefix[1])
+        data = data[prefix.end():]
+        sources.append(data[:size].decode("utf-8"))
+        data = data[size:]
+        if data:
+            if not data.startswith(b";!new_stream;"):
+                raise AssertionError("invalid EDL stream boundary")
+            data = data[len(b";!new_stream;"):]
+    return sources
 
 MOCK = r'''
 T = {props={}, opts={}, option_values={}, events={}, observers={}, hooks={},
@@ -204,7 +225,10 @@ class WebPlaylistLuaTests(LuaPlayerHarness, unittest.TestCase):
         response = self.resolve()
         self.assertEqual((hook.deferred, hook.continued), (1, 1))
         self.assert_no_request()
-        self.assertEqual(self.t.props["stream-open-filename"], response["media"]["video"])
+        self.assertTrue(self.t.props["stream-open-filename"].startswith("memory://# mpv EDL v0\n"))
+        self.assertEqual(edl_sources(self.t.props["stream-open-filename"]),
+                         [response["media"]["video"], response["media"]["audio"]])
+        self.assertEqual(self.t.props.path, self.path())
         self.t.messages["web-playlist-resolved"](json.dumps(response))
         self.t.advance(30)
         self.assertEqual(hook.continued, 1)
@@ -296,7 +320,9 @@ class WebPlaylistLuaTests(LuaPlayerHarness, unittest.TestCase):
         self.t.props["options/script-opts"] = self.to_lua({"cid": "stale", "other-script-setting": "keep"})
         self.begin()
         self.resolve()
-        self.assertEqual(list(self.t.props["file-local-options/audio-files"].values()), [self.media()["audio"]])
+        self.assertEqual(edl_sources(self.t.props["stream-open-filename"]),
+                         [self.media()["video"], self.media()["audio"]])
+        self.assertEqual(len(self.t.props["file-local-options/audio-files"]), 0)
         self.assertEqual(list(self.t.props["file-local-options/sub-files"].values()), [self.media()["subtitle"]])
         self.begin("123:789")
         media = self.media("123:789", audio=None, subtitle=None, title="Movie Star", position=0)
@@ -312,6 +338,31 @@ class WebPlaylistLuaTests(LuaPlayerHarness, unittest.TestCase):
         self.assertEqual(float(self.t.props["file-local-options/start"]), 0)
         self.assertFalse(self.t.props["file-local-options/ytdl"])
         self.assertEqual(list(self.t.props["file-local-options/http-header-fields"].values()), ["Referer: https://www.bilibili.com/"])
+
+    def test_dash_edl_preserves_signed_url_delimiters_and_utf8_bytes(self):
+        self.load()
+        self.begin()
+        media = self.media(video="https://media.example.test/视频.m4s?token=one,two;!new_stream;%25",
+                           audio="https://media.example.test/声音.m4s?token=three,four;!no_clip")
+        self.resolve(media)
+        self.assertEqual(edl_sources(self.t.props["stream-open-filename"]), [media["video"], media["audio"]])
+        self.assertEqual(self.t.props.path, self.path())
+        self.assertEqual(self.t.props[CURRENT].audio, media["audio"])
+
+    def test_quality_reload_replaces_both_edl_streams_without_external_audio(self):
+        self.load()
+        self.begin()
+        media = self.media()
+        media["variants"][1]["audio_url"] = "https://media.example.test/high-audio.m4s?sig=a,b;c"
+        self.resolve(media)
+        self.t.event("file-loaded")
+        self.t.props["time-pos"] = 47.25
+        self.t.messages["web-playlist-quality"]("https://media.example.test/high.m4s")
+        self.begin()
+        self.assertEqual(edl_sources(self.t.props["stream-open-filename"]),
+                         ["https://media.example.test/high.m4s", media["variants"][1]["audio_url"]])
+        self.assertEqual(len(self.t.props["file-local-options/audio-files"]), 0)
+        self.assertEqual(float(self.t.props["file-local-options/start"]), 47.25)
 
     def test_invalid_media_fails_closed_and_releases_hook(self):
         for changes in ({"identity": "bilibili:123:789"}, {"cid": "789"}, {"video": "file:///private"},

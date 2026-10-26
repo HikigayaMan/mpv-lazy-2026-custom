@@ -28,6 +28,12 @@
 
 已有本功能的安装可以单独更新该 Lua 文件，重新打开播放器后生效，无需更换中继或重新导入用户脚本。它修复错误重试与列表丢失；若仍提示“列表视频解析失败”，请保留原网页并重新选择该条目，以便重新解析媒体源。
 
+### 拖动或快退后声音延迟出现
+
+旧加载方式用 `audio-files` 单独打开 B 站 DASH 音轨。按关键帧快退时，视频可能落在请求位置之前，音频却跳到请求位置，形成几秒静音。当前 `web_playlist.lua` 与 `quality-menu.lua` 将浏览器提供的视频和音轨放入同一 EDL 时间线，使跳转与缓存共同处理；合集、单视频和切换画质均使用此方式，原生条目、CID、字幕、续播点和请求头继续保留。
+
+更新这两份 Lua 后重新打开播放器即可，无需重装中继或用户脚本。未提供可选画质列表的 B 站单视频也会合并当前唯一音轨。普通本地外置音轨不受影响。该修改针对 MPV 已确认的[外置音轨快退静音问题](https://github.com/mpv-player/mpv/issues/18369)，使用[官方 EDL 多轨机制](https://github.com/mpv-player/mpv/blob/master/DOCS/edl-mpv.rst#separate-files-for-tracks)，不修改音频延迟或全局跳转快捷键。
+
 ## 更新文件
 
 下载累计包 `mpv-lazy-2026-custom-cumulative-update-v2026.10.14.zip` 并用 `SHA256SUMS-v2026.10.14-update.txt` 校验，关闭本安装的 MPV 和中继后合并到 `mpv.exe` 所在目录。包内包括：

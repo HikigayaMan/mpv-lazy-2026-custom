@@ -303,9 +303,21 @@ local function apply_media(media, item)
         or tostring(media.cid or '') ~= item:match(':(%d+)$') or not http_url(media.video)
         or media.audio and not http_url(media.audio) or media.subtitle and not http_url(media.subtitle)
         or not finite(tonumber(media.position)) then return false end
-    mp.set_property('stream-open-filename', media.video)
+    local source = media.video
+    if media.audio then
+        -- Separate audio-files seek to the requested timestamp while a fast
+        -- video seek can land on an earlier keyframe, producing seconds of
+        -- silence. EDL gives both DASH tracks one seek/cache timeline, as in
+        -- MPV's ytdl hook. Length quoting preserves signed URL delimiters.
+        -- A network playlist may only reference network-origin streams. Supply
+        -- EDL as in-memory data so its HTTPS children keep that restriction;
+        -- the edl:// protocol itself is classified as a filesystem source.
+        source = 'memory://# mpv EDL v0\n!no_clip;!no_chapters;%' .. #media.video .. '%' .. media.video
+            .. ';!new_stream;!no_clip;!no_chapters;%' .. #media.audio .. '%' .. media.audio
+    end
+    mp.set_property('stream-open-filename', source)
     mp.set_property_bool('file-local-options/ytdl', false)
-    mp.set_property_native('file-local-options/audio-files', media.audio and {media.audio} or {})
+    mp.set_property_native('file-local-options/audio-files', {})
     mp.set_property_native('file-local-options/sub-files', media.subtitle and {media.subtitle} or {})
     mp.set_property('file-local-options/force-media-title', tostring(media.title or item))
     mp.set_property('file-local-options/start', tostring(media.position))

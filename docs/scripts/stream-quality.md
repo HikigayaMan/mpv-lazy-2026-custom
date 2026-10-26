@@ -13,6 +13,8 @@ External Player `1.2.14.19` 与本仓库的 `quality-menu.lua` 配合使用。�
 
 Bilibili 视频 DASH 的独立音轨会随品质切换保留。直播切换品质时保留弹幕会话和显示／隐藏选择，清空旧时间轴，丢弃加载期间的弹幕；中继确认新流后允许下一次切换。打开其他文件仍会结束直播弹幕会话。表情继续以消息中的文字名称显示。
 
+当前播放器端将浏览器提供的 DASH 视频和音轨放入同一 EDL 时间线，避免拖动或快退时外置音轨的几秒静音。切换画质时同时替换两条轨道，切到没有独立音轨的源则清理旧轨道；无可选画质列表的 B 站单视频也适用。此修复仅需更新 `quality-menu.lua` 和合集使用的 `web_playlist.lua` 后重开播放器，详见[音频跳转修复](./web-playlist.md#拖动或快退后声音延迟出现)。
+
 ## 只有一个档位或无法加载
 
 菜单只显示当前账号实际取得的源；页面展示的付费、登录或不可用档位不会自动获得播放权限。单独一条视频直链也不能恢复未交接的其他品质。
@@ -25,9 +27,12 @@ Bilibili 视频 DASH 的独立音轨会随品质切换保留。直播切换品�
 node --test tools/telegram-web-mpv-bridge/test_bilibili_live_handoff.mjs tools/telegram-web-mpv-bridge/test_bilibili_stream_quality.mjs
 .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe -m unittest discover -s tools\release -p "test_quality_menu_lua.py"
 .\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe tools\release\smoke_test_stream_quality.py --mpv "<完整包路径>\mpv.exe" --output-dir tools\telegram-web-mpv-bridge\build\quality-smoke
+.\tools\telegram-web-mpv-bridge\.venv\Scripts\python.exe tools\release\smoke_test_bilibili_audio_seek.py --mpv "<完整包路径>\mpv.exe" --ffmpeg "<支持 libx264 和 AAC 的 ffmpeg.exe>" --output-dir tools\telegram-web-mpv-bridge\build\audio-seek-smoke
 ```
 
 真实播放器冒烟使用本地 HTTP 视频、独立音轨和模拟直播消息，覆盖 360p → 720p → 1440p → 360p 的实际解码尺寸、菜单、请求头、音轨清理和弹幕连续性；它不代表实际网站联机复测。
+
+音频跳转冒烟另生成长关键帧间隔画面和非静音 AAC，对照旧外置音轨、直接 EDL 与合集使用的内存 EDL；通过真实播放时钟和音频启动日志检查快退后的多秒静音，不用全关键帧素材代替该回归。
 
 2026-10-11 另在真实 Bilibili 直播房间 1017 完成新版浏览器交接：网页与 MPV 均为 1920×1080，菜单显示三档，1080p → 720p → 1080p 两次切换后均收到新的自然弹幕，并保持同一会话。
 
