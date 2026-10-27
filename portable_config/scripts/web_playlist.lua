@@ -287,6 +287,7 @@ local function release_pending(code)
     if not request then return end
     pending = nil
     if request.timer then request.timer:kill() end
+    if request.abort_timer then request.abort_timer:kill() end
     mp.set_property_native(REQUEST, {})
     if code then
         current = nil
@@ -298,6 +299,20 @@ local function release_pending(code)
     end
     request.hook:cont()
 end
+local function cancel_pending()
+    if not pending then return end
+    current, quality_reload = nil, nil
+    mp.set_property_native(CURRENT, nil)
+    mp.set_property_native('user-data/mpv-lazy/web-playlist/quality-switch', nil)
+    state('cancelled', pending.itemId)
+    release_pending()
+end
+-- MPV waits for deferred on_load hooks before it emits shutdown. Release the
+-- browser wait when quit/stop interrupts loading, rather than at shutdown or
+-- the resolve timeout. Re-read the property to reject a queued old notification.
+mp.observe_property('playback-abort', 'bool', function(_, aborted)
+    if aborted and mp.get_property_bool('playback-abort', false) then cancel_pending() end
+end)
 local function apply_media(media, item)
     if type(media) ~= 'table' or media.identity ~= 'bilibili:' .. item
         or tostring(media.cid or '') ~= item:match(':(%d+)$') or not http_url(media.video)
@@ -359,10 +374,20 @@ mp.add_hook('on_load', 5, function(hook)
     mp.set_property_native(CURRENT, nil)
     hook:defer()
     pending = {hook = hook, itemId = item, generation = generation}
-    local expected_generation = generation
+    local request = pending
     pending.timer = mp.add_timeout(math.min(60, math.max(5, tonumber(opts.resolve_timeout) or 20)), function()
-        if pending and pending.generation == expected_generation then release_pending('web_playlist_timeout') end
+        if pending == request then
+            if mp.get_property_bool('playback-abort', false) then cancel_pending()
+            else release_pending('web_playlist_timeout') end
+        end
     end)
+    -- Some MPV versions do not notify playback-abort observers while waiting
+    -- inside on_load. Poll only for the lifetime of this deferred request.
+    pending.abort_timer = mp.add_periodic_timer(0.05, function()
+        if pending == request
+            and mp.get_property_bool('playback-abort', false) then cancel_pending() end
+    end)
+    if mp.get_property_bool('playback-abort', false) then cancel_pending(); return end
     state('resolving', item)
     mp.set_property_native(REQUEST, {playlistId = opts.id, itemId = item, generation = generation})
 end)
@@ -371,6 +396,7 @@ mp.register_script_message('web-playlist-resolved', function(raw)
     local result = utils.parse_json(raw or '')
     if not pending or type(result) ~= 'table' or result.playlistId ~= opts.id
         or result.itemId ~= pending.itemId or result.generation ~= pending.generation then return end
+    if mp.get_property_bool('playback-abort', false) then cancel_pending(); return end
     if result.error or not apply_media(result.media, pending.itemId) then
         release_pending('web_playlist_resolution_failed')
     else
@@ -414,5 +440,5 @@ end)
 mp.register_event('end-file', function(event)
     if event and event.reason == 'error' then state('failed', current and current.itemId, 'web_playlist_media_failed') end
 end)
-mp.register_event('shutdown', function() release_pending('web_playlist_player_closed') end)
+mp.register_event('shutdown', cancel_pending)
 mp.set_property_native(REQUEST, {})

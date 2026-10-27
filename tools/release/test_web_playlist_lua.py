@@ -451,6 +451,123 @@ class WebPlaylistLuaTests(LuaPlayerHarness, unittest.TestCase):
         self.t.advance(60)
         self.assertEqual(hook.continued, 1)
 
+    def test_quit_during_resolution_releases_hook_before_shutdown_without_error_osd(self):
+        self.load()
+        hook = self.begin()
+        self.t.props["playback-abort"] = True
+        self.t.observe("playback-abort")
+        self.assertEqual(hook.continued, 1)
+        self.assert_no_request()
+        self.assertIsNone(self.t.props[CURRENT])
+        self.assertEqual(self.t.props[STATE].stage, "cancelled")
+        self.assertIsNone(self.t.props[STATE].error)
+        self.assertFalse(self.t.timers[1].enabled)
+        self.assertEqual(self.commands(), [])
+
+    def test_cancelled_resolution_ignores_late_reply_and_queued_timer(self):
+        self.load()
+        hook = self.begin()
+        timer = self.t.timers[1]
+        response = {"playlistId": PLAYLIST_ID, "itemId": "123:456", "generation": 1, "media": self.media()}
+        self.t.props["playback-abort"] = True
+        self.t.observe("playback-abort")
+        self.t.messages["web-playlist-resolved"](json.dumps(response))
+        timer.callback()
+        self.t.observe("playback-abort")
+        self.t.event("shutdown")
+        self.t.advance(60)
+        self.assertEqual(hook.continued, 1)
+        self.assertIsNone(self.t.props["stream-open-filename"])
+        self.assertEqual(self.t.props[STATE].stage, "cancelled")
+        self.assertEqual(self.commands(), [])
+
+    def test_old_abort_notification_and_timeout_do_not_cancel_new_load(self):
+        self.load()
+        first = self.begin()
+        old_timer = self.t.timers[1]
+        self.t.props["playback-abort"] = True
+        self.t.observe("playback-abort")
+        self.t.props["playback-abort"] = False
+        second = self.begin("123:789")
+        self.t.observers["playback-abort"]("playback-abort", True)
+        old_timer.callback()
+        self.assertEqual(first.continued, 1)
+        self.assertEqual(second.continued, 0)
+        self.assertEqual(self.t.props[REQUEST].itemId, "123:789")
+        self.resolve()
+        self.assertEqual(second.continued, 1)
+        self.assertEqual(self.t.props[CURRENT].identity, "bilibili:123:789")
+
+    def test_playback_abort_does_not_clear_healthy_current_progress_context(self):
+        self.load()
+        self.begin()
+        self.resolve()
+        self.t.event("file-loaded")
+        self.t.props["playback-abort"] = True
+        self.t.observe("playback-abort")
+        self.assertEqual(self.t.props[CURRENT].identity, "bilibili:123:456")
+        self.assertEqual(self.t.props[CURRENT].stage, "ready")
+        self.assertEqual(self.t.props[STATE].stage, "ready")
+        self.assertEqual(self.commands(), [])
+
+    def test_already_aborted_load_never_publishes_browser_request(self):
+        self.load()
+        self.t.props["playback-abort"] = True
+        hook = self.begin()
+        self.assertEqual((hook.deferred, hook.continued), (1, 1))
+        self.assert_no_request()
+        self.assertEqual(self.t.props[STATE].stage, "cancelled")
+
+    def test_reply_before_abort_observer_does_not_start_cancelled_media(self):
+        self.load()
+        hook = self.begin()
+        self.t.props["playback-abort"] = True
+        self.resolve()
+        self.assertEqual(hook.continued, 1)
+        self.assertIsNone(self.t.props["stream-open-filename"])
+        self.assertEqual(self.t.props[STATE].stage, "cancelled")
+
+    def test_timeout_before_abort_observer_cancels_without_failure(self):
+        self.load()
+        hook = self.begin()
+        self.t.props["playback-abort"] = True
+        self.t.advance(20)
+        self.assertEqual(hook.continued, 1)
+        self.assertEqual(self.t.props[STATE].stage, "cancelled")
+        self.assertEqual(self.commands(), [])
+
+    def test_false_playback_abort_keeps_resolution_pending(self):
+        self.load()
+        hook = self.begin()
+        self.t.props["playback-abort"] = False
+        self.t.observe("playback-abort")
+        self.assertEqual(hook.continued, 0)
+        self.assertEqual(self.t.props[REQUEST].itemId, "123:456")
+
+    def test_abort_poll_releases_hook_when_mp_does_not_notify_observer(self):
+        self.load()
+        hook = self.begin()
+        self.t.props["playback-abort"] = True
+        self.t.advance(.05)
+        self.assertEqual(hook.continued, 1)
+        self.assert_no_request()
+        self.assertEqual(self.t.props[STATE].stage, "cancelled")
+        self.assertFalse(self.t.timers[2].enabled)
+        self.assertEqual(self.commands(), [])
+
+    def test_resolved_request_kills_abort_poll_and_old_callback_cannot_cancel_next(self):
+        self.load()
+        first = self.begin()
+        abort_timer = self.t.timers[2]
+        self.resolve()
+        self.assertFalse(abort_timer.enabled)
+        second = self.begin("123:789")
+        self.t.props["playback-abort"] = True
+        abort_timer.callback()
+        self.assertEqual(first.continued, 1)
+        self.assertEqual(second.continued, 0)
+        self.assertEqual(self.t.props[REQUEST].itemId, "123:789")
+
 
 @unittest.skipIf(LuaRuntime is None, "lupa.lua51 is required")
 class WebPlaylistManifestLuaTests(LuaPlayerHarness, unittest.TestCase):

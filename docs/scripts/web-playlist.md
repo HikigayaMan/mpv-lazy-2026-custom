@@ -34,6 +34,12 @@
 
 更新这两份 Lua 后重新打开播放器即可，无需重装中继或用户脚本。未提供可选画质列表的 B 站单视频也会合并当前唯一音轨。普通本地外置音轨不受影响。该修改针对 MPV 已确认的[外置音轨快退静音问题](https://github.com/mpv-player/mpv/issues/18369)，使用[官方 EDL 多轨机制](https://github.com/mpv-player/mpv/blob/master/DOCS/edl-mpv.rst#separate-files-for-tracks)，不修改音频延迟或全局跳转快捷键。
 
+### 自动连播加载下一 P 时关闭卡住
+
+上一 P 播完后，播放器会在加载钩子中等待浏览器解析下一 P。旧版只在 `shutdown` 时释放等待，但 MPV 又会等加载钩子结束才能进入退出阶段，因此可能一直等到约 20 秒的解析超时。当前 `web_playlist.lua` 在收到停止信号时立即取消等待、清除解析请求和定时器，让窗口正常退出。迟到的浏览器结果不会重新打开已取消条目；上一 P 的完成记录继续保留，未加载成功的下一 P 不生成虚假的观看进度。
+
+已有合集功能的安装只需更新 `web_playlist.lua` 并重开播放器；自动连播和正常续播仍保留。
+
 ## 更新文件
 
 下载累计包 `mpv-lazy-2026-custom-cumulative-update-v2026.10.14.zip` 并用 `SHA256SUMS-v2026.10.14-update.txt` 校验，关闭本安装的 MPV 和中继后合并到 `mpv.exe` 所在目录。包内包括：
@@ -55,5 +61,11 @@
 `test_web_playlist.mjs`、`test_web_playlist.py` 与播放列表 Lua 测试覆盖完整层级、分块重试、归属、迟到请求、各项媒体参数和进度隔离。`smoke_test_web_playlist_hierarchy.py` 使用真实 MPV、1001 条目、3 P／4 P 视频，验证单 P 没有子层、当前祖先自动展开、折叠不改变原生列表，以及乱序后点选仍对应正确条目。既有真实 MPV 冒烟继续验证循环和品质切换，测试均使用长模拟签名地址。真实页面范围见对应验证报告。
 
 `test_ytdl_retry_lua.py` 覆盖合集条目及媒体直链不触发通用重试、原生列表重试保留、换片和停止后取消旧回调。`smoke_test_web_playlist.py` 同时加载实际重试脚本，注入解析失败与媒体 404，并检查原生列表和下一分 P 不受延迟重试影响。
+
+`smoke_test_web_playlist_close.py` 使用真实 MPV，让第一 P 自然结束后进入下一 P 的未完成解析，随后测量关闭耗时，并检查上一 P 的完成记录和下一 P 的进度隔离：
+
+```powershell
+python tools/release/smoke_test_web_playlist_close.py --mpv '<完整安装>/mpv.exe' --fixture '<已有本地MOV素材>' --output-dir tools/telegram-web-mpv-bridge/build/web-playlist-close-smoke
+```
 
 给上述层级冒烟添加 `--fast-start`，会先启动一个当前条目，再在同一实例扩展到完整清单，并检查当前原生 ID、播放位置、暂停、品质与轨道没有因扩展而重载。运行方法见 [发布验证说明](../../tools/release/README.md#完整合集层级与-1001-条目验证)。最新快启与清理范围见 [2026-10-14 报告](../reports/2026-10-14-cleanup-and-fast-start.md)；`.21` 的既有真实合集验证保留在 [2026-10-13 报告](../reports/2026-10-13-web-playlist-hierarchy.md)。
