@@ -1,1 +1,1 @@
-{"sc_mode":1,"gpu":0,"updated_by":"rife_runtime_menu","updated_at":"2026-06-14 22:33:29","gpu_t":2,"ws_size":0,"lk_fmt":false,"turbo":1,"model":4251,"model_label":"4.25 lite","flow_scale":1,"h_pre":1920,"fps_num":2,"fps_den":1}
+{"model":46,"model_label":"4.6","turbo":2,"flow_scale":1,"h_pre":1440,"target_fps":60,"fps_num":2,"fps_den":1,"sc_mode":1,"gpu":0,"gpu_t":2,"ws_size":0,"lk_fmt":false,"updated_by":"codex_user_config","updated_at":"2026-10-27"}
